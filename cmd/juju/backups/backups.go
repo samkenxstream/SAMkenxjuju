@@ -9,7 +9,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/version/v2"
@@ -97,15 +96,10 @@ var getAPI = func(c *CommandBase) (APIClient, error) {
 	return client, nil
 }
 
-// dumpMetadata writes the formatted backup metadata to stdout.
-func (c *CommandBase) dumpMetadata(ctx *cmd.Context, result *params.BackupsMetadataResult) {
-	ctx.Verbosef(c.metadata(result))
-}
-
 const backupMetadataTemplate = `
 backup format version: {{.FormatVersion}} 
 juju version:          {{.JujuVersion}} 
-series:                {{.Series}} 
+base:                  {{.Base}} 
 
 controller UUID:       {{.ControllerUUID}}{{if (gt .HANodes 1)}} 
 controllers in HA:     {{.HANodes}}{{end}}
@@ -138,7 +132,7 @@ type MetadataParams struct {
 	MachineID      string
 	Hostname       string
 	JujuVersion    version.Number
-	Series         string
+	Base           string
 }
 
 func (c *CommandBase) metadata(result *params.BackupsMetadataResult) string {
@@ -157,7 +151,7 @@ func (c *CommandBase) metadata(result *params.BackupsMetadataResult) string {
 		result.Machine,
 		result.Hostname,
 		result.Version,
-		result.Series,
+		result.Base,
 	}
 	t := template.Must(template.New("template").Parse(backupMetadataTemplate))
 	content := bytes.Buffer{}

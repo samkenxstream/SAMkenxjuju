@@ -66,10 +66,14 @@ type modelsCommand struct {
 // Info implements Command.Info
 func (c *modelsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "models",
-		Purpose: "Lists models a user can access on a controller.",
-		Doc:     listModelsDoc,
-		Aliases: []string{"list-models"},
+		Name:     "models",
+		Purpose:  "Lists models a user can access on a controller.",
+		Doc:      listModelsDoc,
+		Aliases:  []string{"list-models"},
+		Examples: listModelsExamples,
+		SeeAlso: []string{
+			"add-model",
+		},
 	})
 }
 
@@ -91,12 +95,10 @@ func (c *modelsCommand) SetFlags(f *gnuflag.FlagSet) {
 func (c *modelsCommand) Run(ctx *cmd.Context) error {
 	controllerName, err := c.ControllerName()
 	if err != nil {
-		ctx.Infof(err.Error())
 		return errors.Trace(err)
 	}
 	accountDetails, err := c.CurrentAccountDetails()
 	if err != nil {
-		ctx.Infof(err.Error())
 		return err
 	}
 	c.loggedInUser = accountDetails.User
@@ -105,9 +107,7 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 		c.user = accountDetails.User
 	}
 	if !names.IsValidUser(c.user) {
-		err := errors.NotValidf("user %q", c.user)
-		ctx.Infof(err.Error())
-		return err
+		return errors.NotValidf("user %q", c.user)
 	}
 
 	c.runVars = modelsRunValues{
@@ -119,14 +119,12 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 
 	modelmanagerAPI, err := c.getModelManagerAPI()
 	if err != nil {
-		ctx.Infof(err.Error())
 		return errors.Trace(err)
 	}
 	defer modelmanagerAPI.Close()
 
 	haveModels, err := c.getModelSummaries(ctx, modelmanagerAPI, now)
 	if err != nil {
-		ctx.Infof(err.Error())
 		return err
 	}
 	if !haveModels && c.out.Name() == "tabular" {
@@ -289,7 +287,6 @@ func (c *modelsCommand) modelSummaryFromParams(apiSummary base.UserModelSummary,
 
 	if apiSummary.ProviderType != "" {
 		summary.ProviderType = apiSummary.ProviderType
-
 	}
 	if apiSummary.CloudCredential != "" {
 		if !names.IsValidCloudCredential(apiSummary.CloudCredential) {
@@ -474,14 +471,9 @@ The models listed here are either models you have created yourself, or
 models which have been shared with you. Default values for user and
 controller are, respectively, the current user and the current controller.
 The active model is denoted by an asterisk.
+`
 
-Examples:
-
+const listModelsExamples = `
     juju models
     juju models --user bob
-
-See also:
-    add-model
-    share-model
-    unshare-model
 `

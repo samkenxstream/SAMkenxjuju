@@ -1,18 +1,12 @@
 // Copyright 2013 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package simplestreams supports locating, parsing, and filtering metadata in simplestreams format.
-// See http://launchpad.net/simplestreams and in particular the doc/README file in that project for more information
-// about the file formats.
-//
-// Users of this package provide an empty struct and a matching function to be able to query and return a list
-// of typed values for a given criteria.
 package simplestreams
 
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -128,7 +122,7 @@ type CloudMetadata struct {
 }
 
 type MetadataCatalog struct {
-	Series     string `json:"release,omitempty"`
+	Release    string `json:"release,omitempty"`
 	Version    string `json:"version,omitempty"`
 	Arch       string `json:"arch,omitempty"`
 	RegionName string `json:"region,omitempty"`
@@ -440,7 +434,6 @@ func (s Simplestreams) GetMetadata(sources []DataSource, params GetMetadataParam
 
 // getMaybeSignedMetadata returns metadata records matching the specified constraint in params.
 func (s Simplestreams) getMaybeSignedMetadata(source DataSource, params GetMetadataParams, signed bool) ([]interface{}, *ResolveInfo, error) {
-
 	makeIndexPath := func(basePath string) string {
 		pathNoSuffix := fmt.Sprintf(basePath, params.StreamsVersion)
 		indexPath := pathNoSuffix + UnsignedSuffix
@@ -541,7 +534,7 @@ func fetchData(source DataSource, path string, requireSigned bool) (data []byte,
 	if requireSigned {
 		data, err = DecodeCheckSignature(rc, source.PublicSigningKey())
 	} else {
-		data, err = ioutil.ReadAll(rc)
+		data, err = io.ReadAll(rc)
 	}
 	if err != nil {
 		return nil, dataURL, errors.Annotatef(err, "cannot read data for source %q at URL %v", source.Description(), dataURL)
@@ -1130,7 +1123,7 @@ const SimplestreamsPublicKeyFile = "publicsimplestreamskey"
 // UserPublicSigningKey returns the public signing key (if defined).
 func UserPublicSigningKey() (string, error) {
 	signingKeyFile := filepath.Join(agent.DefaultPaths.ConfDir, SimplestreamsPublicKeyFile)
-	b, err := ioutil.ReadFile(signingKeyFile)
+	b, err := os.ReadFile(signingKeyFile)
 	if os.IsNotExist(err) {
 		// TODO (anastasiamac 2016-05-07)
 		// We should not swallow this error

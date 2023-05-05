@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
@@ -34,9 +35,8 @@ type ModelManagerBackend interface {
 	state.CloudAccessor
 
 	ModelUUID() string
-	ModelUUIDsForUser(names.UserTag) ([]string, error)
-	ModelBasicInfoForUser(user names.UserTag) ([]state.ModelAccessInfo, error)
-	ModelSummariesForUser(user names.UserTag, all bool) ([]state.ModelSummary, error)
+	ModelBasicInfoForUser(user names.UserTag, isSuperuser bool) ([]state.ModelAccessInfo, error)
+	ModelSummariesForUser(user names.UserTag, isSupersser bool) ([]state.ModelSummary, error)
 	IsControllerAdmin(user names.UserTag) (bool, error)
 	NewModel(state.ModelArgs) (Model, ModelManagerBackend, error)
 	Model() (Model, error)
@@ -66,7 +66,7 @@ type ModelManagerBackend interface {
 	AllVolumes() ([]state.Volume, error)
 	ControllerUUID() string
 	ControllerTag() names.ControllerTag
-	Export() (description.Model, error)
+	Export(leaders map[string]string) (description.Model, error)
 	ExportPartial(state.ExportConfig) (description.Model, error)
 	SetUserAccess(subject names.UserTag, target names.Tag, access permission.Access) (permission.UserAccess, error)
 	SetModelMeterStatus(string, string) error
@@ -80,6 +80,11 @@ type ModelManagerBackend interface {
 	DumpAll() (map[string]interface{}, error)
 	Close() error
 	HAPrimaryMachine() (names.MachineTag, error)
+
+	// Secrets methods.
+	ListModelSecrets(bool) (map[string]set.Strings, error)
+	ListSecretBackends() ([]*secrets.SecretBackend, error)
+	GetSecretBackendByID(string) (*secrets.SecretBackend, error)
 
 	// Methods required by the metricsender package.
 	MetricsManager() (*state.MetricsManager, error)
@@ -244,6 +249,21 @@ func (st modelManagerStateShim) IsController() bool {
 	return st.State.IsController()
 }
 
+func (st modelManagerStateShim) ListModelSecrets(all bool) (map[string]set.Strings, error) {
+	secretsState := state.NewSecrets(st.State)
+	return secretsState.ListModelSecrets(all)
+}
+
+func (st modelManagerStateShim) ListSecretBackends() ([]*secrets.SecretBackend, error) {
+	backendState := state.NewSecretBackends(st.State)
+	return backendState.ListSecretBackends()
+}
+
+func (st modelManagerStateShim) GetSecretBackendByID(id string) (*secrets.SecretBackend, error) {
+	backendState := state.NewSecretBackends(st.State)
+	return backendState.GetSecretBackendByID(id)
+}
+
 var _ Model = (*modelShim)(nil)
 
 type modelShim struct {
@@ -281,6 +301,7 @@ func (st modelManagerStateShim) AllMachines() ([]Machine, error) {
 
 // Application defines methods provided by a state.Application instance.
 type Application interface {
+	Name() string
 	UnitCount() int
 }
 

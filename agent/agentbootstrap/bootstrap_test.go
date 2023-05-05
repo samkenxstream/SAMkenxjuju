@@ -5,10 +5,8 @@ package agentbootstrap_test
 
 import (
 	stdcontext "context"
-	"io/ioutil"
-	"net"
-	"path/filepath"
 
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/names/v4"
 	gitjujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
@@ -25,6 +23,7 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
 	corenetwork "github.com/juju/juju/core/network"
+	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
@@ -43,7 +42,7 @@ import (
 
 type bootstrapSuite struct {
 	testing.BaseSuite
-	mgoInst gitjujutesting.MgoInstance
+	mgoInst mgotesting.MgoInstance
 }
 
 var _ = gc.Suite(&bootstrapSuite{})
@@ -66,29 +65,11 @@ func (s *bootstrapSuite) TearDownTest(c *gc.C) {
 func (s *bootstrapSuite) TestInitializeState(c *gc.C) {
 	dataDir := c.MkDir()
 
-	lxcFakeNetConfig := filepath.Join(c.MkDir(), "lxc-net")
-	netConf := []byte(`
-  # comments ignored
-LXC_BR= ignored
-LXC_ADDR = "fooo"
-LXC_BRIDGE="foobar" # detected
-anything else ignored
-LXC_BRIDGE="ignored"`[1:])
-	err := ioutil.WriteFile(lxcFakeNetConfig, netConf, 0644)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.PatchValue(&network.InterfaceByNameAddrs, func(name string) ([]net.Addr, error) {
-		if name == "foobar" {
-			// The addresses on the LXC bridge
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(10, 0, 3, 1)},
-				&net.IPAddr{IP: net.IPv4(10, 0, 3, 4)},
-			}, nil
-		} else if name == network.DefaultLXDBridge {
-			// The addresses on the LXD bridge
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(10, 0, 4, 1)},
-				&net.IPAddr{IP: net.IPv4(10, 0, 4, 4)},
+	s.PatchValue(&network.AddressesForInterfaceName, func(name string) ([]string, error) {
+		if name == network.DefaultLXDBridge {
+			return []string{
+				"10.0.4.1",
+				"10.0.4.4",
 			}, nil
 		} else if name == network.DefaultKVMBridge {
 			// claim we don't have a virbr0 bridge
@@ -97,7 +78,6 @@ LXC_BRIDGE="ignored"`[1:])
 		c.Fatalf("unknown bridge in testing: %v", name)
 		return nil, nil
 	})
-	s.PatchValue(&network.LXCNetDefaultConfig, lxcFakeNetConfig)
 
 	configParams := agent.AgentConfigParams{
 		Paths:             agent.Paths{DataDir: dataDir},
@@ -129,12 +109,10 @@ LXC_BRIDGE="ignored"`[1:])
 	initialAddrs := corenetwork.NewMachineAddresses([]string{
 		"zeroonetwothree",
 		"0.1.2.3",
-		"10.0.3.1", // lxc bridge address filtered.
-		"10.0.3.4", // lxc bridge address filtered (-"-).
 		"10.0.3.3", // not a lxc bridge address
 		"10.0.4.1", // lxd bridge address filtered.
 		"10.0.4.4", // lxd bridge address filtered.
-		"10.0.4.5", // not an lxd bridge address
+		"10.0.4.5", // not a lxd bridge address
 	}).AsProviderAddresses()
 	filteredAddrs := corenetwork.NewSpaceAddresses(
 		"zeroonetwothree",
@@ -248,6 +226,7 @@ LXC_BRIDGE="ignored"`[1:])
 		"audit-log-capture-args":    true,
 		"audit-log-max-size":        "200M",
 		"audit-log-max-backups":     5,
+		"query-tracing-threshold":   "1s",
 	})
 
 	// Check that controller model configuration has been added, and
@@ -295,7 +274,9 @@ LXC_BRIDGE="ignored"`[1:])
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0")
 	c.Assert(m.Jobs(), gc.DeepEquals, []state.MachineJob{state.JobManageModel})
-	c.Assert(m.Series(), gc.Equals, testing.HostSeries(c))
+	base, err := coreseries.ParseBase(m.Base().OS, m.Base().Channel)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(m.Base().String(), gc.Equals, base.String())
 	c.Assert(m.CheckProvisioned(agent.BootstrapNonce), jc.IsTrue)
 	c.Assert(m.Addresses(), jc.DeepEquals, filteredAddrs)
 	gotBootstrapConstraints, err := m.Constraints()
@@ -470,7 +451,7 @@ func (s *bootstrapSuite) TestInitializeStateFailsSecondTime(c *gc.C) {
 	if err == nil {
 		_ = st.Close()
 	}
-	c.Assert(err, gc.ErrorMatches, "bootstrapping raft cluster: bootstrap only works on new clusters")
+	c.Assert(err, gc.ErrorMatches, "creating controller database schema.*")
 }
 
 func (s *bootstrapSuite) TestMachineJobFromParams(c *gc.C) {

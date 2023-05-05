@@ -6,7 +6,7 @@ package resource_test
 import (
 	"io"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/testing"
 
@@ -35,8 +35,8 @@ type stubAPIClient struct {
 	resources resources.ApplicationResources
 }
 
-func (s *stubAPIClient) Upload(application, name, filename string, resource io.ReadSeeker) error {
-	s.stub.AddCall("Upload", application, name, filename, resource)
+func (s *stubAPIClient) Upload(application, name, filename, pendingID string, resource io.ReadSeeker) error {
+	s.stub.AddCall("Upload", application, name, filename, pendingID, resource)
 	if err := s.stub.NextErr(); err != nil {
 		return errors.Trace(err)
 	}

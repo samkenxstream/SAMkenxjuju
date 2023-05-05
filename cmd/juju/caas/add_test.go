@@ -5,7 +5,6 @@ package caas_test
 
 import (
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,7 +34,6 @@ import (
 	"github.com/juju/juju/cmd/juju/caas"
 	"github.com/juju/juju/cmd/juju/caas/mocks"
 	jujucmdcloud "github.com/juju/juju/cmd/juju/cloud"
-	"github.com/juju/juju/environs"
 	"github.com/juju/juju/jujuclient"
 	"github.com/juju/juju/rpc/params"
 )
@@ -49,7 +47,6 @@ type addCAASSuite struct {
 	fakeK8sClusterMetadataChecker *fakeK8sClusterMetadataChecker
 	cloudMetadataStore            *fakeCloudMetadataStore
 	credentialStoreAPI            *mocks.MockCredentialStoreAPI
-	fakeK8SConfigFunc             *clientconfig.ClientConfigFunc
 }
 
 var _ = gc.Suite(&addCAASSuite{})
@@ -272,7 +269,7 @@ func (s *addCAASSuite) setupBroker(c *gc.C) *gomock.Controller {
 }
 
 func CreateKubeConfigData(conf string) (string, error) {
-	file, err := ioutil.TempFile("", "")
+	file, err := os.CreateTemp("", "")
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -342,7 +339,7 @@ func (s *addCAASSuite) SetUpTest(c *gc.C) {
 
 func (s *addCAASSuite) writeTempKubeConfig(c *gc.C) {
 	fullpath := filepath.Join(s.dir, "empty-config")
-	err := ioutil.WriteFile(fullpath, []byte(""), 0644)
+	err := os.WriteFile(fullpath, []byte(""), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 	os.Setenv("KUBECONFIG", fullpath)
 }
@@ -536,74 +533,75 @@ func (s *addCAASSuite) TestInit(c *gc.C) {
 			args:           []string{"--context-name", "a", "--cluster-name", "b"},
 			expectedErrStr: "only specify one of cluster-name or context-name, not both",
 		},
-		{
-			args:           []string{"--gke", "--context-name", "a"},
-			expectedErrStr: "do not specify context name when adding a AKS/GKE/EKS cluster",
-		},
-		{
-			args:           []string{"--aks", "--context-name", "a"},
-			expectedErrStr: "do not specify context name when adding a AKS/GKE/EKS cluster",
-		},
-		{
-			args:           []string{"--eks", "--context-name", "a"},
-			expectedErrStr: "do not specify context name when adding a AKS/GKE/EKS cluster",
-		},
-		{
-			args:           []string{"--gke", "--cloud", "a"},
-			expectedErrStr: "do not specify --cloud when adding a GKE, EKS or AKS cluster",
-		},
-		{
-			args:           []string{"--aks", "--cloud", "a"},
-			expectedErrStr: "do not specify --cloud when adding a GKE, EKS or AKS cluster",
-		},
-		{
-			args:           []string{"--eks", "--cloud", "a"},
-			expectedErrStr: "do not specify --cloud when adding a GKE, EKS or AKS cluster",
-		},
-		{
-			args:           []string{"--gke", "--region", "cloud/region"},
-			expectedErrStr: "only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster",
-		},
-		{
-			args:           []string{"--aks", "--region", "cloud/region"},
-			expectedErrStr: "only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster",
-		},
-		{
-			args:           []string{"--eks", "--region", "cloud/region"},
-			expectedErrStr: "only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster",
-		},
-		{
-			args:           []string{"--project", "a"},
-			expectedErrStr: "do not specify project unless adding a GKE cluster",
-		},
-		{
-			args:           []string{"--credential", "a"},
-			expectedErrStr: "do not specify credential unless adding a GKE cluster",
-		},
-		{
-			args:           []string{"--project", "a", "--aks"},
-			expectedErrStr: "do not specify project unless adding a GKE cluster",
-		},
-		{
-			args:           []string{"--credential", "a", "--aks"},
-			expectedErrStr: "do not specify credential unless adding a GKE cluster",
-		},
-		{
-			args:           []string{"--project", "a", "--eks"},
-			expectedErrStr: "do not specify project unless adding a GKE cluster",
-		},
-		{
-			args:           []string{"--credential", "a", "--eks"},
-			expectedErrStr: "do not specify credential unless adding a GKE cluster",
-		},
-		{
-			args:           []string{"--resource-group", "rg1", "--gke"},
-			expectedErrStr: "do not specify resource-group unless adding a AKS cluster",
-		},
-		{
-			args:           []string{"--resource-group", "rg1", "--eks"},
-			expectedErrStr: "do not specify resource-group unless adding a AKS cluster",
-		},
+		// TODO(k8s) - support k8s tooling in strict snap
+		//{
+		//	args:           []string{"--gke", "--context-name", "a"},
+		//	expectedErrStr: "do not specify context name when adding a AKS/GKE/EKS cluster",
+		//},
+		//{
+		//	args:           []string{"--aks", "--context-name", "a"},
+		//	expectedErrStr: "do not specify context name when adding a AKS/GKE/EKS cluster",
+		//},
+		//{
+		//	args:           []string{"--eks", "--context-name", "a"},
+		//	expectedErrStr: "do not specify context name when adding a AKS/GKE/EKS cluster",
+		//},
+		//{
+		//	args:           []string{"--gke", "--cloud", "a"},
+		//	expectedErrStr: "do not specify --cloud when adding a GKE, EKS or AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--aks", "--cloud", "a"},
+		//	expectedErrStr: "do not specify --cloud when adding a GKE, EKS or AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--eks", "--cloud", "a"},
+		//	expectedErrStr: "do not specify --cloud when adding a GKE, EKS or AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--gke", "--region", "cloud/region"},
+		//	expectedErrStr: "only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--aks", "--region", "cloud/region"},
+		//	expectedErrStr: "only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--eks", "--region", "cloud/region"},
+		//	expectedErrStr: "only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--project", "a"},
+		//	expectedErrStr: "do not specify project unless adding a GKE cluster",
+		//},
+		//{
+		//	args:           []string{"--credential", "a"},
+		//	expectedErrStr: "do not specify credential unless adding a GKE cluster",
+		//},
+		//{
+		//	args:           []string{"--project", "a", "--aks"},
+		//	expectedErrStr: "do not specify project unless adding a GKE cluster",
+		//},
+		//{
+		//	args:           []string{"--credential", "a", "--aks"},
+		//	expectedErrStr: "do not specify credential unless adding a GKE cluster",
+		//},
+		//{
+		//	args:           []string{"--project", "a", "--eks"},
+		//	expectedErrStr: "do not specify project unless adding a GKE cluster",
+		//},
+		//{
+		//	args:           []string{"--credential", "a", "--eks"},
+		//	expectedErrStr: "do not specify credential unless adding a GKE cluster",
+		//},
+		//{
+		//	args:           []string{"--resource-group", "rg1", "--gke"},
+		//	expectedErrStr: "do not specify resource-group unless adding a AKS cluster",
+		//},
+		//{
+		//	args:           []string{"--resource-group", "rg1", "--eks"},
+		//	expectedErrStr: "do not specify resource-group unless adding a AKS cluster",
+		//},
 	} {
 		args := append([]string{"myk8s"}, ts.args...)
 		command := s.makeCommand(c, true, false, true)
@@ -656,21 +654,22 @@ func (s *addCAASSuite) TestCloudAndRegionFlag(c *gc.C) {
 			title:          "missing region --cloud=brokenteststack and cloud's default region is not a cloud region",
 			cloud:          "brokenteststack",
 			expectedErrStr: `validating cloud region "azure": cloud region "azure" not valid`,
-		}, {
-			title:          "specify cloud with gke",
-			cloud:          "aws",
-			gke:            true,
-			expectedErrStr: `do not specify --cloud when adding a GKE, EKS or AKS cluster`,
-		}, {
-			title:          "specify cloud with aks",
-			cloud:          "aws",
-			aks:            true,
-			expectedErrStr: `do not specify --cloud when adding a GKE, EKS or AKS cluster`,
-		}, {
-			title:          "specify cloud/region with gke",
-			region:         "gce/us-east",
-			gke:            true,
-			expectedErrStr: `only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster`,
+			// TODO(k8s) - support k8s tooling in strict snap
+			//}, {
+			//	title:          "specify cloud with gke",
+			//	cloud:          "aws",
+			//	gke:            true,
+			//	expectedErrStr: `do not specify --cloud when adding a GKE, EKS or AKS cluster`,
+			//}, {
+			//	title:          "specify cloud with aks",
+			//	cloud:          "aws",
+			//	aks:            true,
+			//	expectedErrStr: `do not specify --cloud when adding a GKE, EKS or AKS cluster`,
+			//}, {
+			//	title:          "specify cloud/region with gke",
+			//	region:         "gce/us-east",
+			//	gke:            true,
+			//	expectedErrStr: `only specify region, not cloud/region, when adding a GKE, EKS or AKS cluster`,
 		}, {
 			title: "missing region --cloud=teststack but cloud has default region",
 			cloud: "teststack",
@@ -1054,47 +1053,6 @@ func (s *addCAASSuite) TestSkipStorage(c *gc.C) {
 	c.Assert(out, gc.Equals, `k8s substrate "myk8s" added as cloud "myk8s" with no configured storage provisioning capability on controller foo.`)
 }
 
-func (s *addCAASSuite) assertCreateDefaultStorageProvisioner(c *gc.C, expectedMsg string, t testData, additionalArgs ...string) {
-	s.fakeCloudAPI.isCloudRegionRequired = true
-	cloudRegion := "gce/us-east1"
-
-	ctrl := s.setupBroker(c)
-	defer ctrl.Finish()
-
-	s.fakeK8sClusterMetadataChecker.Call("CheckDefaultWorkloadStorage").Returns(
-		&environs.PreferredStorageNotFound{"error"})
-	storageProvisioner := &k8s.StorageProvisioner{
-		Name:        "mystorage",
-		Provisioner: "kubernetes.io/gce-pd",
-	}
-	s.fakeK8sClusterMetadataChecker.Call("EnsureStorageProvisioner", k8s.StorageProvisioner{
-		Name:        "mystorage",
-		Provisioner: "kubernetes.io/gce-pd",
-	}).Returns(storageProvisioner, nil)
-
-	err := SetKubeConfigData(kubeConfigStr)
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.assertAddCloudResult(c, func() {
-		command := s.makeCommand(c, true, false, true)
-		args := []string{"myk8s", "--cluster-name", "myk8s", "--storage", "mystorage"}
-		if t.controller {
-			args = append(args, "-c", "foo")
-		}
-		if t.client {
-			args = append(args, "--client")
-		}
-		if len(additionalArgs) > 0 {
-			args = append(args, additionalArgs...)
-		}
-		ctx, err := s.runCommand(c, nil, command, args...)
-		c.Assert(err, jc.ErrorIsNil)
-		result := strings.Trim(cmdtesting.Stdout(ctx), "\n")
-		result = strings.Replace(result, "\n", " ", -1)
-		c.Assert(result, gc.Equals, expectedMsg)
-	}, cloudRegion, "mystorage", "mystorage", t)
-}
-
 func (s *addCAASSuite) TestFoundStorageProvisionerViaAnnationForMAASWIthoutStorageOptionProvided(c *gc.C) {
 	ctrl := s.setupBroker(c)
 	defer ctrl.Finish()
@@ -1223,6 +1181,7 @@ func (s *addCAASSuite) TestSkipTLSVerifyWithCertInvalid(c *gc.C) {
 }
 
 func (s *addCAASSuite) TestAddGkeCluster(c *gc.C) {
+	c.Skip("TODO(k8s) - support k8s tooling in strict snap")
 	ctrl := s.setupBroker(c)
 	defer ctrl.Finish()
 
@@ -1437,6 +1396,7 @@ func (s *addCAASSuite) TestCorrectSelectContext(c *gc.C) {
 }
 
 func (s *addCAASSuite) TestOnlyOneClusterProvider(c *gc.C) {
+	c.Skip("TODO(k8s) - support k8s tooling in strict snap")
 	command := s.makeCommand(c, true, false, true)
 	_, err := s.runCommand(c, nil, command, "myk8s", "-c", "foo", "--aks", "--gke")
 	c.Assert(err, gc.ErrorMatches, "only one of '--gke', '--eks' or '--aks' can be supplied")

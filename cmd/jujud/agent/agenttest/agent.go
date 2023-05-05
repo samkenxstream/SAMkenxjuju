@@ -4,15 +4,18 @@
 package agenttest
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/juju/clock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/mgo/v2"
+	"github.com/juju/loggo"
+	"github.com/juju/mgo/v3"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/names/v4"
-	"github.com/juju/replicaset/v2"
-	jujutesting "github.com/juju/testing"
+	"github.com/juju/replicaset/v3"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/version/v2"
 	gc "gopkg.in/check.v1"
@@ -22,6 +25,7 @@ import (
 	cmdutil "github.com/juju/juju/cmd/jujud/util"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/database"
 	"github.com/juju/juju/environs/filestorage"
 	"github.com/juju/juju/environs/simplestreams"
 	sstesting "github.com/juju/juju/environs/simplestreams/testing"
@@ -36,6 +40,10 @@ import (
 	coretools "github.com/juju/juju/tools"
 	"github.com/juju/juju/worker/peergrouper"
 )
+
+// TODO (stickupkid): Remove this once we have a better way of using a logger
+// in tests.
+var logger = loggo.GetLogger("juju.agenttest.agent")
 
 type patchingSuite interface {
 	PatchValue(interface{}, interface{})
@@ -107,13 +115,24 @@ func (f *FakeEnsureMongo) InitiateMongo(p peergrouper.InitiateMongoParams) error
 // AgentSuite is a fixture to be used by agent test suites.
 type AgentSuite struct {
 	testing.JujuConnSuite
+
+	// InitialDBOps can be set prior to calling PrimeStateAgentVersion,
+	// ensuring that the functions are executed against the controller database
+	// immediately after Dqlite is set up.
+	InitialDBOps []func(db *sql.DB) error
+}
+
+func (s *AgentSuite) SetUpSuite(c *gc.C) {
+	s.JujuConnSuite.SetUpSuite(c)
+
+	s.InitialDBOps = make([]func(db *sql.DB) error, 0)
 }
 
 // PrimeAgent writes the configuration file and tools for an agent
 // with the given entity name. It returns the agent's configuration and the
 // current tools.
 func (s *AgentSuite) PrimeAgent(c *gc.C, tag names.Tag, password string) (agent.ConfigSetterWriter, *coretools.Tools) {
-	vers := coretesting.CurrentVersion(c)
+	vers := coretesting.CurrentVersion()
 	return s.PrimeAgentVersion(c, tag, password, vers)
 }
 
@@ -155,7 +174,11 @@ func (s *AgentSuite) PrimeAgentVersion(c *gc.C, tag names.Tag, password string, 
 			CACert:            stateInfo.CACert,
 			Controller:        coretesting.ControllerTag,
 			Model:             apiInfo.ModelTag,
-		})
+
+			QueryTracingEnabled:   controller.DefaultQueryTracingEnabled,
+			QueryTracingThreshold: controller.DefaultQueryTracingThreshold,
+		},
+	)
 	c.Assert(err, jc.ErrorIsNil)
 	conf.SetPassword(password)
 	c.Assert(conf.Write(), gc.IsNil)
@@ -168,7 +191,7 @@ func (s *AgentSuite) PrimeAgentVersion(c *gc.C, tag names.Tag, password string, 
 // a state agent with the given entity name. It returns the agent's
 // configuration and the current tools.
 func (s *AgentSuite) PrimeStateAgent(c *gc.C, tag names.Tag, password string) (agent.ConfigSetterWriter, *coretools.Tools) {
-	vers := coretesting.CurrentVersion(c)
+	vers := coretesting.CurrentVersion()
 	return s.PrimeStateAgentVersion(c, tag, password, vers)
 }
 
@@ -191,6 +214,10 @@ func (s *AgentSuite) PrimeStateAgentVersion(c *gc.C, tag names.Tag, password str
 
 	conf := s.WriteStateAgentConfig(c, tag, password, vers, model.ModelTag())
 	s.primeAPIHostPorts(c)
+
+	err = database.BootstrapDqlite(context.TODO(), database.NewNodeManager(conf, logger), logger, s.InitialDBOps...)
+	c.Assert(err, jc.ErrorIsNil)
+
 	return conf, agentTools
 }
 
@@ -203,7 +230,7 @@ func (s *AgentSuite) WriteStateAgentConfig(
 	modelTag names.ModelTag,
 ) agent.ConfigSetterWriter {
 	stateInfo := s.MongoInfo()
-	apiPort := jujutesting.FindTCPPort()
+	apiPort := mgotesting.FindTCPPort()
 	s.SetControllerConfigAPIPort(c, apiPort)
 	apiAddr := []string{fmt.Sprintf("localhost:%d", apiPort)}
 	conf, err := agent.NewStateMachineConfig(
@@ -212,21 +239,23 @@ func (s *AgentSuite) WriteStateAgentConfig(
 				DataDir: s.DataDir(),
 				LogDir:  s.LogDir,
 			}),
-			Tag:                tag,
-			UpgradedToVersion:  vers.Number,
-			Password:           password,
-			Nonce:              agent.BootstrapNonce,
-			APIAddresses:       apiAddr,
-			CACert:             stateInfo.CACert,
-			Controller:         s.State.ControllerTag(),
-			Model:              modelTag,
-			MongoMemoryProfile: controller.DefaultMongoMemoryProfile,
+			Tag:                   tag,
+			UpgradedToVersion:     vers.Number,
+			Password:              password,
+			Nonce:                 agent.BootstrapNonce,
+			APIAddresses:          apiAddr,
+			CACert:                stateInfo.CACert,
+			Controller:            s.State.ControllerTag(),
+			Model:                 modelTag,
+			MongoMemoryProfile:    controller.DefaultMongoMemoryProfile,
+			QueryTracingEnabled:   controller.DefaultQueryTracingEnabled,
+			QueryTracingThreshold: controller.DefaultQueryTracingThreshold,
 		},
 		controller.StateServingInfo{
 			Cert:         coretesting.ServerCert,
 			PrivateKey:   coretesting.ServerKey,
 			CAPrivateKey: coretesting.CAKey,
-			StatePort:    jujutesting.MgoServer.Port(),
+			StatePort:    mgotesting.MgoServer.Port(),
 			APIPort:      apiPort,
 		})
 	c.Assert(err, jc.ErrorIsNil)

@@ -5,13 +5,17 @@ package upgradevalidation
 
 import (
 	"github.com/juju/version/v2"
+
+	environscloudspec "github.com/juju/juju/environs/cloudspec"
 )
 
 // ValidatorsForControllerUpgrade returns a list of validators for controller upgrade,
-func ValidatorsForControllerUpgrade(isControllerModel bool, targetVersion version.Number) []Validator {
+func ValidatorsForControllerUpgrade(
+	isControllerModel bool, targetVersion version.Number, cloudspec environscloudspec.CloudSpec,
+) []Validator {
 	if isControllerModel {
 		validators := []Validator{
-			getCheckTargetVersionForModel(targetVersion, UpgradeToAllowed),
+			getCheckTargetVersionForControllerModel(targetVersion),
 			checkMongoStatusForControllerUpgrade,
 		}
 		if targetVersion.Major == 3 {
@@ -19,31 +23,48 @@ func ValidatorsForControllerUpgrade(isControllerModel bool, targetVersion versio
 				checkMongoVersionForControllerModel,
 				checkNoWinMachinesForModel,
 				checkForDeprecatedUbuntuSeriesForModel,
+				getCheckForLXDVersion(cloudspec),
 			)
+			if targetVersion.Minor >= 1 {
+				validators = append(validators, checkForCharmStoreCharms)
+			}
 		}
 		return validators
 	}
 	validators := []Validator{
-		getCheckTargetVersionForModel(targetVersion, UpgradeToAllowed),
+		getCheckTargetVersionForModel(targetVersion, UpgradeControllerAllowed),
 		checkModelMigrationModeForControllerUpgrade,
 	}
-	if targetVersion.Major == 3 {
+	if targetVersion.Major >= 3 {
 		validators = append(validators,
-			checkNoWinMachinesForModel, checkForDeprecatedUbuntuSeriesForModel,
+			checkNoWinMachinesForModel,
+			checkForDeprecatedUbuntuSeriesForModel,
+			getCheckForLXDVersion(cloudspec),
 		)
 	}
+	if targetVersion.Major >= 3 && targetVersion.Minor >= 1 {
+		validators = append(validators, checkForCharmStoreCharms)
+	}
+
 	return validators
 }
 
 // ValidatorsForModelUpgrade returns a list of validators for model upgrade,
-func ValidatorsForModelUpgrade(force bool, targetVersion version.Number) []Validator {
+func ValidatorsForModelUpgrade(
+	force bool, targetVersion version.Number, cloudspec environscloudspec.CloudSpec,
+) []Validator {
 	validators := []Validator{
 		getCheckUpgradeSeriesLockForModel(force),
 	}
 	if targetVersion.Major == 3 {
 		validators = append(validators,
-			checkNoWinMachinesForModel, checkForDeprecatedUbuntuSeriesForModel,
+			checkNoWinMachinesForModel,
+			checkForDeprecatedUbuntuSeriesForModel,
+			getCheckForLXDVersion(cloudspec),
 		)
+		if targetVersion.Minor >= 1 {
+			validators = append(validators, checkForCharmStoreCharms)
+		}
 	}
 	return validators
 }

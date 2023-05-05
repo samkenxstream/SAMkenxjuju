@@ -39,10 +39,10 @@ type BackingSubnet interface {
 // TODO(dimitern): Replace state.SubnetInfo with this and remove
 // BackingSubnetInfo, once the rest of state backing methods and the
 // following pre-reqs are done:
-// * Subnets need a reference count to calculate Status.
-// * ensure EC2 and MAAS providers accept empty IDs as Subnets() args
-//   and return all subnets, including the AvailabilityZones (for EC2;
-//   empty for MAAS as zones are orthogonal to networks).
+//   - Subnets need a reference count to calculate Status.
+//   - ensure EC2 and MAAS providers accept empty IDs as Subnets() args
+//     and return all subnets, including the AvailabilityZones (for EC2;
+//     empty for MAAS as zones are orthogonal to networks).
 type BackingSubnetInfo struct {
 	// ProviderId is a provider-specific network id. This may be empty.
 	ProviderId network.Id
@@ -252,7 +252,7 @@ func networkAddressesToStateArgs(
 			ProviderSubnetID:  dev.ProviderSubnetId,
 			ConfigMethod:      configType,
 			CIDRAddress:       cidrAddress,
-			DNSServers:        dev.DNSServers.ToIPAddresses(),
+			DNSServers:        dev.DNSServers.Values(),
 			DNSSearchDomains:  dev.DNSSearchDomains,
 			GatewayAddress:    dev.GatewayAddress.Value,
 			IsDefaultGateway:  dev.IsDefaultGateway,

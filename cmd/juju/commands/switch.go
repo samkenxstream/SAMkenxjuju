@@ -48,25 +48,29 @@ controller and mycontroller:mymodel switches to mymodel on mycontroller.
 The `[1:] + "`juju models`" + ` command can be used to determine the active model
 (of any controller). An asterisk denotes it.
 
-Examples:
+`
+
+const usageExamples = `
     juju switch
     juju switch mymodel
     juju switch mycontroller
     juju switch mycontroller:mymodel
     juju switch mycontroller:
     juju switch :mymodel
-
-See also:
-    controllers
-    models
-    show-controller`
+`
 
 func (c *switchCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "switch",
-		Args:    "[<controller>|<model>|<controller>:|:<model>|<controller>:<model>]",
-		Purpose: usageSummary,
-		Doc:     usageDetails,
+		Name:     "switch",
+		Args:     "[<controller>|<model>|<controller>:|:<model>|<controller>:<model>]",
+		Purpose:  usageSummary,
+		Doc:      usageDetails,
+		Examples: usageExamples,
+		SeeAlso: []string{
+			"controllers",
+			"models",
+			"show-controller",
+		},
 	})
 }
 
@@ -82,7 +86,9 @@ func (c *switchCommand) SetClientStore(store jujuclient.ClientStore) {
 }
 
 func (c *switchCommand) Run(ctx *cmd.Context) (resultErr error) {
-	store := modelcmd.QualifyingClientStore{c.Store}
+	store := modelcmd.QualifyingClientStore{
+		ClientStore: c.Store,
+	}
 
 	// Get the current name for logging the transition or printing
 	// the current controller/model.

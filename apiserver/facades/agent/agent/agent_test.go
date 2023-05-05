@@ -45,15 +45,15 @@ func (s *agentSuite) SetUpTest(c *gc.C) {
 	s.JujuConnSuite.SetUpTest(c)
 
 	var err error
-	s.machine0, err = s.State.AddMachine("quantal", state.JobManageModel)
+	s.machine0, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 
-	s.machine1, err = s.State.AddMachine("quantal", state.JobHostUnits)
+	s.machine1, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 
 	template := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	s.container, err = s.State.AddMachineInsideMachine(template, s.machine1.Id(), instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
@@ -295,7 +295,7 @@ func (s *agentSuite) TestWatchCredentials(c *gc.C) {
 	defer statetesting.AssertStop(c, w)
 
 	// Check that the Watch has consumed the initial events ("returned" in the Watch call)
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w.(state.NotifyWatcher))
+	wc := statetesting.NewNotifyWatcherC(c, w.(state.NotifyWatcher))
 	wc.AssertNoChange()
 
 	s.State.UpdateCloudCredential(tag, cloud.NewCredential(cloud.UserPassAuthType, nil))

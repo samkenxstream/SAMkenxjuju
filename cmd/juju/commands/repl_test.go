@@ -25,7 +25,6 @@ var _ = gc.Suite(&ReplSuite{})
 
 type ReplSuite struct {
 	testing.FakeJujuXDGDataHomeSuite
-	store *jujuclient.MemStore
 }
 
 func (*ReplSuite) TestErrorNoControllersAtAll(c *gc.C) {
@@ -157,7 +156,7 @@ func (s *ReplSuite) TestJujuCommandHelp(c *gc.C) {
 
 	stdout, _ := jujutesting.CaptureOutput(c, f)
 	s.assertOutMatches(c, stdout,
-		"Usage: juju show-status.*")
+		"Usage: juju status.*")
 }
 
 func (s *ReplSuite) TestRepl(c *gc.C) {

@@ -6,13 +6,13 @@ package common
 import (
 	"archive/zip"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 
 	"github.com/juju/errors"
 
+	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state/storage"
 )
@@ -33,7 +33,7 @@ func ReadCharmFromStorage(store storage.Storage, dataDir, storagePath string) (s
 	}
 	defer reader.Close()
 
-	charmFile, err := ioutil.TempFile(tmpDir, "charm")
+	charmFile, err := os.CreateTemp(tmpDir, "charm")
 	if err != nil {
 		return "", errors.Annotate(err, "cannot create charm archive file")
 	}
@@ -71,7 +71,7 @@ func CharmArchiveEntry(charmPath, entryPath string, wantIcon bool) ([]byte, erro
 			return nil, errors.Annotatef(err, "unable to read file %q", entryPath)
 		}
 		defer contents.Close()
-		return ioutil.ReadAll(contents)
+		return io.ReadAll(contents)
 	}
 	if wantIcon {
 		// An icon was requested but none was found in the archive so
@@ -79,4 +79,26 @@ func CharmArchiveEntry(charmPath, entryPath string, wantIcon bool) ([]byte, erro
 		return []byte(DefaultCharmIcon), nil
 	}
 	return nil, errors.NotFoundf("charm file")
+}
+
+// ValidateCharmOrigin validates the Source of the charm origin for args received
+// in a facade. This may evolve over time to include more pieces.
+func ValidateCharmOrigin(o *params.CharmOrigin) error {
+	switch {
+	case o == nil:
+		return errors.BadRequestf("charm origin source required")
+	case corecharm.CharmHub.Matches(o.Source):
+		// If either the charm origin ID or Hash is set before a charm is
+		// downloaded, charm download will fail for charms with a forced series.
+		// The logic (refreshConfig) in sending the correct request to charmhub
+		// will break.
+		if (o.ID != "" && o.Hash == "") ||
+			(o.ID == "" && o.Hash != "") {
+			return errors.BadRequestf("programming error, both CharmOrigin ID and Hash must be set or neither. See CharmHubRepository GetDownloadURL.")
+		}
+	case corecharm.Local.Matches(o.Source):
+	default:
+		return errors.BadRequestf("%q not a valid charm origin source", o.Source)
+	}
+	return nil
 }

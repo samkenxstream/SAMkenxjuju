@@ -334,6 +334,7 @@ func (api *ProvisionerAPI) ContainerManagerConfig(args params.ContainerManagerCo
 		cfg[config.ContainerImageMetadataURLKey] = url
 	}
 	cfg[config.ContainerImageStreamKey] = mConfig.ContainerImageStream()
+	cfg[config.ContainerNetworkingMethod] = mConfig.ContainerNetworkingMethod()
 
 	result.ManagerConfig = cfg
 	return result, nil
@@ -410,30 +411,6 @@ func (api *ProvisionerAPI) MachinesWithTransientErrors() (params.StatusResults, 
 		results.Results = append(results.Results, result)
 	}
 	return results, nil
-}
-
-// Series returns the deployed series for each given machine entity.
-func (api *ProvisionerAPI) Series(args params.Entities) (params.StringResults, error) {
-	result := params.StringResults{
-		Results: make([]params.StringResult, len(args.Entities)),
-	}
-	canAccess, err := api.getAuthFunc()
-	if err != nil {
-		return result, err
-	}
-	for i, entity := range args.Entities {
-		tag, err := names.ParseMachineTag(entity.Tag)
-		if err != nil {
-			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
-			continue
-		}
-		machine, err := api.getMachine(canAccess, tag)
-		if err == nil {
-			result.Results[i].Result = machine.Series()
-		}
-		result.Results[i].Error = apiservererrors.ServerError(err)
-	}
-	return result, nil
 }
 
 // AvailabilityZone returns a provider-specific availability zone for each given machine entity
@@ -672,7 +649,16 @@ func (api *ProvisionerAPI) Constraints(args params.Entities) (params.Constraints
 
 // FindTools returns a List containing all tools matching the given parameters.
 func (api *ProvisionerAPI) FindTools(args params.FindToolsParams) (params.FindToolsResult, error) {
-	return api.toolsFinder.FindTools(args)
+	list, err := api.toolsFinder.FindAgents(common.FindAgentsParams{
+		Number:      args.Number,
+		Arch:        args.Arch,
+		OSType:      args.OSType,
+		AgentStream: args.AgentStream,
+	})
+	return params.FindToolsResult{
+		List:  list,
+		Error: apiservererrors.ServerError(err),
+	}, nil
 }
 
 // SetInstanceInfo sets the provider specific machine id, nonce,

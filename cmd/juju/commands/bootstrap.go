@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
@@ -30,6 +30,8 @@ import (
 	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/cmd/constants"
+	"github.com/juju/juju/cmd/juju/application/refresher"
 	"github.com/juju/juju/cmd/juju/common"
 	cmdcontroller "github.com/juju/juju/cmd/juju/controller"
 	cmdmodel "github.com/juju/juju/cmd/juju/model"
@@ -106,13 +108,16 @@ address.
     # How often to refresh controller addresses from the API server.
     bootstrap-addresses-delay: 10 # default: 10 seconds
 
-It is possible to override the series Juju attempts to bootstrap on to, by
-supplying a series argument to '--bootstrap-series'.
+It is possible to override the base e.g. ubuntu@22.04, Juju attempts 
+to bootstrap on to, by supplying a base argument to '--bootstrap-base'.
 
-An error is emitted if the determined series is not supported. Using the
+An error is emitted if the determined base is not supported. Using the
 '--force' option to override this check:
 
-	juju bootstrap --bootstrap-series=focal --force
+	juju bootstrap --bootstrap-base=ubuntu@22.04 --force
+
+The '--bootstrap-series' can be still used, but is deprecated in favour
+of '--bootstrap-base'.
 
 Private clouds may need to specify their own custom image metadata and
 tools/agent. Use '--metadata-source' whose value is a local directory.
@@ -166,7 +171,9 @@ Available keys for use with --config are:
 `
 
 var usageBootstrapDetailsPartTwo = `
-Examples:
+`
+
+const usageBootstrapExamples = `
     juju bootstrap
     juju bootstrap --clouds
     juju bootstrap --regions aws
@@ -177,21 +184,14 @@ Examples:
     juju bootstrap --agent-version=2.2.4 aws joe-us-east-1
     juju bootstrap --config bootstrap-timeout=1200 azure joe-eastus
     juju bootstrap aws --storage-pool name=secret --storage-pool type=ebs --storage-pool encrypted=true
+	juju bootstrap lxd --bootstrap-base=ubuntu@22.04
 
     # For a bootstrap on k8s, setting the service type of the Juju controller service to LoadBalancer
     juju bootstrap --config controller-service-type=loadbalancer
 
     # For a bootstrap on k8s, setting the service type of the Juju controller service to External
     juju bootstrap --config controller-service-type=external --config controller-external-name=controller.juju.is
-
-See also:
-    add-credential
-    autoload-credentials
-    add-model
-    controller-config
-    model-config
-    set-constraints
-    show-cloud`
+`
 
 func newBootstrapCommand() cmd.Command {
 	command := &bootstrapCommand{}
@@ -215,6 +215,7 @@ type bootstrapCommand struct {
 	BootstrapConstraints     constraints.Value
 	BootstrapConstraintsStr  string
 	BootstrapSeries          string
+	BootstrapBase            string
 	BootstrapImage           string
 	BuildAgent               bool
 	JujuDbSnapPath           string
@@ -242,8 +243,9 @@ type bootstrapCommand struct {
 	// in addition to the controller model.
 	initialModelName string
 
-	ControllerCharmPath string
-	ControllerCharmRisk string
+	ControllerCharmPath       string
+	ControllerCharmChannelStr string
+	ControllerCharmChannel    charm.Channel
 
 	// Force is used to allow a bootstrap to be run on unsupported series.
 	Force bool
@@ -251,8 +253,18 @@ type bootstrapCommand struct {
 
 func (c *bootstrapCommand) Info() *cmd.Info {
 	info := &cmd.Info{
-		Name:    "bootstrap",
-		Args:    "[<cloud name>[/region] [<controller name>]]",
+		Name:     "bootstrap",
+		Args:     "[<cloud name>[/region] [<controller name>]]",
+		Examples: usageBootstrapExamples,
+		SeeAlso: []string{
+			"add-credential",
+			"autoload-credentials",
+			"add-model",
+			"controller-config",
+			"model-config",
+			"set-constraints",
+			"show-cloud",
+		},
 		Purpose: usageBootstrapSummary,
 	}
 	if details := c.configDetails(); len(details) > 0 {
@@ -302,27 +314,36 @@ func (c *bootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 	f.StringVar(&c.ConstraintsStr, "constraints", "", "Set model constraints")
 	f.StringVar(&c.BootstrapConstraintsStr, "bootstrap-constraints", "", "Specify bootstrap machine constraints")
-	f.StringVar(&c.BootstrapSeries, "bootstrap-series", "", "Specify the series of the bootstrap machine")
-	f.StringVar(&c.BootstrapImage, "bootstrap-image", "", "Specify the image of the bootstrap machine")
+	f.StringVar(&c.BootstrapSeries, "bootstrap-series", "", "Specify the series of the bootstrap machine (deprecated use bootstrap-base)")
+	f.StringVar(&c.BootstrapBase, "bootstrap-base", "", "Specify the base of the bootstrap machine")
+	f.StringVar(&c.BootstrapImage, "bootstrap-image", "", "Specify the image of the bootstrap machine (requires --bootstrap-constraints specifying architecture)")
 	f.BoolVar(&c.BuildAgent, "build-agent", false, "Build local version of agent binary before bootstrapping")
-	f.StringVar(&c.JujuDbSnapPath, "db-snap", "", "Path to a locally built .snap to use as the internal juju-db service.")
+	f.StringVar(&c.JujuDbSnapPath, "db-snap", "",
+		"Path to a locally built .snap to use as the internal juju-db service.")
 	f.StringVar(&c.JujuDbSnapAssertionsPath, "db-snap-asserts", "", "Path to a local .assert file. Requires --db-snap")
 	f.StringVar(&c.MetadataSource, "metadata-source", "", "Local path to use as agent and/or image metadata source")
 	f.StringVar(&c.Placement, "to", "", "Placement directive indicating an instance to bootstrap")
-	f.BoolVar(&c.KeepBrokenEnvironment, "keep-broken", false, "Do not destroy the provisioned controller instance if bootstrap fails")
+	f.BoolVar(&c.KeepBrokenEnvironment, "keep-broken", false,
+		"Do not destroy the provisioned controller instance if bootstrap fails")
 	f.BoolVar(&c.AutoUpgrade, "auto-upgrade", false, "After bootstrap, upgrade to the latest patch release")
 	f.StringVar(&c.AgentVersionParam, "agent-version", "", "Version of agent binaries to use for Juju agents")
 	f.StringVar(&c.CredentialName, "credential", "", "Credentials to use when bootstrapping")
-	f.Var(&c.config, "config", "Specify a controller configuration file, or one or more configuration\n    options\n    (--config config.yaml [--config key=value ...])")
-	f.Var(&c.modelDefaults, "model-default", "Specify a configuration file, or one or more configuration\n    options to be set for all models, unless otherwise specified\n    (--model-default config.yaml [--model-default key=value ...])")
-	f.Var(&c.storagePool, "storage-pool", "Specify options for an initial storage pool\n    'name' and 'type' are required, plus any additional attributes\n    (--storage-pool pool-config.yaml [--storage-pool key=value ...])")
+	f.Var(&c.config, "config",
+		"Specify a controller configuration file, or one or more configuration\n    options\n    (--config config.yaml [--config key=value ...])")
+	f.Var(&c.modelDefaults, "model-default",
+		"Specify a configuration file, or one or more configuration\n    options to be set for all models, unless otherwise specified\n    (--model-default config.yaml [--model-default key=value ...])")
+	f.Var(&c.storagePool, "storage-pool",
+		"Specify options for an initial storage pool\n    'name' and 'type' are required, plus any additional attributes\n    (--storage-pool pool-config.yaml [--storage-pool key=value ...])")
 	f.StringVar(&c.initialModelName, "add-model", "", "Name of an initial model to create on the new controller")
-	f.BoolVar(&c.showClouds, "clouds", false, "Print the available clouds which can be used to bootstrap a Juju environment")
+	f.BoolVar(&c.showClouds, "clouds", false,
+		"Print the available clouds which can be used to bootstrap a Juju environment")
 	f.StringVar(&c.showRegionsForCloud, "regions", "", "Print the available regions for the specified cloud")
 	f.BoolVar(&c.noSwitch, "no-switch", false, "Do not switch to the newly created controller")
 	f.BoolVar(&c.Force, "force", false, "Allow the bypassing of checks such as supported series")
 	f.StringVar(&c.ControllerCharmPath, "controller-charm-path", "", "Path to a locally built controller charm")
-	f.StringVar(&c.ControllerCharmRisk, "controller-charm-risk", "beta", "The controller charm risk if not using a local charm")
+	f.StringVar(&c.ControllerCharmChannelStr, "controller-charm-channel",
+		fmt.Sprintf("%d.%d/stable", jujuversion.Current.Major, jujuversion.Current.Minor),
+		"The Charmhub channel to download the controller charm from (if not using a local charm)")
 }
 
 func (c *bootstrapCommand) Init(args []string) (err error) {
@@ -330,6 +351,26 @@ func (c *bootstrapCommand) Init(args []string) (err error) {
 		_, err := c.Filesystem().Stat(c.JujuDbSnapPath)
 		if err != nil {
 			return errors.Annotatef(err, "problem with --db-snap")
+		}
+	}
+
+	if c.BootstrapSeries != "" && c.BootstrapBase != "" {
+		return errors.New("cannot specify both --bootstrap-series and --bootstrap-base")
+	}
+
+	if c.BootstrapSeries != "" {
+		base, err := series.GetBaseFromSeries(c.BootstrapSeries)
+		if err != nil {
+			return errors.Errorf("cannot determine base for series %q", c.BootstrapSeries)
+		}
+
+		c.BootstrapBase = base.String()
+		c.BootstrapSeries = ""
+	}
+	// Validate the bootstrap base looks like a base.
+	if c.BootstrapBase != "" {
+		if _, err := series.ParseBaseFromString(c.BootstrapBase); err != nil {
+			return errors.NotValidf("base %q", c.BootstrapBase)
 		}
 	}
 
@@ -352,22 +393,27 @@ func (c *bootstrapCommand) Init(args []string) (err error) {
 	}
 
 	if c.ControllerCharmPath != "" {
-		_, err := c.Filesystem().Stat(c.ControllerCharmPath)
-		if err != nil {
-			return errors.Annotatef(err, "problem with --controller-charm-path")
+		if refresher.IsLocalURL(c.ControllerCharmPath) {
+			_, err := c.Filesystem().Stat(c.ControllerCharmPath)
+			if err != nil {
+				return errors.Annotatef(err, "problem with --controller-charm-path")
+			}
+			ch, err := charm.ReadCharm(c.ControllerCharmPath)
+			if err != nil {
+				return errors.Errorf("--controller-charm-path %q is not a valid charm", c.ControllerCharmPath)
+			}
+			if ch.Meta().Name != bootstrap.ControllerCharmName {
+				return errors.Errorf("--controller-charm-path %q is not a %q charm", c.ControllerCharmPath,
+					bootstrap.ControllerCharmName)
+			}
 		}
-		ch, err := charm.ReadCharm(c.ControllerCharmPath)
-		if err != nil {
-			return errors.Errorf("--controller-charm-path %q is not a valid charm", c.ControllerCharmPath)
-		}
-		if ch.Meta().Name != bootstrap.ControllerCharmName {
-			return errors.Errorf("--controller-charm-path %q is not a %q charm", c.ControllerCharmPath, bootstrap.ControllerCharmName)
-		}
+		// Assume this is a Charmhub URL
+		// TODO(barrettj12): validate the charm exists on CharmHub
 	}
-	if c.ControllerCharmRisk != "" {
-		if _, err := charm.MakeChannel("", c.ControllerCharmRisk, ""); err != nil {
-			return errors.NotValidf("controller charm risk %q", c.ControllerCharmRisk)
-		}
+
+	c.ControllerCharmChannel, err = parseControllerCharmChannel(c.ControllerCharmChannelStr)
+	if err != nil {
+		return errors.NotValidf("controller charm channel %q", c.ControllerCharmChannelStr)
 	}
 
 	if c.showClouds && c.showRegionsForCloud != "" {
@@ -382,12 +428,6 @@ func (c *bootstrapCommand) Init(args []string) (err error) {
 	if c.AgentVersionParam != "" && c.BuildAgent {
 		return errors.New("--agent-version and --build-agent can't be used together")
 	}
-	// charm.IsValidSeries doesn't actually check against a list of bootstrap
-	// series, but instead, just validates if it conforms to a regexp.
-	if c.BootstrapSeries != "" && !charm.IsValidSeries(c.BootstrapSeries) {
-		return errors.NotValidf("series %q", c.BootstrapSeries)
-	}
-
 	if c.initialModelName == "" {
 		c.initialModelName = os.Getenv("JUJU_BOOTSTRAP_MODEL")
 	}
@@ -416,7 +456,8 @@ func (c *bootstrapCommand) Init(args []string) (err error) {
 		}
 	}
 	if c.AgentVersion != nil && (c.AgentVersion.Major != jujuversion.Current.Major || c.AgentVersion.Minor != jujuversion.Current.Minor) {
-		return errors.Errorf("this client can only bootstrap %v.%v agents", jujuversion.Current.Major, jujuversion.Current.Minor)
+		return errors.Errorf("this client can only bootstrap %v.%v agents", jujuversion.Current.Major,
+			jujuversion.Current.Minor)
 	}
 
 	switch len(args) {
@@ -439,10 +480,26 @@ func (c *bootstrapCommand) Init(args []string) (err error) {
 	return nil
 }
 
+func parseControllerCharmChannel(channelStr string) (charm.Channel, error) {
+	ch, err := charm.ParseChannel(channelStr)
+	if err != nil {
+		return charm.Channel{}, err
+	}
+
+	if ch.Track == "" {
+		ch.Track = fmt.Sprintf("%d.%d", jujuversion.Current.Major, jujuversion.Current.Minor)
+	}
+	if ch.Risk == "" {
+		ch.Risk = charm.Stable
+	}
+	return ch, nil
+}
+
 // BootstrapInterface provides bootstrap functionality that Run calls to support cleaner testing.
 type BootstrapInterface interface {
 	// Bootstrap bootstraps a controller.
-	Bootstrap(ctx environs.BootstrapContext, environ environs.BootstrapEnviron, callCtx envcontext.ProviderCallContext, args bootstrap.BootstrapParams) error
+	Bootstrap(ctx environs.BootstrapContext, environ environs.BootstrapEnviron, callCtx envcontext.ProviderCallContext,
+		args bootstrap.BootstrapParams) error
 
 	// CloudDetector returns a CloudDetector for the given provider,
 	// if the provider supports it.
@@ -459,7 +516,8 @@ type BootstrapInterface interface {
 
 type bootstrapFuncs struct{}
 
-func (b bootstrapFuncs) Bootstrap(ctx environs.BootstrapContext, env environs.BootstrapEnviron, callCtx envcontext.ProviderCallContext, args bootstrap.BootstrapParams) error {
+func (b bootstrapFuncs) Bootstrap(ctx environs.BootstrapContext, env environs.BootstrapEnviron,
+	callCtx envcontext.ProviderCallContext, args bootstrap.BootstrapParams) error {
 	return bootstrap.Bootstrap(ctx, env, callCtx, args)
 }
 
@@ -482,7 +540,7 @@ var getBootstrapFuncs = func() BootstrapInterface {
 	return &bootstrapFuncs{}
 }
 
-var supportedJujuSeries = series.ControllerSeries
+var supportedJujuBases = series.ControllerBases
 
 var (
 	bootstrapPrepareController = bootstrap.PrepareController
@@ -605,6 +663,12 @@ to create a new model to deploy %sworkloads.
 		}
 	}()
 
+	// TODO(stickupkid): Once default-series has been deprecated, it's safe to
+	// remove this.
+	if err := c.warnDeprecatedModelConfig(ctx); err != nil {
+		return err
+	}
+
 	if err := c.parseConstraints(ctx); err != nil {
 		return err
 	}
@@ -664,7 +728,8 @@ to create a new model to deploy %sworkloads.
 	credentials, regionName, err := c.credentialsAndRegionName(ctx, provider, cloud)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			err = errors.NewNotFound(nil, fmt.Sprintf("%v\nSee `juju add-credential %s --help` for instructions", err, cloud.Name))
+			err = errors.NewNotFound(nil,
+				fmt.Sprintf("%v\nSee `juju add-credential %s --help` for instructions", err, cloud.Name))
 		}
 
 		if err == cmd.ErrSilent {
@@ -693,7 +758,7 @@ to create a new model to deploy %sworkloads.
 	}
 
 	isCAASController = jujucloud.CloudIsCAAS(cloud)
-	if isCAASController && c.ControllerCharmPath != "" {
+	if isCAASController && refresher.IsLocalURL(c.ControllerCharmPath) {
 		return errors.NotSupportedf("deploying a local controller charm on a k8s controller")
 	}
 	if !isCAASController {
@@ -739,16 +804,26 @@ to create a new model to deploy %sworkloads.
 		}
 	}()
 
+	var bootstrapBase series.Base
+	if c.BootstrapBase != "" {
+		var err error
+		bootstrapBase, err = series.ParseBaseFromString(c.BootstrapBase)
+		if err != nil {
+			return errors.NotValidf("bootstrap base %q", c.BootstrapBase)
+		}
+	}
+
 	// Get the supported bootstrap series.
 	var imageStream string
 	if cfg, ok := bootstrapCfg.bootstrapModel["image-stream"]; ok {
 		imageStream = cfg.(string)
 	}
 	now := c.clock.Now()
-	supportedBootstrapSeries, err := supportedJujuSeries(now, c.BootstrapSeries, imageStream)
+	supportedBootstrapBases, err := supportedJujuBases(now, bootstrapBase, imageStream)
 	if err != nil {
 		return errors.Annotate(err, "error reading supported bootstrap series")
 	}
+	logger.Tracef("supported bootstrap bases %v", supportedBootstrapBases)
 
 	bootstrapCfg.controller[controller.ControllerName] = c.controllerName
 
@@ -817,8 +892,8 @@ to create a new model to deploy %sworkloads.
 
 	bootstrapParams := bootstrap.BootstrapParams{
 		ControllerName:            c.controllerName,
-		BootstrapSeries:           c.BootstrapSeries,
-		SupportedBootstrapSeries:  supportedBootstrapSeries,
+		BootstrapBase:             bootstrapBase,
+		SupportedBootstrapBases:   supportedBootstrapBases,
 		BootstrapImage:            c.BootstrapImage,
 		Placement:                 c.Placement,
 		BuildAgent:                c.BuildAgent,
@@ -838,7 +913,7 @@ to create a new model to deploy %sworkloads.
 		JujuDbSnapAssertionsPath:  c.JujuDbSnapAssertionsPath,
 		StoragePools:              bootstrapCfg.storagePools,
 		ControllerCharmPath:       c.ControllerCharmPath,
-		ControllerCharmRisk:       c.ControllerCharmRisk,
+		ControllerCharmChannel:    c.ControllerCharmChannel,
 		DialOpts: environs.BootstrapDialOpts{
 			Timeout:        bootstrapCfg.bootstrap.BootstrapTimeout,
 			RetryDelay:     bootstrapCfg.bootstrap.BootstrapRetryDelay,
@@ -907,6 +982,11 @@ See `[1:] + "`juju kill-controller`" + `.`)
 			}
 		}
 	}()
+
+	if envMetadataSrc := os.Getenv(constants.EnvJujuMetadataSource); c.MetadataSource == "" && envMetadataSrc != "" {
+		c.MetadataSource = envMetadataSrc
+		ctx.Infof("Using metadata source directory %q", c.MetadataSource)
+	}
 
 	// If --metadata-source is specified, override the default tools metadata source so
 	// SyncTools can use it, and also upload any image metadata.
@@ -1087,8 +1167,8 @@ func (c *bootstrapCommand) controllerDataRefresher(
 
 func (c *bootstrapCommand) handleCommandLineErrorsAndInfoRequests(ctx *cmd.Context) (bool, error) {
 	if c.BootstrapImage != "" {
-		if c.BootstrapSeries == "" {
-			return true, errors.Errorf("--bootstrap-image must be used with --bootstrap-series")
+		if c.BootstrapBase == "" {
+			return true, errors.Errorf("--bootstrap-image must be used with --bootstrap-base")
 		}
 		cons, err := constraints.Merge(c.Constraints, c.BootstrapConstraints)
 		if err != nil {
@@ -1195,7 +1275,8 @@ func (c *bootstrapCommand) detectCloud(
 	ctx.Verbosef("cloud %q not found, trying as a provider name", c.Cloud)
 	provider, err := environs.Provider(c.Cloud)
 	if errors.IsNotFound(err) {
-		return fail(errors.NewNotFound(nil, fmt.Sprintf("unknown cloud %q, please try %q", c.Cloud, "juju update-public-clouds")))
+		return fail(errors.NewNotFound(nil,
+			fmt.Sprintf("unknown cloud %q, please try %q", c.Cloud, "juju update-public-clouds")))
 	} else if err != nil {
 		return fail(errors.Trace(err))
 	}
@@ -1205,7 +1286,8 @@ func (c *bootstrapCommand) detectCloud(
 			"provider %q does not support detecting regions",
 			c.Cloud,
 		)
-		return fail(errors.NewNotFound(nil, fmt.Sprintf("unknown cloud %q, please try %q", c.Cloud, "juju update-public-clouds")))
+		return fail(errors.NewNotFound(nil,
+			fmt.Sprintf("unknown cloud %q, please try %q", c.Cloud, "juju update-public-clouds")))
 	}
 
 	var cloudEndpoint string
@@ -1362,10 +1444,20 @@ func (c *bootstrapCommand) bootstrapConfigs(
 	if err != nil {
 		return bootstrapConfigs{}, errors.Trace(err)
 	}
+
+	if userConfigAttrs, err = ensureDefaultBase(userConfigAttrs); err != nil {
+		return bootstrapConfigs{}, errors.Trace(err)
+	}
+
 	modelDefaultConfigAttrs, err := c.modelDefaults.ReadAttrs(ctx)
 	if err != nil {
 		return bootstrapConfigs{}, errors.Trace(err)
 	}
+
+	if modelDefaultConfigAttrs, err = ensureDefaultBase(modelDefaultConfigAttrs); err != nil {
+		return bootstrapConfigs{}, errors.Trace(err)
+	}
+
 	// The provider may define some custom attributes specific
 	// to the provider. These will be added to the model config.
 	var providerAttrs map[string]interface{}
@@ -1437,6 +1529,7 @@ func (c *bootstrapCommand) bootstrapConfigs(
 		}
 		inheritedControllerAttrs[k] = v
 	}
+
 	// Model defaults are added to the inherited controller attributes.
 	// Any command line set model defaults override what is in the cloud config.
 	for k, v := range modelDefaultConfigAttrs {
@@ -1456,7 +1549,7 @@ func (c *bootstrapCommand) bootstrapConfigs(
 		combinedConfig[k] = v
 	}
 
-	// Provider specific attributes are either already specified in model
+	// Store specific attributes are either already specified in model
 	// config (but may have been coerced), or were not present. Either way,
 	// copy them in.
 	logger.Debugf("provider attrs: %v", providerAttrs)
@@ -1519,18 +1612,14 @@ func (c *bootstrapCommand) bootstrapConfigs(
 		return bootstrapConfigs{}, errors.Annotate(err, "finalizing authorized-keys")
 	}
 
-	v, ok := bootstrapModelConfig[config.LoggingOutputKey]
-	if ok && v != "" && !controllerConfig.Features().Contains(feature.LoggingOutput) {
-		return bootstrapConfigs{}, errors.Errorf("cannot set %q without setting the %q feature flag", config.LoggingOutputKey, feature.LoggingOutput)
-	}
-
 	// We need to do an Azure specific check here to ensure that
 	// if a resource-group-name is specified, the user has also
 	// not specified a default model, otherwise we end up with 2
 	// models with the same resource group name.
 	resourceGroupName, ok := bootstrapModelConfig["resource-group-name"]
 	if ok && resourceGroupName != "" && c.initialModelName != "" {
-		return bootstrapConfigs{}, errors.Errorf("if using resource-group-name %q then a workload model cannot be specified as well", resourceGroupName)
+		return bootstrapConfigs{}, errors.Errorf("if using resource-group-name %q then a workload model cannot be specified as well",
+			resourceGroupName)
 	}
 
 	logger.Debugf("preparing controller with config: %v", bootstrapModelConfig)
@@ -1544,6 +1633,26 @@ func (c *bootstrapCommand) bootstrapConfigs(
 		storagePools:             storagePools,
 	}
 	return configs, nil
+}
+
+// ensureDefaultBase ensures that the default base is set if the default series
+// is supplied. It removes the default-series, if there was one.
+func ensureDefaultBase(m map[string]interface{}) (map[string]interface{}, error) {
+	// TODO(stickupkid): Remove this once series has been deleted and the
+	// bases are the default.
+	if key, ok := m[config.DefaultSeriesKey]; ok {
+		if key == "" {
+			m[config.DefaultBaseKey] = ""
+		} else {
+			s, err := series.GetBaseFromSeries(key.(string))
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			m[config.DefaultBaseKey] = s.String()
+		}
+		delete(m, config.DefaultSeriesKey)
+	}
+	return m, nil
 }
 
 func (c *bootstrapCommand) InitialModelConfig(
@@ -1617,6 +1726,32 @@ func (c *bootstrapCommand) runInteractive(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+	return nil
+}
+
+func (c *bootstrapCommand) warnDeprecatedModelConfig(ctx *cmd.Context) error {
+	var reported bool
+	warn := func(attrs map[string]any) {
+		if _, ok := attrs["default-series"]; !reported && ok {
+			ctx.Warningf("default-series configuration option is deprecated in favour of default-base")
+			reported = true
+		}
+	}
+
+	type read func(*cmd.Context) (map[string]any, error)
+
+	for _, read := range []read{
+		c.config.ReadAttrs,
+		c.modelDefaults.ReadAttrs,
+	} {
+		attrs, err := read(ctx)
+		if err != nil {
+			return err
+		}
+
+		warn(attrs)
+	}
+
 	return nil
 }
 

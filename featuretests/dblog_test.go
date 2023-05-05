@@ -4,13 +4,14 @@
 package featuretests
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3/bson"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/names/v4"
-	jujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
 	"github.com/juju/utils/v3/arch"
@@ -28,6 +29,7 @@ import (
 	"github.com/juju/juju/cmd/jujud/agent/agenttest"
 	"github.com/juju/juju/controller"
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/database"
 	"github.com/juju/juju/state"
 	coretesting "github.com/juju/juju/testing"
 	"github.com/juju/juju/testing/factory"
@@ -71,22 +73,31 @@ func (s *dblogSuite) TestControllerAgentLogsGoToDBCAAS(c *gc.C) {
 	// Ensure controller config matches agent config so the agent worker
 	// does not exist with ErrRestartAgent.
 	err = s.State.UpdateControllerConfig(map[string]interface{}{
-		controller.MongoMemoryProfile: controller.MongoProfLow}, nil)
+		controller.MongoMemoryProfile:    controller.MongoProfLow,
+		controller.QueryTracingEnabled:   controller.DefaultQueryTracingEnabled,
+		controller.QueryTracingThreshold: controller.DefaultQueryTracingThreshold.String(),
+	}, nil)
 	c.Assert(err, jc.ErrorIsNil)
 	vers := version.Binary{
 		Number:  jujuversion.Current,
 		Arch:    arch.HostArch(),
 		Release: "kubernetes",
 	}
-	s.PrimeAgentVersion(c, node.Tag(), password, vers)
+
+	cfg, _ := s.PrimeAgentVersion(c, node.Tag(), password, vers)
+
+	logger := loggo.GetLogger("juju.featuretests")
+	err = database.BootstrapDqlite(context.TODO(), database.NewNodeManager(cfg, logger), logger, s.InitialDBOps...)
+	c.Assert(err, jc.ErrorIsNil)
+
 	s.assertAgentLogsGoToDB(c, node.Tag(), true)
 }
 
 func (s *dblogSuite) TestMachineAgentLogsGoToDBIAAS(c *gc.C) {
 	// Create a machine and an agent for it.
 	m, password := s.Factory.MakeMachineReturningPassword(c, &factory.MachineParams{
-		Nonce:  agent.BootstrapNonce,
-		Series: "quantal",
+		Nonce: agent.BootstrapNonce,
+		Base:  state.UbuntuBase("12.10"),
 	})
 
 	s.PrimeAgent(c, m.Tag(), password)
@@ -149,12 +160,12 @@ type debugLogDbSuite struct {
 }
 
 func (s *debugLogDbSuite) SetUpSuite(c *gc.C) {
-	jujutesting.MgoServer.Restart()
+	mgotesting.MgoServer.Restart()
 	s.AgentSuite.SetUpSuite(c)
 }
 
 func (s *debugLogDbSuite) TearDownSuite(c *gc.C) {
-	jujutesting.MgoServer.Restart()
+	mgotesting.MgoServer.Restart()
 	s.AgentSuite.TearDownSuite(c)
 }
 

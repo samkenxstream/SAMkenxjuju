@@ -5,7 +5,7 @@ package instancemutater_test
 
 import (
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/worker/v3"
 	"github.com/juju/worker/v3/workertest"
@@ -22,7 +22,6 @@ import (
 type lxdProfileWatcherSuite struct {
 	state     *mocks.MockInstanceMutaterState
 	machine0  *mocks.MockMachine
-	machine1  *mocks.MockMachine
 	unit      *mocks.MockUnit
 	principal *mocks.MockUnit
 	app       *mocks.MockApplication
@@ -186,8 +185,6 @@ func (s *lxdProfileWatcherSuite) TestMachineLXDProfileWatcherSubordinateWithProf
 
 func (s *lxdProfileWatcherSuite) assertAddSubordinate() {
 	// Add a new subordinate unit with a profile of a new application.
-	s.state.EXPECT().Unit("principal/0").Return(s.principal, nil)
-	s.principal.EXPECT().AssignedMachineId().Return("0", nil)
 
 	s.state.EXPECT().Unit("foo/0").Return(s.unit, nil)
 	s.unit.EXPECT().Life().Return(state.Alive)
@@ -199,7 +196,6 @@ func (s *lxdProfileWatcherSuite) assertAddSubordinate() {
 	s.unitChanges <- []string{"foo/0"}
 }
 
-//
 func (s *lxdProfileWatcherSuite) TestMachineLXDProfileWatcherSubordinateWithProfileUpdateUnit(c *gc.C) {
 	ctrl := s.setup(c)
 	defer ctrl.Finish()
@@ -219,8 +215,6 @@ func (s *lxdProfileWatcherSuite) TestMachineLXDProfileWatcherSubordinateWithProf
 	another.EXPECT().AssignedMachineId().Return("0", nil)
 	s.state.EXPECT().Unit("foo/1").Return(another, nil)
 
-	s.state.EXPECT().Unit("principal/0").Return(s.principal, nil)
-	s.principal.EXPECT().AssignedMachineId().Return("0", nil)
 	s.unitChanges <- []string{"foo/1"}
 	s.wc0.AssertOneChange()
 
@@ -228,8 +222,6 @@ func (s *lxdProfileWatcherSuite) TestMachineLXDProfileWatcherSubordinateWithProf
 	another.EXPECT().Life().Return(state.Alive)
 	another.EXPECT().PrincipalName().Return("principal/0", true)
 	another.EXPECT().AssignedMachineId().Return("0", nil)
-	s.state.EXPECT().Unit("principal/0").Return(s.principal, nil)
-	s.principal.EXPECT().AssignedMachineId().Return("0", nil)
 	s.state.EXPECT().Unit("foo/1").Return(another, nil)
 	s.unitChanges <- []string{"foo/1"}
 	s.wc0.AssertNoChange()
@@ -387,7 +379,7 @@ func (s *lxdProfileWatcherSuite) TestMachineLXDProfileWatcherMachineProvisioned(
 }
 
 func (s *lxdProfileWatcherSuite) updateCharmForMachineLXDProfileWatcher(rev string, profile bool) {
-	curl := "cs:name-me-" + rev
+	curl := "ch:name-me-" + rev
 	if profile {
 		s.charm.EXPECT().LXDProfile().Return(lxdprofile.Profile{
 			Config: map[string]string{"key1": "value1"},
@@ -419,17 +411,13 @@ func (s *lxdProfileWatcherSuite) setupWatchers(c *gc.C) {
 	s.instanceWatcher.EXPECT().Wait().Return(nil)
 }
 
-type noopSyncer struct{}
-
-func (noopSyncer) StartSync() {}
-
 func (s *lxdProfileWatcherSuite) assertStartLxdProfileWatcher(c *gc.C) worker.Worker {
 	s.setupWatchers(c)
 
 	s.machine0.EXPECT().Id().AnyTimes().Return("0")
 
 	w := instancemutater.NewTestLxdProfileWatcher(c, s.machine0, s.state)
-	wc := testing.NewNotifyWatcherC(c, noopSyncer{}, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	// Sends initial event.
 	wc.AssertOneChange()
 	s.wc0 = wc

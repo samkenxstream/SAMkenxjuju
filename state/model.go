@@ -11,11 +11,11 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	jujuutils "github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
 
@@ -379,12 +379,6 @@ func (ctlr *Controller) NewModel(args ModelArgs) (_ *Model, _ *State, err error)
 	}
 	prereqOps = append(prereqOps, assertCloudCredentialOp)
 
-	if owner.IsLocal() {
-		if _, err := st.User(owner); err != nil {
-			return nil, nil, errors.Annotate(err, "cannot create model")
-		}
-	}
-
 	uuid := args.Config.UUID()
 	session := st.session.Copy()
 	newSt, err := newState(
@@ -395,6 +389,7 @@ func (ctlr *Controller) NewModel(args ModelArgs) (_ *Model, _ *State, err error)
 		st.newPolicy,
 		st.clock(),
 		st.runTransactionObserver,
+		st.maxTxnAttempts,
 	)
 	if err != nil {
 		return nil, nil, errors.Annotate(err, "could not create state for new model")
@@ -777,6 +772,7 @@ func (m *Model) StatusHistory(filter status.StatusHistoryFilter) ([]status.Statu
 		db:        m.st.db(),
 		globalKey: m.globalKey(),
 		filter:    filter,
+		clock:     m.st.clock(),
 	}
 	return statusHistory(args)
 }
@@ -1643,7 +1639,7 @@ func removeModelFilesystemRefOp(mb modelBackend, filesystemId string) txn.Op {
 func addModelEntityRefOp(mb modelBackend, entityField, entityId string) txn.Op {
 	return txn.Op{
 		C:      modelEntityRefsC,
-		Id:     mb.modelUUID(),
+		Id:     mb.ModelUUID(),
 		Assert: txn.DocExists,
 		Update: bson.D{{"$addToSet", bson.D{{entityField, entityId}}}},
 	}
@@ -1652,7 +1648,7 @@ func addModelEntityRefOp(mb modelBackend, entityField, entityId string) txn.Op {
 func removeModelEntityRefOp(mb modelBackend, entityField, entityId string) txn.Op {
 	return txn.Op{
 		C:      modelEntityRefsC,
-		Id:     mb.modelUUID(),
+		Id:     mb.ModelUUID(),
 		Update: bson.D{{"$pull", bson.D{{entityField, entityId}}}},
 	}
 }

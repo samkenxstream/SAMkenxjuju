@@ -1,5 +1,6 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package main
 
 import (
@@ -9,7 +10,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -94,7 +94,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = ioutil.WriteFile(args[0], jsonSchema, 0644)
+	err = os.WriteFile(args[0], jsonSchema, 0644)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)

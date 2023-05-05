@@ -21,8 +21,7 @@ import (
 	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/bakeryutil"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/charmstore"
-	"github.com/juju/juju/rpc/params"
+	"github.com/juju/juju/core/macaroon"
 	"github.com/juju/juju/state"
 )
 
@@ -87,8 +86,8 @@ func newAuthContext(
 	// Create a bakery for discharging third-party caveats for
 	// local user authentication. This service does not persist keys;
 	// its macaroons should be very short-lived.
-	checker := checkers.New(charmstore.MacaroonNamespace)
-	checker.Register("is-authenticated-user", charmstore.MacaroonURI,
+	checker := checkers.New(macaroon.MacaroonNamespace)
+	checker.Register("is-authenticated-user", macaroon.MacaroonURI,
 		// Having a macaroon with an is-authenticated-user
 		// caveat is proof that the user is "logged in".
 		//"is-authenticated-user",
@@ -183,14 +182,13 @@ type authenticator struct {
 func (a authenticator) Authenticate(
 	ctx context.Context,
 	entityFinder authentication.EntityFinder,
-	tag names.Tag,
-	req params.LoginRequest,
+	authParams authentication.AuthParams,
 ) (state.Entity, error) {
-	auth, err := a.authenticatorForTag(tag)
+	auth, err := a.authenticatorForTag(authParams.AuthTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return auth.Authenticate(ctx, entityFinder, tag, req)
+	return auth.Authenticate(ctx, entityFinder, authParams)
 }
 
 // authenticatorForTag returns the authenticator appropriate

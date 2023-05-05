@@ -5,7 +5,7 @@ package applicationoffers
 
 import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
@@ -254,7 +254,7 @@ func (c *Client) FindApplicationOffers(filters ...crossmodel.ApplicationOfferFil
 	return convertOffersResultsToModel(offers.Results)
 }
 
-// GetConsumeDetails returns details necessary to consue an offer at a given URL.
+// GetConsumeDetails returns details necessary to consume an offer at a given URL.
 func (c *Client) GetConsumeDetails(urlStr string) (params.ConsumeOfferDetails, error) {
 
 	url, err := crossmodel.ParseOfferURL(urlStr)
@@ -289,6 +289,7 @@ func (c *Client) GetConsumeDetails(urlStr string) (params.ConsumeOfferDetails, e
 	return params.ConsumeOfferDetails{
 		Offer:          theOne.Offer,
 		Macaroon:       theOne.Macaroon,
+		AuthToken:      theOne.AuthToken,
 		ControllerInfo: theOne.ControllerInfo,
 	}, nil
 }

@@ -145,7 +145,8 @@ type ModelInfo struct {
 	ControllerUUID     string `json:"controller-uuid"`
 	IsController       bool   `json:"is-controller"`
 	ProviderType       string `json:"provider-type,omitempty"`
-	DefaultSeries      string `json:"default-series,omitempty"`
+	DefaultSeries      string `json:"default-series,omitempty"` // default-series is deprecated, use default-base
+	DefaultBase        string `json:"default-base,omitempty"`
 	CloudTag           string `json:"cloud-tag"`
 	CloudRegion        string `json:"cloud-region,omitempty"`
 	CloudCredentialTag string `json:"cloud-credential-tag,omitempty"`
@@ -171,6 +172,10 @@ type ModelInfo struct {
 	// This information is available to owners and users with write
 	// access or greater.
 	Machines []ModelMachineInfo `json:"machines"`
+
+	// SecretBackends contains information about the secret backends
+	// currently in use by the model.
+	SecretBackends []SecretBackendResult `json:"secret-backends"`
 
 	// Migration contains information about the latest failed or
 	// currently-running migration. It'll be nil if there isn't one.
@@ -326,6 +331,11 @@ type ModelMachineInfo struct {
 	HAPrimary *bool `json:"ha-primary,omitempty"`
 }
 
+// ModelApplicationInfo holds information about an application in a model.
+type ModelApplicationInfo struct {
+	Name string `json:"name"`
+}
+
 // MachineHardware holds information about a machine's hardware characteristics.
 type MachineHardware struct {
 	Arch             *string   `json:"arch,omitempty"`
@@ -335,6 +345,7 @@ type MachineHardware struct {
 	CpuPower         *uint64   `json:"cpu-power,omitempty"`
 	Tags             *[]string `json:"tags,omitempty"`
 	AvailabilityZone *string   `json:"availability-zone,omitempty"`
+	VirtType         *string   `json:"virt-type,omitempty"`
 }
 
 // ModelVolumeInfo holds information about a volume in a model.
@@ -489,10 +500,16 @@ type ModelParam struct {
 }
 
 // UpgradeModel contains the arguments for UpgradeModel API call.
-type UpgradeModel struct {
+type UpgradeModelParams struct {
 	ModelTag            string         `json:"model-tag"`
-	ToVersion           version.Number `json:"to-version"`
+	TargetVersion       version.Number `json:"target-version"`
 	AgentStream         string         `json:"agent-stream,omitempty"`
 	IgnoreAgentVersions bool           `json:"ignore-agent-versions,omitempty"`
 	DryRun              bool           `json:"dry-run,omitempty"`
+}
+
+// UpgradeModelResult holds the result of a UpgradeModel API call.
+type UpgradeModelResult struct {
+	ChosenVersion version.Number `json:"chosen-version"`
+	Error         *Error         `json:"error,omitempty"`
 }

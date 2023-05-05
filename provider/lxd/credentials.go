@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/utils/v3"
-	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 
 	"github.com/juju/juju/cloud"
@@ -181,7 +179,7 @@ func (p environProviderCredentials) detectLocalCredentials(certPEM, keyPEM []byt
 
 	label := fmt.Sprintf("LXD credential %q", lxdnames.DefaultCloud)
 	certCredential, err := p.finalizeLocalCredential(
-		ioutil.Discard, svr, string(certPEM), string(keyPEM), label,
+		io.Discard, svr, string(certPEM), string(keyPEM), label,
 	)
 	return certCredential, errors.Trace(err)
 }
@@ -538,11 +536,11 @@ type certificateReadWriter struct{}
 func (certificateReadWriter) Read(path string) ([]byte, []byte, error) {
 	clientCertPath := filepath.Join(path, "client.crt")
 	clientKeyPath := filepath.Join(path, "client.key")
-	certPEM, err := ioutil.ReadFile(clientCertPath)
+	certPEM, err := os.ReadFile(clientCertPath)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
-	keyPEM, err := ioutil.ReadFile(clientKeyPath)
+	keyPEM, err := os.ReadFile(clientKeyPath)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -555,10 +553,10 @@ func (certificateReadWriter) Write(path string, certPEM, keyPEM []byte) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return errors.Trace(err)
 	}
-	if err := ioutil.WriteFile(clientCertPath, certPEM, 0600); err != nil {
+	if err := os.WriteFile(clientCertPath, certPEM, 0600); err != nil {
 		return errors.Trace(err)
 	}
-	if err := ioutil.WriteFile(clientKeyPath, keyPEM, 0600); err != nil {
+	if err := os.WriteFile(clientKeyPath, keyPEM, 0600); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -569,7 +567,7 @@ func (certificateReadWriter) Write(path string, certPEM, keyPEM []byte) error {
 type certificateGenerator struct{}
 
 func (certificateGenerator) Generate(client bool, addHosts bool) (certPEM, keyPEM []byte, err error) {
-	return shared.GenerateMemCert(client, addHosts)
+	return lxd.GenerateMemCert(client, addHosts)
 }
 
 func endpointURL(endpoint string) (*url.URL, error) {

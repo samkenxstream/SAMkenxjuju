@@ -30,7 +30,13 @@ func (s *storageAddSuite) setupMultipleStoragesForAdd(c *gc.C) *state.Unit {
 		"multi1to10": makeStorageCons("persistent-block", 0, 3),
 	}
 	charm := s.AddTestingCharm(c, "storage-block2")
-	application, err := s.State.AddApplication(state.AddApplicationArgs{Name: "storage-block2", Charm: charm, Storage: storageCons})
+	application, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "storage-block2", Charm: charm, Storage: storageCons,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	u, err := application.AddUnit(state.AddUnitParams{})
 	c.Assert(err, jc.ErrorIsNil)
@@ -304,7 +310,7 @@ func (s *storageAddSuite) TestAddStorageLessMinSize(c *gc.C) {
 	s.assignUnit(c, u)
 
 	_, err := s.storageBackend.AddStorageForUnit(s.unitTag, "multi2up", state.StorageConstraints{Size: 2, Count: 1})
-	c.Assert(err, gc.ErrorMatches, `.*charm "storage-block2" store "multi2up": minimum storage size is 2.0GB, 2.0MB specified.*`)
+	c.Assert(err, gc.ErrorMatches, `.*charm "storage-block2" store "multi2up": minimum storage size is 2.0 GB, 2.0 MB specified.*`)
 	s.assertStorageCount(c, s.originalStorageCount)
 	s.assertVolumeCount(c, s.originalVolumeCount)
 	s.assertFileSystemCount(c, s.originalFilesystemCount)

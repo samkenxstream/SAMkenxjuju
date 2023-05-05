@@ -1,5 +1,6 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package gen
 
 import (
@@ -12,14 +13,15 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	jsonschema "github.com/juju/jsonschema-gen"
+	"github.com/juju/jsonschema-gen"
 	"github.com/juju/rpcreflect"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/juju/juju/apiserver/facade"
 )
 
-//go:generate go run github.com/golang/mock/mockgen -package gen -destination describeapi_mock.go github.com/juju/juju/generate/schemagen/gen APIServer,Registry,PackageRegistry,Linker
+//go:generate go run github.com/golang/mock/mockgen -package gen -destination describeapi_mock.go -write_package_comment=false github.com/juju/juju/generate/schemagen/gen APIServer,Registry,PackageRegistry,Linker
+
 type APIServer interface {
 	AllFacades() Registry
 	AdminFacadeDetails() []facade.Details
@@ -67,6 +69,10 @@ func WithFacadeGroups(facadeGroups []FacadeGroup) Option {
 		options.facadeGroups = facadeGroups
 	}
 }
+
+var (
+	structType = reflect.TypeOf(struct{}{})
+)
 
 // Generate a FacadeSchema from the APIServer
 func Generate(pkgRegistry PackageRegistry, linker Linker, client APIServer, options ...Option) ([]FacadeSchema, error) {
@@ -136,6 +142,17 @@ func Generate(pkgRegistry PackageRegistry, linker Linker, client APIServer, opti
 			}
 		}
 
+		if objType != nil {
+			for _, method := range objType.MethodNames() {
+				m, err := objType.Method(method)
+				if err != nil {
+					continue
+				}
+				if m.Params == structType && m.Result == nil {
+					return nil, errors.Errorf("method %q on facade %q has unexpected params. If you're trying to hide the method, use `func (_, _ struct{})`.", method, facade.Name)
+				}
+			}
+		}
 		result[i].Schema = jsonschema.ReflectFromObjType(objType)
 
 		if pkg == nil {

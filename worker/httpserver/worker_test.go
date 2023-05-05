@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/juju/clock/testclock"
 	"github.com/juju/loggo"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/pubsub/v2"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
@@ -40,7 +40,6 @@ type workerFixture struct {
 	hub                  *pubsub.StructuredHub
 	config               httpserver.Config
 	logDir               string
-	stub                 testing.Stub
 }
 
 func (s *workerFixture) SetUpTest(c *gc.C) {
@@ -167,7 +166,7 @@ func (s *WorkerSuite) makeRequest(c *gc.C, url string) {
 	defer resp.Body.Close()
 
 	c.Assert(resp.StatusCode, gc.Equals, http.StatusOK)
-	out, err := ioutil.ReadAll(resp.Body)
+	out, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(out), gc.Equals, "hello, world")
 }
@@ -231,7 +230,7 @@ func (s *WorkerSuite) TestExitsWithTardyClients(c *gc.C) {
 		c.Fatalf("didn't stop after timeout")
 	}
 	// There should be a log file with goroutines.
-	data, err := ioutil.ReadFile(filepath.Join(s.logDir, "apiserver-debug.log"))
+	data, err := os.ReadFile(filepath.Join(s.logDir, "apiserver-debug.log"))
 	c.Assert(err, jc.ErrorIsNil)
 	lines := strings.Split(string(data), "\n")
 	c.Assert(len(lines), jc.GreaterThan, 1)
@@ -371,8 +370,8 @@ func (s *WorkerControllerPortSuite) TestDualPortListenerWithDelay(c *gc.C) {
 	}
 
 	// Make a worker with a controller API port.
-	port := testing.FindTCPPort()
-	controllerPort := testing.FindTCPPort()
+	port := mgotesting.FindTCPPort()
+	controllerPort := mgotesting.FindTCPPort()
 	s.config.APIPort = port
 	s.config.ControllerAPIPort = controllerPort
 	s.config.APIPortOpenDelay = 10 * time.Second
@@ -473,8 +472,8 @@ func (s *WorkerControllerPortSuite) TestDualPortListenerWithDelayShutdown(c *gc.
 		return err
 	}
 	// Make a worker with a controller API port.
-	port := testing.FindTCPPort()
-	controllerPort := testing.FindTCPPort()
+	port := mgotesting.FindTCPPort()
+	controllerPort := mgotesting.FindTCPPort()
 	s.config.APIPort = port
 	s.config.ControllerAPIPort = controllerPort
 	s.config.APIPortOpenDelay = 10 * time.Second

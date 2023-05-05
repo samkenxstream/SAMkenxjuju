@@ -18,6 +18,7 @@ import (
 	"github.com/juju/juju/core/migration"
 	"github.com/juju/juju/core/multiwatcher"
 	"github.com/juju/juju/core/network"
+	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	corewatcher "github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
@@ -46,11 +47,6 @@ func (w *watcherCommon) Stop() error {
 	return w.resources.Stop(w.id)
 }
 
-// SrvAllWatcherV1 defines the API methods on a state.Multiwatcher.
-type SrvAllWatcherV1 struct {
-	*SrvAllWatcher
-}
-
 // SrvAllWatcher defines the API methods on a state.Multiwatcher.
 // which watches any changes to the state. Each client has its own
 // current set of watchers, stored in resources. It is used by both
@@ -60,55 +56,6 @@ type SrvAllWatcher struct {
 	watcher multiwatcher.Watcher
 
 	deltaTranslater DeltaTranslater
-}
-
-// NewAllWatcherV1 is a wrapper that creates a V1 AllWatcher API.
-func NewAllWatcherV1(context facade.Context) (facade.Facade, error) {
-	api, err := newAllWatcher(context, newAllWatcherDeltaTranslaterV1())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &SrvAllWatcherV1{api}, nil
-}
-
-// Next will return the current state of everything on the first call
-// and subsequent calls will
-func (aw *SrvAllWatcherV1) Next() (params.AllWatcherNextResults, error) {
-	deltas, err := aw.watcher.Next()
-	return params.AllWatcherNextResults{
-		Deltas: translate(aw.deltaTranslater, deltas),
-	}, err
-}
-
-type allWatcherDeltaTranslaterV1 struct {
-	DeltaTranslater
-}
-
-func newAllWatcherDeltaTranslaterV1() DeltaTranslater {
-	return &allWatcherDeltaTranslaterV1{
-		newAllWatcherDeltaTranslater(),
-	}
-}
-
-func (aw allWatcherDeltaTranslaterV1) TranslateAction(info multiwatcher.EntityInfo) params.EntityInfo {
-	orig, ok := info.(*multiwatcher.ActionInfo)
-	if !ok {
-		logger.Criticalf("consistency error: %s", pretty.Sprint(info))
-		return nil
-	}
-	return &params.ActionInfo{
-		ModelUUID:  orig.ModelUUID,
-		Id:         orig.ID,
-		Receiver:   orig.Receiver,
-		Name:       orig.Name,
-		Parameters: orig.Parameters,
-		Status:     orig.Status,
-		Message:    orig.Message,
-		Results:    orig.Results,
-		Enqueued:   orig.Enqueued,
-		Started:    orig.Started,
-		Completed:  orig.Completed,
-	}
 }
 
 func newAllWatcher(context facade.Context, deltaTranslater DeltaTranslater) (*SrvAllWatcher, error) {
@@ -307,7 +254,7 @@ func (aw allWatcherDeltaTranslater) TranslateMachine(info multiwatcher.EntityInf
 		InstanceStatus:           aw.translateStatus(orig.InstanceStatus),
 		Life:                     orig.Life,
 		Config:                   orig.Config,
-		Series:                   orig.Series,
+		Base:                     orig.Base,
 		ContainerType:            orig.ContainerType,
 		IsManual:                 orig.IsManual,
 		SupportedContainers:      orig.SupportedContainers,
@@ -412,7 +359,7 @@ func (aw allWatcherDeltaTranslater) TranslateUnit(info multiwatcher.EntityInfo) 
 		ModelUUID:      orig.ModelUUID,
 		Name:           orig.Name,
 		Application:    orig.Application,
-		Series:         orig.Series,
+		Base:           orig.Base,
 		CharmURL:       orig.CharmURL,
 		Life:           orig.Life,
 		PublicAddress:  orig.PublicAddress,
@@ -855,7 +802,6 @@ func (w *srvRelationStatusWatcher) Next() (params.RelationLifeSuspendedStatusWat
 type srvOfferStatusWatcher struct {
 	watcherCommon
 	st      *state.State
-	model   *cache.Model
 	watcher crossmodelrelations.OfferWatcher
 }
 
@@ -865,10 +811,6 @@ func newOfferStatusWatcher(context facade.Context) (facade.Facade, error) {
 	resources := context.Resources()
 
 	st := context.State()
-	model, err := context.CachedModel(st.ModelUUID())
-	if err != nil {
-		return watcherCommon{}, err
-	}
 
 	// TODO(wallyworld) - enhance this watcher to support
 	// anonymous api calls with macaroons.
@@ -882,7 +824,6 @@ func newOfferStatusWatcher(context facade.Context) (facade.Facade, error) {
 	return &srvOfferStatusWatcher{
 		watcherCommon: newWatcherCommon(context),
 		st:            st,
-		model:         model,
 		watcher:       watcher,
 	}, nil
 }
@@ -896,9 +837,14 @@ func (w *srvOfferStatusWatcher) Next() (params.OfferStatusWatchResult, error) {
 			crossmodel.GetBackend(w.st),
 			w.watcher.OfferUUID(), w.watcher.OfferName())
 		if err != nil {
-			return params.OfferStatusWatchResult{
-				Error: apiservererrors.ServerError(err),
-			}, nil
+			// For the specific case where we are informed that a migration is
+			// in progress, we want to return an error that causes the client
+			// to stop watching, rather than in the payload.
+			if errors.Is(err, migration.ErrMigrating) {
+				return params.OfferStatusWatchResult{}, err
+			}
+
+			return params.OfferStatusWatchResult{Error: apiservererrors.ServerError(err)}, nil
 		}
 		return params.OfferStatusWatchResult{
 			Changes: []params.OfferStatusChange{*change},
@@ -1289,14 +1235,14 @@ func (w *SrvModelSummaryWatcher) translateMessages(messages []cache.ModelSummary
 	return result
 }
 
-// srvSecretRotationWatcher defines the API wrapping a SecretsRotationWatcher.
-type srvSecretRotationWatcher struct {
+// srvSecretTriggerWatcher defines the API wrapping a SecretsTriggerWatcher.
+type srvSecretTriggerWatcher struct {
 	watcherCommon
 	st      *state.State
-	watcher state.SecretsRotationWatcher
+	watcher state.SecretsTriggerWatcher
 }
 
-func newSecretsRotationWatcher(context facade.Context) (facade.Facade, error) {
+func newSecretsTriggerWatcher(context facade.Context) (facade.Facade, error) {
 	id := context.ID()
 	auth := context.Auth()
 	resources := context.Resources()
@@ -1306,11 +1252,11 @@ func newSecretsRotationWatcher(context facade.Context) (facade.Facade, error) {
 	if !isAgent(auth) {
 		return nil, apiservererrors.ErrPerm
 	}
-	watcher, ok := resources.Get(id).(state.SecretsRotationWatcher)
+	watcher, ok := resources.Get(id).(state.SecretsTriggerWatcher)
 	if !ok {
 		return nil, apiservererrors.ErrUnknownWatcher
 	}
-	return &srvSecretRotationWatcher{
+	return &srvSecretTriggerWatcher{
 		watcherCommon: newWatcherCommon(context),
 		st:            st,
 		watcher:       watcher,
@@ -1320,9 +1266,9 @@ func newSecretsRotationWatcher(context facade.Context) (facade.Facade, error) {
 // Next returns when a change has occurred to an entity of the
 // collection being watched since the most recent call to Next
 // or the Watch call that created the srvSecretRotationWatcher.
-func (w *srvSecretRotationWatcher) Next() (params.SecretRotationWatchResult, error) {
+func (w *srvSecretTriggerWatcher) Next() (params.SecretTriggerWatchResult, error) {
 	if changes, ok := <-w.watcher.Changes(); ok {
-		return params.SecretRotationWatchResult{
+		return params.SecretTriggerWatchResult{
 			Changes: w.translateChanges(changes),
 		}, nil
 	}
@@ -1330,21 +1276,152 @@ func (w *srvSecretRotationWatcher) Next() (params.SecretRotationWatchResult, err
 	if err == nil {
 		err = apiservererrors.ErrStoppedWatcher
 	}
-	return params.SecretRotationWatchResult{}, err
+	return params.SecretTriggerWatchResult{}, err
 }
 
-func (w *srvSecretRotationWatcher) translateChanges(changes []corewatcher.SecretRotationChange) []params.SecretRotationChange {
+func (w *srvSecretTriggerWatcher) translateChanges(changes []corewatcher.SecretTriggerChange) []params.SecretTriggerChange {
 	if changes == nil {
 		return nil
 	}
-	result := make([]params.SecretRotationChange, len(changes))
+	result := make([]params.SecretTriggerChange, len(changes))
 	for i, c := range changes {
-		result[i] = params.SecretRotationChange{
-			ID:             c.ID,
-			URL:            c.URL.ID(),
-			RotateInterval: c.RotateInterval,
-			LastRotateTime: c.LastRotateTime,
+		result[i] = params.SecretTriggerChange{
+			URI:             c.URI.String(),
+			Revision:        c.Revision,
+			NextTriggerTime: c.NextTriggerTime,
 		}
 	}
 	return result
+}
+
+// srvSecretBackendsRotateWatcher defines the API wrapping a SecretBackendsRotateWatcher.
+type srvSecretBackendsRotateWatcher struct {
+	watcherCommon
+	st      *state.State
+	watcher state.SecretBackendRotateWatcher
+}
+
+func newSecretBackendsRotateWatcher(context facade.Context) (facade.Facade, error) {
+	id := context.ID()
+	auth := context.Auth()
+	resources := context.Resources()
+
+	st := context.State()
+
+	if !isAgent(auth) {
+		return nil, apiservererrors.ErrPerm
+	}
+	watcher, ok := resources.Get(id).(state.SecretBackendRotateWatcher)
+	if !ok {
+		return nil, apiservererrors.ErrUnknownWatcher
+	}
+	return &srvSecretBackendsRotateWatcher{
+		watcherCommon: newWatcherCommon(context),
+		st:            st,
+		watcher:       watcher,
+	}, nil
+}
+
+// Next returns when a change has occurred to an entity of the
+// collection being watched since the most recent call to Next
+// or the Watch call that created the srvSecretRotationWatcher.
+func (w *srvSecretBackendsRotateWatcher) Next() (params.SecretBackendRotateWatchResult, error) {
+	if changes, ok := <-w.watcher.Changes(); ok {
+		return params.SecretBackendRotateWatchResult{
+			Changes: w.translateChanges(changes),
+		}, nil
+	}
+	err := w.watcher.Err()
+	if err == nil {
+		err = apiservererrors.ErrStoppedWatcher
+	}
+	return params.SecretBackendRotateWatchResult{}, err
+}
+
+func (w *srvSecretBackendsRotateWatcher) translateChanges(changes []corewatcher.SecretBackendRotateChange) []params.SecretBackendRotateChange {
+	if changes == nil {
+		return nil
+	}
+	result := make([]params.SecretBackendRotateChange, len(changes))
+	for i, c := range changes {
+		result[i] = params.SecretBackendRotateChange{
+			ID:              c.ID,
+			Name:            c.Name,
+			NextTriggerTime: c.NextTriggerTime,
+		}
+	}
+	return result
+}
+
+// srvSecretsRevisionWatcher defines the API wrapping a SecretsRevisionWatcher.
+type srvSecretsRevisionWatcher struct {
+	watcherCommon
+	st      *state.State
+	watcher state.StringsWatcher
+}
+
+func newSecretsRevisionWatcher(context facade.Context) (facade.Facade, error) {
+	id := context.ID()
+	auth := context.Auth()
+	resources := context.Resources()
+
+	st := context.State()
+
+	// TODO(wallyworld) - enhance this watcher to support
+	// anonymous api calls with macaroons.
+	if auth.GetAuthTag() != nil && !isAgent(auth) {
+		return nil, apiservererrors.ErrPerm
+	}
+	watcher, ok := resources.Get(id).(state.StringsWatcher)
+	if !ok {
+		return nil, apiservererrors.ErrUnknownWatcher
+	}
+	return &srvSecretsRevisionWatcher{
+		watcherCommon: newWatcherCommon(context),
+		st:            st,
+		watcher:       watcher,
+	}, nil
+}
+
+// Next returns when a change has occurred to an entity of the
+// collection being watched since the most recent call to Next
+// or the Watch call that created the srvSecretRotationWatcher.
+func (w *srvSecretsRevisionWatcher) Next() (params.SecretRevisionWatchResult, error) {
+	if changes, ok := <-w.watcher.Changes(); ok {
+		ch, err := w.translateChanges(changes)
+		if err != nil {
+			return params.SecretRevisionWatchResult{}, errors.Trace(err)
+		}
+		return params.SecretRevisionWatchResult{
+			Changes: ch,
+		}, nil
+	}
+	err := w.watcher.Err()
+	if err == nil {
+		err = apiservererrors.ErrStoppedWatcher
+	}
+	return params.SecretRevisionWatchResult{}, err
+}
+
+func (w *srvSecretsRevisionWatcher) translateChanges(changes []string) ([]params.SecretRevisionChange, error) {
+	if changes == nil {
+		return nil, nil
+	}
+	secrets := state.NewSecrets(w.st)
+	result := make([]params.SecretRevisionChange, len(changes))
+	for i, uriStr := range changes {
+		uri, err := coresecrets.ParseURI(uriStr)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		md, err := secrets.GetSecret(uri)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		result[i] = params.SecretRevisionChange{
+			URI:      uri.String(),
+			Revision: md.LatestRevision,
+		}
+	}
+	return result, nil
 }

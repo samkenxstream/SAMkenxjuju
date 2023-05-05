@@ -8,7 +8,6 @@ import (
 	stdcontext "context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"time"
@@ -101,11 +100,11 @@ with the specified name.
 If the cluster does not have a storage provisioning capability, use the
 --skip-storage option to add the cluster without any workload storage configured.
 
-When adding a GKE or AKS cluster, you can use the --gke or --aks option to
-interactively be stepped through the registration process, or you can supply the
-necessary parameters directly.
+`
 
-Examples:
+const usageAddCAASExamples = `
+When your kubeconfig file is in the default location:
+
     juju add-k8s myk8scloud
     juju add-k8s myk8scloud --client
     juju add-k8s myk8scloud --controller mycontroller
@@ -114,21 +113,15 @@ Examples:
     juju add-k8s myk8scloud --cloud cloudNameOrCloudType
     juju add-k8s myk8scloud --cloud cloudNameOrCloudType --region=someregion
     juju add-k8s myk8scloud --cloud cloudNameOrCloudType --storage mystorageclass
+    
+To add a Kubernetes cloud using data from your kubeconfig file, when this file is not in the default location:
 
     KUBECONFIG=path-to-kubeconfig-file juju add-k8s myk8scloud --cluster-name=my_cluster_name
+    
+To add a Kubernetes cloud using data from kubectl, when your kubeconfig file is not in the default location:
+
     kubectl config view --raw | juju add-k8s myk8scloud --cluster-name=my_cluster_name
 
-    juju add-k8s --gke myk8scloud
-    juju add-k8s --gke --project=myproject myk8scloud
-    juju add-k8s --gke --credential=myaccount --project=myproject myk8scloud
-    juju add-k8s --gke --credential=myaccount --project=myproject --region=someregion myk8scloud
-
-    juju add-k8s --aks myk8scloud
-    juju add-k8s --aks --cluster-name mycluster myk8scloud
-    juju add-k8s --aks --cluster-name mycluster --resource-group myrg myk8scloud
-
-See also:
-    remove-k8s
 `
 
 // AddCAASCommand is the command that allows you to add a caas and credential
@@ -229,10 +222,14 @@ func newAddCAASCommand(cloudMetadataStore CloudMetadataStore, clock jujuclock.Cl
 // Info returns help information about the command.
 func (c *AddCAASCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "add-k8s",
-		Args:    "<k8s name>",
-		Purpose: usageAddCAASSummary,
-		Doc:     usageAddCAASDetails,
+		Name:     "add-k8s",
+		Args:     "<k8s name>",
+		Purpose:  usageAddCAASSummary,
+		Doc:      usageAddCAASDetails,
+		Examples: usageAddCAASExamples,
+		SeeAlso: []string{
+			"remove-k8s",
+		},
 	})
 }
 
@@ -245,12 +242,13 @@ func (c *AddCAASCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.StringVar(&c.hostCloud, "cloud", "", "k8s cluster cloud")
 	f.StringVar(&c.workloadStorage, "storage", "", "k8s storage class for workload storage")
 	f.BoolVar(&c.skipStorage, "skip-storage", false, "used when adding a cluster that doesn't have storage")
-	f.StringVar(&c.project, "project", "", "project to which the cluster belongs")
 	f.StringVar(&c.credential, "credential", "", "the credential to use when accessing the cluster")
-	f.StringVar(&c.resourceGroup, "resource-group", "", "the Azure resource group of the AKS cluster")
-	f.BoolVar(&c.gke, "gke", false, "used when adding a GKE cluster")
-	f.BoolVar(&c.aks, "aks", false, "used when adding an AKS cluster")
-	f.BoolVar(&c.eks, "eks", false, "used when adding an EKS cluster")
+	// TODO(k8s) - support k8s tooling in strict snap
+	// f.StringVar(&c.project, "project", "", "project to which the cluster belongs")
+	// f.StringVar(&c.resourceGroup, "resource-group", "", "the Azure resource group of the AKS cluster")
+	//f.BoolVar(&c.gke, "gke", false, "used when adding a GKE cluster")
+	//f.BoolVar(&c.aks, "aks", false, "used when adding an AKS cluster")
+	//f.BoolVar(&c.eks, "eks", false, "used when adding an EKS cluster")
 }
 
 func countTrue(items ...bool) (count int) {
@@ -350,7 +348,7 @@ func getStdinPipe(ctx *cmd.Context) (io.Reader, error) {
 		if err != nil {
 			return nil, err
 		}
-		content, err := ioutil.ReadAll(stdIn)
+		content, err := io.ReadAll(stdIn)
 		if err != nil {
 			return nil, err
 		}

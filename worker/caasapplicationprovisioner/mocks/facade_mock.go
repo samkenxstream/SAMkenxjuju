@@ -11,7 +11,7 @@ import (
 	charms "github.com/juju/juju/api/common/charms"
 	caasapplicationprovisioner "github.com/juju/juju/api/controller/caasapplicationprovisioner"
 	life "github.com/juju/juju/core/life"
-	resource "github.com/juju/juju/core/resources"
+	resources "github.com/juju/juju/core/resources"
 	status "github.com/juju/juju/core/status"
 	watcher "github.com/juju/juju/core/watcher"
 	params "github.com/juju/juju/rpc/params"
@@ -57,10 +57,10 @@ func (mr *MockCAASProvisionerFacadeMockRecorder) ApplicationCharmInfo(arg0 inter
 }
 
 // ApplicationOCIResources mocks base method.
-func (m *MockCAASProvisionerFacade) ApplicationOCIResources(arg0 string) (map[string]resource.DockerImageDetails, error) {
+func (m *MockCAASProvisionerFacade) ApplicationOCIResources(arg0 string) (map[string]resources.DockerImageDetails, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ApplicationOCIResources", arg0)
-	ret0, _ := ret[0].(map[string]resource.DockerImageDetails)
+	ret0, _ := ret[0].(map[string]resources.DockerImageDetails)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -244,6 +244,21 @@ func (m *MockCAASProvisionerFacade) WatchApplications() (watcher.StringsWatcher,
 func (mr *MockCAASProvisionerFacadeMockRecorder) WatchApplications() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WatchApplications", reflect.TypeOf((*MockCAASProvisionerFacade)(nil).WatchApplications))
+}
+
+// WatchProvisioningInfo mocks base method.
+func (m *MockCAASProvisionerFacade) WatchProvisioningInfo(arg0 string) (watcher.NotifyWatcher, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "WatchProvisioningInfo", arg0)
+	ret0, _ := ret[0].(watcher.NotifyWatcher)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// WatchProvisioningInfo indicates an expected call of WatchProvisioningInfo.
+func (mr *MockCAASProvisionerFacadeMockRecorder) WatchProvisioningInfo(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WatchProvisioningInfo", reflect.TypeOf((*MockCAASProvisionerFacade)(nil).WatchProvisioningInfo), arg0)
 }
 
 // WatchUnits mocks base method.

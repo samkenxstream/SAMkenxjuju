@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/juju/ansiterm"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
@@ -356,15 +356,17 @@ func (c *runCommandBase) handleTimeout(tasks []enqueuedAction, got set.Strings) 
 }
 
 // progressf prints progress information such as:
-//   "Running operation 1 with 2 tasks"
-//   "Waiting for task 3..."
+//
+//	"Running operation 1 with 2 tasks"
+//	"Waiting for task 3..."
+//
 // This output is sent to either logs or console as per this table:
 //
-//    c.hideProgress = |  true   |  false  |
-//   ------------------|---------|---------|
-//       --quiet flag  |  logs   |  logs   |
-//       neither flag  |  logs   | console |
-//     --verbose flag  | console | console |
+//	 c.hideProgress = |  true   |  false  |
+//	------------------|---------|---------|
+//	    --quiet flag  |  logs   |  logs   |
+//	    neither flag  |  logs   | console |
+//	  --verbose flag  | console | console |
 //
 // By setting the hideProgress field, commands can choose whether these
 // messages are logged or sent to console by default.
@@ -501,7 +503,7 @@ func fetchResult(api APIClient, requestedId string) (actionapi.ActionResult, err
 	return result, nil
 }
 
-//colorVal appends ansi color codes to the given value
+// colorVal appends ansi color codes to the given value
 func colorVal(ctx *ansiterm.Context, val interface{}) string {
 	buff := &bytes.Buffer{}
 	coloredWriter := ansiterm.NewWriter(buff)
@@ -526,7 +528,6 @@ func isTerminal(w io.Writer) bool {
 type enqueuedAction struct {
 	task     string
 	receiver string
-	err      error
 }
 
 func (a *enqueuedAction) receiverId() string {

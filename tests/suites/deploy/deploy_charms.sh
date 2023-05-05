@@ -5,7 +5,7 @@ run_deploy_charm() {
 
 	ensure "test-deploy-charm" "${file}"
 
-	juju deploy cs:~jameinel/ubuntu-lite-7
+	juju deploy jameinel-ubuntu-lite
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 
 	destroy_model "test-deploy-charm"
@@ -18,12 +18,14 @@ run_deploy_specific_series() {
 
 	ensure "test-deploy-specific-series" "${file}"
 
-	juju deploy postgresql --series focal
-	series=$(juju status --format=json | jq ".applications.postgresql.series")
+	juju deploy postgresql --base ubuntu@20.04
+	base_name=$(juju status --format=json | jq ".applications.postgresql.base.name")
+	base_channel=$(juju status --format=json | jq ".applications.postgresql.base.channel")
 
 	destroy_model "test-deploy-specific-series"
 
-	echo "$series" | check "focal"
+	echo "$base_name" | check "ubuntu"
+	echo "$base_channel" | check "20.04"
 }
 
 run_deploy_lxd_profile_charm() {
@@ -33,9 +35,8 @@ run_deploy_lxd_profile_charm() {
 
 	ensure "test-deploy-lxd-profile" "${file}"
 
-	# TODO - upgrade the charm to support focal
-	juju deploy juju-qa-lxd-profile-without-devices --channel beta
-	wait_for "lxd-profile" "$(idle_condition "lxd-profile")"
+	juju deploy juju-qa-lxd-profile-without-devices
+	wait_for "lxd-profile-without-devices" "$(idle_condition "lxd-profile-without-devices")"
 
 	juju status --format=json | jq '.machines | .["0"] | .["lxd-profiles"] | keys[0]' | check "juju-test-deploy-lxd-profile-lxd-profile"
 
@@ -49,14 +50,31 @@ run_deploy_lxd_profile_charm_container() {
 
 	ensure "test-deploy-lxd-profile-container" "${file}"
 
-	# TODO - upgrade the charm to support focal
-	juju deploy juju-qa-lxd-profile-without-devices --channel beta --to lxd
-	wait_for "lxd-profile" "$(idle_condition "lxd-profile")"
+	juju deploy juju-qa-lxd-profile-without-devices --to lxd
+	wait_for "lxd-profile-without-devices" "$(idle_condition "lxd-profile-without-devices")"
 
 	juju status --format=json | jq '.machines | .["0"] | .containers | .["0/lxd/0"] | .["lxd-profiles"] | keys[0]' |
 		check "juju-test-deploy-lxd-profile-container-lxd-profile"
 
 	destroy_model "test-deploy-lxd-profile-container"
+}
+
+run_deploy_local_predeployed_charm() {
+	echo
+
+	model_name="test-deploy-local-predeployed-charm"
+	file="${TEST_DIR}/${model_name}.log"
+
+	ensure "${model_name}" "${file}"
+
+	juju deploy ./testcharms/charms/lxd-profile --base ubuntu@22.04
+	wait_for "lxd-profile" "$(idle_condition "lxd-profile")"
+
+	juju deploy local:jammy/lxd-profile-0 another-lxd-profile-app
+	wait_for "another-lxd-profile-app" "$(idle_condition "another-lxd-profile-app")"
+	wait_for "active" '.applications["another-lxd-profile-app"] | ."application-status".current'
+
+	destroy_model "${model_name}"
 }
 
 run_deploy_local_lxd_profile_charm() {
@@ -66,9 +84,9 @@ run_deploy_local_lxd_profile_charm() {
 
 	ensure "test-deploy-local-lxd-profile" "${file}"
 
-	juju deploy ./tests/suites/deploy/charms/lxd-profile
-	juju deploy ./tests/suites/deploy/charms/lxd-profile-subordinate
-	juju add-relation lxd-profile-subordinate lxd-profile
+	juju deploy ./testcharms/charms/lxd-profile
+	juju deploy ./testcharms/charms/lxd-profile-subordinate
+	juju integrate lxd-profile-subordinate lxd-profile
 
 	wait_for "lxd-profile" "$(idle_condition "lxd-profile")"
 	wait_for "lxd-profile-subordinate" ".applications | keys[1]"
@@ -110,17 +128,22 @@ run_deploy_lxd_to_machine() {
 
 	ensure "${model_name}" "${file}"
 
-	juju add-machine -n 1 --series=jammy
+	juju add-machine -n 2 --series=jammy
 
 	charm=./tests/suites/deploy/charms/lxd-profile-alt
-	juju deploy "${charm}" --to 0
+	juju deploy "${charm}" --to 0 --base ubuntu@22.04
+
+	# Test the case where we wait for the machine to start
+	# before deploying the unit.
+	wait_for_machine_agent_status "1" "started"
+	juju add-unit lxd-profile-alt --to 1
 
 	wait_for "lxd-profile-alt" "$(idle_condition "lxd-profile-alt")"
 
 	lxc profile show "juju-test-deploy-lxd-machine-lxd-profile-alt-0" |
 		grep -E "linux.kernel_modules: ([a-zA-Z0-9\_,]+)?ip_tables,ip6_tables([a-zA-Z0-9\_,]+)?"
 
-	juju upgrade-charm "lxd-profile-alt" --path "${charm}"
+	juju refresh "lxd-profile-alt" --path "${charm}"
 
 	# Ensure that an upgrade will be kicked off. This doesn't mean an upgrade
 	# has finished though, just started.
@@ -178,7 +201,7 @@ run_deploy_lxd_to_container() {
 	OUT=$(juju exec --machine 0 -- sh -c 'sudo lxc profile show "juju-test-deploy-lxd-container-lxd-profile-alt-0"')
 	echo "${OUT}" | grep -E "linux.kernel_modules: ([a-zA-Z0-9\_,]+)?ip_tables,ip6_tables([a-zA-Z0-9\_,]+)?"
 
-	juju upgrade-charm "lxd-profile-alt" --path "${charm}"
+	juju refresh "lxd-profile-alt" --path "${charm}"
 
 	# Ensure that an upgrade will be kicked off. This doesn't mean an upgrade
 	# has finished though, just started.
@@ -210,11 +233,33 @@ run_deploy_lxd_to_container() {
 		attempt=$((attempt + 1))
 		if [ $attempt -eq 10 ]; then
 			# shellcheck disable=SC2046
-			echo $(red "timeout: waiting for lxc profile to show 50sec")
+			echo $(red "timeout: waiting for removal of lxc profile 50sec")
 			exit 5
 		fi
 		sleep 5
 	done
+
+	destroy_model "${model_name}"
+}
+
+# Checks the install hook resolving with --no-retry flag
+run_resolve_charm() {
+	echo
+
+	model_name="test-resolve-charm"
+	file="${TEST_DIR}/${model_name}.log"
+
+	ensure "${model_name}" "${file}"
+
+	charm=./testcharms/charms/simple-resolve
+	juju deploy "${charm}"
+
+	wait_for "error" '.applications["simple-resolve"] | ."application-status".current'
+
+	juju resolve --no-retry simple-resolve/0
+
+	wait_for "No install hook" '.applications["simple-resolve"] | ."application-status".message'
+	wait_for "active" '.applications["simple-resolve"] | ."application-status".current'
 
 	destroy_model "${model_name}"
 }
@@ -234,11 +279,13 @@ test_deploy_charms() {
 		run "run_deploy_specific_series"
 		run "run_deploy_lxd_to_container"
 		run "run_deploy_lxd_profile_charm_container"
+		run "run_resolve_charm"
 
 		case "${BOOTSTRAP_PROVIDER:-}" in
 		"lxd" | "localhost")
 			run "run_deploy_lxd_to_machine"
 			run "run_deploy_lxd_profile_charm"
+			run "run_deploy_local_predeployed_charm"
 			run "run_deploy_local_lxd_profile_charm"
 			;;
 		*)

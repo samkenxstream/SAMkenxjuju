@@ -13,13 +13,11 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/cmd/v3"
-	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/loggo"
-	"github.com/juju/os/v2/series"
 
 	"github.com/juju/juju/charmhub"
 	"github.com/juju/juju/charmhub/transport"
@@ -27,6 +25,7 @@ import (
 	"github.com/juju/juju/cmd/output/progress"
 	"github.com/juju/juju/core/arch"
 	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/core/series"
 	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/version"
 )
@@ -35,18 +34,17 @@ const (
 	downloadSummary = "Locates and then downloads a CharmHub charm."
 	downloadDoc     = `
 Download a charm to the current directory from the CharmHub store
-by a specified name.
+by a specified name. Downloading for a specific base can be done via
+--base. --base can be specified using the OS name and the version of
+the OS, separated by @. For example, --base ubuntu@22.04.
 
 Adding a hyphen as the second argument allows the download to be piped
 to stdout.
+`
 
-Examples:
+	downloadExamples = `
     juju download postgresql
     juju download postgresql --no-progress - > postgresql.charm
-
-See also:
-    info
-    find
 `
 )
 
@@ -54,7 +52,6 @@ See also:
 func NewDownloadCommand() cmd.Command {
 	return &downloadCommand{
 		charmHubCommand: newCharmHubCommand(),
-		orderedSeries:   series.SupportedJujuControllerSeries(),
 	}
 }
 
@@ -63,25 +60,26 @@ func NewDownloadCommand() cmd.Command {
 type downloadCommand struct {
 	*charmHubCommand
 
-	out cmd.Output
-
 	channel       string
 	charmOrBundle string
 	archivePath   string
 	pipeToStdout  bool
 	noProgress    bool
-
-	orderedSeries []string
 }
 
 // Info returns help related download about the command, it implements
 // part of the cmd.Command interface.
 func (c *downloadCommand) Info() *cmd.Info {
 	download := &cmd.Info{
-		Name:    "download",
-		Args:    "[options] <charm>",
-		Purpose: downloadSummary,
-		Doc:     downloadDoc,
+		Name:     "download",
+		Args:     "[options] <charm>",
+		Purpose:  downloadSummary,
+		Doc:      downloadDoc,
+		Examples: downloadExamples,
+		SeeAlso: []string{
+			"info",
+			"find",
+		},
 	}
 	return jujucmd.Info(download)
 }
@@ -92,7 +90,8 @@ func (c *downloadCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.charmHubCommand.SetFlags(f)
 
 	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("specify an arch <%s>", c.archArgumentList()))
-	f.StringVar(&c.series, "series", SeriesAll, "specify a series")
+	f.StringVar(&c.series, "series", SeriesAll, "specify a series. DEPRECATED use --base")
+	f.StringVar(&c.base, "base", "", "specify a base")
 	f.StringVar(&c.channel, "channel", "", "specify a channel to use instead of the default release")
 	f.StringVar(&c.archivePath, "filepath", "", "filepath location of the charm to download to")
 	f.BoolVar(&c.noProgress, "no-progress", false, "disable the progress bar")
@@ -101,6 +100,10 @@ func (c *downloadCommand) SetFlags(f *gnuflag.FlagSet) {
 // Init initializes the download command, including validating the provided
 // flags. It implements part of the cmd.Command interface.
 func (c *downloadCommand) Init(args []string) error {
+	if c.base != "" && (c.series != "" && c.series != SeriesAll) {
+		return errors.New("--series and --base cannot be specified together")
+	}
+
 	if err := c.charmHubCommand.Init(args); err != nil {
 		return errors.Trace(err)
 	}
@@ -128,7 +131,8 @@ func (c *downloadCommand) Init(args []string) error {
 func (c *downloadCommand) validateCharmOrBundle(charmOrBundle string) (*charm.URL, error) {
 	curl, err := charm.ParseURL(charmOrBundle)
 	if err != nil {
-		return nil, errors.Annotatef(err, "unexpected charm or bundle name")
+		logger.Debugf("%s", err)
+		return nil, errors.NotValidf("charm or bundle name, %q, is", charmOrBundle)
 	}
 	if !charm.CharmHub.Matches(curl.Schema) {
 		return nil, errors.Errorf("%q is not a Charmhub charm", charmOrBundle)
@@ -139,6 +143,28 @@ func (c *downloadCommand) validateCharmOrBundle(charmOrBundle string) (*charm.UR
 // Run is the business logic of the download command.  It implements the meaty
 // part of the cmd.Command interface.
 func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
+	var (
+		base series.Base
+		err  error
+	)
+	// Note: we validated that both series and base cannot be specified in
+	// Init(), so it's safe to assume that only one of them is set here.
+	if c.series == SeriesAll {
+		c.series = ""
+	} else if c.series != "" {
+		cmdContext.Warningf("series flag is deprecated, use --base instead")
+		if base, err = series.GetBaseFromSeries(c.series); err != nil {
+			return errors.Annotatef(err, "attempting to convert %q to a base", c.series)
+		}
+		c.base = base.String()
+		c.series = ""
+	}
+	if c.base != "" {
+		if base, err = series.ParseBaseFromString(c.base); err != nil {
+			return errors.Trace(err)
+		}
+	}
+
 	cfg := charmhub.Config{
 		URL:    c.charmHubURL,
 		Logger: downloadLogger{Context: cmdContext},
@@ -157,9 +183,7 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 	defer cancel()
 
 	// Locate a release that we would expect to be default. In this case
-	// we want to fall back to latest/stable. We don't want to use the
-	// info.DefaultRelease here as that isn't actually the default release,
-	// but instead the last release and that's not what we want.
+	// we want to fall back to latest/stable.
 	channel := c.channel
 	if channel == "" {
 		channel = corecharm.DefaultChannelString
@@ -173,52 +197,13 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 	if pArch == "all" || pArch == "" {
 		pArch = arch.DefaultArchitecture
 	}
-	pSeries := c.series
-	if pSeries == "all" || pSeries == "" {
-		pSeries = version.DefaultSupportedLTS()
+	if base.Empty() {
+		base = version.DefaultSupportedLTSBase()
 	}
-	platform := fmt.Sprintf("%s/%s", pArch, pSeries)
-	normBase, err := corecharm.ParsePlatformNormalize(platform)
+
+	results, normBase, err := c.refresh(ctx, cmdContext, client, normChannel, pArch, base, true)
 	if err != nil {
 		return errors.Trace(err)
-	}
-
-	if normBase.Series != "" {
-		sys, err := series.GetOSFromSeries(normBase.Series)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		normBase.OS = strings.ToLower(sys.String())
-	}
-
-	// Ensure we compute the base channel correctly.
-	computedNormBase := corecharm.ComputeBaseChannel(normBase)
-
-	refreshConfig, err := charmhub.InstallOneFromChannel(c.charmOrBundle, normChannel.String(), charmhub.RefreshBase{
-		Architecture: computedNormBase.Architecture,
-		Name:         computedNormBase.OS,
-		Channel:      computedNormBase.Series,
-	})
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	results, err := client.Refresh(ctx, refreshConfig)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if len(results) == 0 {
-		return errors.NotFoundf(c.charmOrBundle)
-	}
-	// Ensure we didn't get any errors whilst querying the charmhub API
-	for _, res := range results {
-		if res.Error != nil {
-			if res.Error.Code == transport.ErrorCodeRevisionNotFound {
-				return c.suggested(normBase.Series, normChannel.String(), res.Error.Extra.Releases, cmdContext)
-			}
-			return errors.Errorf("unable to locate %s: %s", c.charmOrBundle, res.Error.Message)
-		}
 	}
 
 	// In theory we can get multiple responses from the refresh API, but in
@@ -230,24 +215,13 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 	entitySHA := entity.Download.HashSHA256
 
 	path := c.archivePath
-	if c.archivePath == "" {
-		// Use the sha256 to create a unique path for every download. The
-		// consequence of this is that same sha binary blobs will overwrite
-		// each other. That should be ok, as the sha will match.
-		var short string
-		if len(entitySHA) >= 7 {
-			short = fmt.Sprintf("_%s", entitySHA[0:7])
-		}
-		path = fmt.Sprintf("%s%s.%s", entity.Name, short, entityType)
+	if path == "" {
+		// Use the revision number to create a unique path for every download.
+		path = fmt.Sprintf("%s_r%d.%s", entity.Name, entity.Revision, entityType)
 	}
 
-	base := normBase
-	base.Series, err = coreseries.SeriesVersion(normBase.Series)
-	if err != nil {
-		base.Series = normBase.Series
-	}
-
-	cmdContext.Infof("Fetching %s %q using %q channel and base %q", entityType, entity.Name, normChannel, base)
+	cmdContext.Infof("Fetching %s %q revision %d using %q channel and base %q",
+		entityType, entity.Name, entity.Revision, normChannel, normBase)
 
 	resourceURL, err := url.Parse(entity.Download.URL)
 	if err != nil {
@@ -295,33 +269,93 @@ Install the %q %s with:
 	return nil
 }
 
-func (c *downloadCommand) suggested(ser string, channel string, releases []transport.Release, cmdContext *cmd.Context) error {
-	series := set.NewStrings()
-	for _, rel := range releases {
-		if rel.Channel == channel {
-			platform := corecharm.NormalisePlatformSeries(corecharm.Platform{
-				Architecture: rel.Base.Architecture,
-				OS:           rel.Base.Name,
-				Series:       rel.Base.Channel,
-			})
-			s, err := coreseries.VersionSeries(platform.Series)
-			if err == nil {
-				series.Add(s)
-			} else {
-				// Shouldn't happen, log and continue if verbose is set.
-				cmdContext.Verbosef("%s of %s", err, rel.Base.Name)
+func (c *downloadCommand) refresh(
+	ctx context.Context, cmdContext *cmd.Context,
+	client CharmHubClient,
+	normChannel charm.Channel,
+	arch string,
+	base series.Base,
+	retrySuggested bool,
+) ([]transport.RefreshResponse, *corecharm.Platform, error) {
+	platform := fmt.Sprintf("%s/%s/%s", arch, base.OS, base.Channel.Track)
+	normBase, err := corecharm.ParsePlatformNormalize(platform)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
+	refreshConfig, err := charmhub.InstallOneFromChannel(c.charmOrBundle, normChannel.String(), charmhub.RefreshBase{
+		Architecture: normBase.Architecture,
+		Name:         normBase.OS,
+		Channel:      normBase.Channel,
+	})
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
+	results, err := client.Refresh(ctx, refreshConfig)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
+	if len(results) == 0 {
+		return nil, nil, errors.NotFoundf(c.charmOrBundle)
+	}
+
+	// Ensure we didn't get any errors whilst querying the charmhub API
+	for _, res := range results {
+		if res.Error != nil {
+			if res.Error.Code == transport.ErrorCodeRevisionNotFound {
+				possibleBases, err := c.suggested(cmdContext, base, normChannel.String(), res.Error.Extra.Releases)
+				// The following will attempt to refresh the charm with the
+				// suggested series. If it can't do that, it will give up after
+				// the second attempt.
+				if retrySuggested && errors.Is(err, errors.NotSupported) && len(possibleBases) > 0 {
+					cmdContext.Infof("Base %q is not supported for charm %q, trying base %q", base.DisplayString(), c.charmOrBundle, possibleBases[0].DisplayString())
+					return c.refresh(ctx, cmdContext, client, normChannel, arch, possibleBases[0], false)
+				}
+				return nil, nil, errors.Trace(err)
 			}
+			return nil, nil, errors.Errorf("unable to locate %s: %s", c.charmOrBundle, res.Error.Message)
 		}
 	}
-	if series.IsEmpty() {
+
+	return results, &normBase, nil
+}
+
+func (c *downloadCommand) suggested(cmdContext *cmd.Context, requestedBase coreseries.Base, channel string, releases []transport.Release) ([]coreseries.Base, error) {
+	var (
+		ordered []coreseries.Base
+		bases   = make(map[coreseries.Base]struct{})
+	)
+	for _, rel := range releases {
+		if rel.Channel == channel {
+			parsedBase, err := coreseries.ParseBase(rel.Base.Name, rel.Base.Channel)
+			if err != nil {
+				// Shouldn't happen, log and continue if verbose is set.
+				cmdContext.Verbosef("%s of %s", err, rel.Base.Name)
+				continue
+			}
+			if _, ok := bases[parsedBase]; !ok {
+				ordered = append(ordered, parsedBase)
+			}
+			bases[parsedBase] = struct{}{}
+		}
+	}
+	if len(bases) == 0 {
 		// No releases in this channel
-		return errors.Errorf(`%q has no releases in channel %q. Type
+		return nil, errors.Errorf(`%q has no releases in channel %q. Type
     juju info %s
 for a list of supported channels.`,
 			c.charmOrBundle, channel, c.charmOrBundle)
 	}
-	return errors.Errorf("%q does not support series %q in channel %q.  Supported series are: %s.",
-		c.charmOrBundle, ser, channel, strings.Join(series.SortedValues(), ", "))
+
+	orderedBaseStrings := make([]string, len(ordered))
+	for i, base := range ordered {
+		orderedBaseStrings[i] = base.DisplayString()
+	}
+
+	return ordered, errors.NewNotSupported(nil, fmt.Sprintf("%q does not support base %q in channel %q. Supported bases are: %s.",
+		c.charmOrBundle, requestedBase.DisplayString(), channel, strings.Join(orderedBaseStrings, ", ")))
 }
 
 func (c *downloadCommand) calculateHash(path string) (string, error) {

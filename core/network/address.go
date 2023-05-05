@@ -322,6 +322,21 @@ func NewMachineAddress(value string, options ...func(AddressMutator)) MachineAdd
 // MachineAddresses is a slice of MachineAddress
 type MachineAddresses []MachineAddress
 
+// NewMachineAddresses is a convenience function to create addresses
+// from a variable number of string arguments, applying any supplied
+// options to each address
+func NewMachineAddresses(values []string, options ...func(AddressMutator)) MachineAddresses {
+	if len(values) == 0 {
+		return nil
+	}
+
+	addrs := make(MachineAddresses, len(values))
+	for i, value := range values {
+		addrs[i] = NewMachineAddress(value, options...)
+	}
+	return addrs
+}
+
 // AsProviderAddresses is used to construct ProviderAddresses
 // element-wise from MachineAddresses
 func (as MachineAddresses) AsProviderAddresses(options ...func(mutator ProviderAddressMutator)) ProviderAddresses {
@@ -336,19 +351,16 @@ func (as MachineAddresses) AsProviderAddresses(options ...func(mutator ProviderA
 	return addrs
 }
 
-// NewMachineAddresses is a convenience function to create addresses
-// from a variable number of string arguments, applying any supplied
-// options to each address
-func NewMachineAddresses(values []string, options ...func(AddressMutator)) MachineAddresses {
-	if len(values) == 0 {
-		return nil
-	}
+// AllMatchingScope returns the addresses that satisfy
+// the input scope matching function.
+func (as MachineAddresses) AllMatchingScope(getMatcher ScopeMatchFunc) MachineAddresses {
+	return allMatchingScope(as, getMatcher)
+}
 
-	addrs := make(MachineAddresses, len(values))
-	for i, value := range values {
-		addrs[i] = NewMachineAddress(value, options...)
-	}
-	return addrs
+// Values transforms the MachineAddresses to a string slice
+// containing their raw IP values.
+func (as MachineAddresses) Values() []string {
+	return toStrings(as)
 }
 
 // deriveScope attempts to derive the network scope from an address'
@@ -405,6 +417,33 @@ func isIPv6UniqueLocalAddress(addrType AddressType, ip net.IP) bool {
 		return false
 	}
 	return ipv6UniqueLocal.Contains(ip)
+}
+
+// InterfaceAddrs is patched for tests.
+var InterfaceAddrs = func() ([]net.Addr, error) {
+	return net.InterfaceAddrs()
+}
+
+// IsLocalAddress returns true if the provided IP address equals to one of the
+// local IP addresses.
+func IsLocalAddress(ip net.IP) (bool, error) {
+	addrs, err := InterfaceAddrs()
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+
+	for _, addr := range addrs {
+		localIP, _, err := net.ParseCIDR(addr.String())
+		if err != nil {
+			continue
+		}
+		if localIP.To4() != nil || localIP.To16() != nil {
+			if ip.Equal(localIP) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // ProviderAddress represents an address supplied by provider logic.
@@ -469,18 +508,10 @@ func (a ProviderAddress) String() string {
 // supporting conversion to SpaceAddresses.
 type ProviderAddresses []ProviderAddress
 
-// ToIPAddresses transforms the ProviderAddresses to a string slice containing
+// Values transforms the ProviderAddresses to a string slice containing
 // their raw IP values.
-func (pas ProviderAddresses) ToIPAddresses() []string {
-	if pas == nil {
-		return nil
-	}
-
-	ips := make([]string, len(pas))
-	for i, addr := range pas {
-		ips[i] = addr.Value
-	}
-	return ips
+func (pas ProviderAddresses) Values() []string {
+	return toStrings(pas)
 }
 
 // ToSpaceAddresses transforms the ProviderAddresses to SpaceAddresses by using
@@ -515,7 +546,7 @@ func (pas ProviderAddresses) ToSpaceAddresses(lookup SpaceLookup) (SpaceAddresse
 // OneMatchingScope returns the address that best satisfies the input scope
 // matching function. The boolean return indicates if a match was found.
 func (pas ProviderAddresses) OneMatchingScope(getMatcher ScopeMatchFunc) (ProviderAddress, bool) {
-	indexes := indexesForScope(len(pas), func(i int) Address { return pas[i] }, getMatcher)
+	indexes := indexesForScope(pas, getMatcher)
 	if len(indexes) == 0 {
 		return ProviderAddress{}, false
 	}
@@ -579,15 +610,7 @@ func NewSpaceAddresses(inAddresses ...string) (outAddresses SpaceAddresses) {
 // Values returns a slice of strings containing the IP/host-name of each of
 // the receiver addresses.
 func (sas SpaceAddresses) Values() []string {
-	if sas == nil {
-		return nil
-	}
-
-	values := make([]string, len(sas))
-	for i, a := range sas {
-		values[i] = a.Value
-	}
-	return values
+	return toStrings(sas)
 }
 
 // ToProviderAddresses transforms the SpaceAddresses to ProviderAddresses by using
@@ -654,18 +677,10 @@ func (sas SpaceAddresses) OneMatchingScope(getMatcher ScopeMatchFunc) (SpaceAddr
 	return addrs[0], true
 }
 
-// AllMatchingScope returns the addresses that best satisfy the input scope
-// matching function.
+// AllMatchingScope returns the addresses that satisfy
+// the input scope matching function.
 func (sas SpaceAddresses) AllMatchingScope(getMatcher ScopeMatchFunc) SpaceAddresses {
-	indexes := indexesForScope(len(sas), func(i int) Address { return sas[i] }, getMatcher)
-	if len(indexes) == 0 {
-		return nil
-	}
-	out := make(SpaceAddresses, len(indexes))
-	for i, index := range indexes {
-		out[i] = sas[index]
-	}
-	return out
+	return allMatchingScope(sas, getMatcher)
 }
 
 // EqualTo returns true if this set of SpaceAddresses is equal to other.
@@ -771,62 +786,6 @@ func ScopeMatchCloudLocal(addr Address) ScopeMatch {
 		return secondFallbackScope
 	}
 	return invalidScope
-}
-
-type addressByIndexFunc func(index int) Address
-
-// indexesForScope returns the indexes of the addresses with the best
-// matching scope and type (according to the matchFunc).
-// An empty slice is returned if there were no suitable addresses.
-func indexesForScope(numAddr int, getAddrFunc addressByIndexFunc, matchFunc ScopeMatchFunc) []int {
-	matches := filterAndCollateAddressIndexes(numAddr, getAddrFunc, matchFunc)
-
-	for _, matchType := range scopeMatchHierarchy() {
-		indexes, ok := matches[matchType]
-		if ok && len(indexes) > 0 {
-			return indexes
-		}
-	}
-	return nil
-}
-
-// indexesByScopeMatch filters address indexes by matching scope,
-// then returns them in descending order of best match.
-func indexesByScopeMatch(numAddr int, getAddrFunc addressByIndexFunc, matchFunc ScopeMatchFunc) []int {
-	matches := filterAndCollateAddressIndexes(numAddr, getAddrFunc, matchFunc)
-
-	var prioritized []int
-	for _, matchType := range scopeMatchHierarchy() {
-		indexes, ok := matches[matchType]
-		if ok && len(indexes) > 0 {
-			prioritized = append(prioritized, indexes...)
-		}
-	}
-	return prioritized
-}
-
-// filterAndCollateAddressIndexes filters address indexes using the input scope
-// matching function, then returns the results grouped by scope match quality.
-// Invalid results are omitted.
-func filterAndCollateAddressIndexes(
-	numAddr int, getAddrFunc addressByIndexFunc, matchFunc ScopeMatchFunc,
-) map[ScopeMatch][]int {
-	matches := make(map[ScopeMatch][]int)
-	for i := 0; i < numAddr; i++ {
-		matchType := matchFunc(getAddrFunc(i))
-		if matchType != invalidScope {
-			matches[matchType] = append(matches[matchType], i)
-		}
-	}
-	return matches
-}
-
-func scopeMatchHierarchy() []ScopeMatch {
-	return []ScopeMatch{
-		exactScopeIPv4, exactScope,
-		firstFallbackScopeIPv4, firstFallbackScope,
-		secondFallbackScopeIPv4, secondFallbackScope,
-	}
 }
 
 // MergedAddresses provides a single list of addresses without duplicates
@@ -952,4 +911,82 @@ func IsNoAddressError(err error) bool {
 	err = errors.Cause(err)
 	_, ok := err.(*noAddress)
 	return ok
+}
+
+// toStrings returns the IP addresses in string form for input
+// that is a slice of types implementing the Address interface.
+func toStrings[T Address](addrs []T) []string {
+	if addrs == nil {
+		return nil
+	}
+
+	ips := make([]string, len(addrs))
+	for i, addr := range addrs {
+		ips[i] = addr.Host()
+	}
+	return ips
+}
+
+func allMatchingScope[T Address](addrs []T, getMatcher ScopeMatchFunc) []T {
+	indexes := indexesForScope(addrs, getMatcher)
+	if len(indexes) == 0 {
+		return nil
+	}
+	out := make([]T, len(indexes))
+	for i, index := range indexes {
+		out[i] = addrs[index]
+	}
+	return out
+}
+
+// indexesForScope returns the indexes of the addresses with the best
+// matching scope and type (according to the matchFunc).
+// An empty slice is returned if there were no suitable addresses.
+func indexesForScope[T Address](addrs []T, matchFunc ScopeMatchFunc) []int {
+	matches := filterAndCollateAddressIndexes(addrs, matchFunc)
+
+	for _, matchType := range scopeMatchHierarchy() {
+		indexes, ok := matches[matchType]
+		if ok && len(indexes) > 0 {
+			return indexes
+		}
+	}
+	return nil
+}
+
+// indexesByScopeMatch filters address indexes by matching scope,
+// then returns them in descending order of best match.
+func indexesByScopeMatch[T Address](addrs []T, matchFunc ScopeMatchFunc) []int {
+	matches := filterAndCollateAddressIndexes(addrs, matchFunc)
+
+	var prioritized []int
+	for _, matchType := range scopeMatchHierarchy() {
+		indexes, ok := matches[matchType]
+		if ok && len(indexes) > 0 {
+			prioritized = append(prioritized, indexes...)
+		}
+	}
+	return prioritized
+}
+
+// filterAndCollateAddressIndexes filters address indexes using the input scope
+// matching function, then returns the results grouped by scope match quality.
+// Invalid results are omitted.
+func filterAndCollateAddressIndexes[T Address](addrs []T, matchFunc ScopeMatchFunc) map[ScopeMatch][]int {
+	matches := make(map[ScopeMatch][]int)
+	for i, addr := range addrs {
+		matchType := matchFunc(addr)
+		if matchType != invalidScope {
+			matches[matchType] = append(matches[matchType], i)
+		}
+	}
+	return matches
+}
+
+func scopeMatchHierarchy() []ScopeMatch {
+	return []ScopeMatch{
+		exactScopeIPv4, exactScope,
+		firstFallbackScopeIPv4, firstFallbackScope,
+		secondFallbackScopeIPv4, secondFallbackScope,
+	}
 }

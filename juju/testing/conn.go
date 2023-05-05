@@ -6,18 +6,18 @@ package testing
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/names/v4"
 	"github.com/juju/pubsub/v2"
 	jujutesting "github.com/juju/testing"
@@ -39,6 +39,7 @@ import (
 	"github.com/juju/juju/core/network"
 	coreos "github.com/juju/juju/core/os"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/config"
@@ -80,9 +81,11 @@ var (
 // It also sets up RootDir to point to a directory hierarchy
 // mirroring the intended juju directory structure, including
 // the following:
-//     RootDir/var/lib/juju
-//         An empty directory returned as DataDir - the
-//         root of the juju data storage space.
+//
+//	RootDir/var/lib/juju
+//	    An empty directory returned as DataDir - the
+//	    root of the juju data storage space.
+//
 // $HOME is set to point to RootDir/home/ubuntu.
 type JujuConnSuite struct {
 	// ConfigAttrs can be set up before SetUpTest
@@ -99,7 +102,7 @@ type JujuConnSuite struct {
 	// /var/lib/juju: the use cases are completely non-overlapping, and any tests that
 	// really do need both to exist ought to be embedding distinct fixtures for the
 	// distinct environments.
-	jujutesting.MgoSuite
+	mgotesting.MgoSuite
 	testing.FakeJujuXDGDataHomeSuite
 	envtesting.ToolsFixture
 
@@ -408,7 +411,7 @@ func (s *JujuConnSuite) OpenAPIAsNewMachine(c *gc.C, jobs ...state.MachineJob) (
 		jobs = []state.MachineJob{state.JobHostUnits}
 	}
 
-	machine, err := s.State.AddMachine("quantal", jobs...)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), jobs...)
 	c.Assert(err, jc.ErrorIsNil)
 	password, err := utils.RandomPassword()
 	c.Assert(err, jc.ErrorIsNil)
@@ -579,11 +582,11 @@ func (s *JujuConnSuite) setUpConn(c *gc.C) {
 				},
 			},
 		},
-		CloudCredential:          cloudSpec.Credential,
-		CloudCredentialName:      "cred",
-		AdminSecret:              AdminSecret,
-		CAPrivateKey:             testing.CAKey,
-		SupportedBootstrapSeries: testing.FakeSupportedJujuSeries,
+		CloudCredential:         cloudSpec.Credential,
+		CloudCredentialName:     "cred",
+		AdminSecret:             AdminSecret,
+		CAPrivateKey:            testing.CAKey,
+		SupportedBootstrapBases: testing.FakeSupportedJujuBases,
 	})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -693,7 +696,7 @@ func AddCharm(st *state.State, curl *charm.URL, ch charm.Charm, force bool) (*st
 	switch ch := ch.(type) {
 	case *charm.CharmDir:
 		var err error
-		if f, err = ioutil.TempFile("", name); err != nil {
+		if f, err = os.CreateTemp("", name); err != nil {
 			return nil, err
 		}
 		defer os.Remove(f.Name())
@@ -772,7 +775,7 @@ type GetStater interface {
 }
 
 func (s *JujuConnSuite) tearDownConn(c *gc.C) {
-	testServer := jujutesting.MgoServer.Addr()
+	testServer := mgotesting.MgoServer.Addr()
 	serverAlive := testServer != ""
 
 	// Close any api connections we know about first.
@@ -837,16 +840,30 @@ func (s *JujuConnSuite) AddTestingCharmForSeries(c *gc.C, name, series string) *
 }
 
 func (s *JujuConnSuite) AddTestingApplication(c *gc.C, name string, ch *state.Charm) *state.Application {
-	app, err := s.State.AddApplication(state.AddApplicationArgs{Name: name, Charm: ch, Series: ch.URL().Series})
+	appSeries := ch.URL().Series
+	if appSeries == "kubernetes" {
+		appSeries = series.LegacyKubernetesSeries()
+	}
+	base, err := series.GetBaseFromSeries(appSeries)
+	c.Assert(err, jc.ErrorIsNil)
+	app, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: name, Charm: ch,
+		CharmOrigin: &state.CharmOrigin{
+			Source: "charm-hub",
+			Platform: &state.Platform{
+				OS:      base.OS,
+				Channel: base.Channel.String(),
+			}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	return app
 }
 
 func (s *JujuConnSuite) AddTestingApplicationWithOrigin(c *gc.C, name string, ch *state.Charm, origin *state.CharmOrigin) *state.Application {
+	c.Assert(origin.Source, gc.Not(gc.Equals), "", gc.Commentf("supplied origin must have a source"))
 	app, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name:        name,
 		Charm:       ch,
-		Series:      ch.URL().Series,
 		CharmOrigin: origin,
 	})
 	c.Assert(err, jc.ErrorIsNil)
@@ -854,10 +871,18 @@ func (s *JujuConnSuite) AddTestingApplicationWithOrigin(c *gc.C, name string, ch
 }
 
 func (s *JujuConnSuite) AddTestingApplicationWithArch(c *gc.C, name string, ch *state.Charm, arch string) *state.Application {
+	base, err := series.GetBaseFromSeries(ch.URL().Series)
+	c.Assert(err, jc.ErrorIsNil)
 	app, err := s.State.AddApplication(state.AddApplicationArgs{
-		Name:        name,
-		Charm:       ch,
-		Series:      ch.URL().Series,
+		Name:  name,
+		Charm: ch,
+		CharmOrigin: &state.CharmOrigin{
+			Source: "charm-hub",
+			Platform: &state.Platform{
+				Architecture: arch,
+				OS:           base.OS,
+				Channel:      base.Channel.String(),
+			}},
 		Constraints: constraints.MustParse("arch=" + arch),
 	})
 	c.Assert(err, jc.ErrorIsNil)
@@ -865,15 +890,37 @@ func (s *JujuConnSuite) AddTestingApplicationWithArch(c *gc.C, name string, ch *
 }
 
 func (s *JujuConnSuite) AddTestingApplicationWithStorage(c *gc.C, name string, ch *state.Charm, storage map[string]state.StorageConstraints) *state.Application {
+	base, err := series.GetBaseFromSeries(ch.URL().Series)
+	c.Assert(err, jc.ErrorIsNil)
 	app, err := s.State.AddApplication(state.AddApplicationArgs{
-		Name: name, Charm: ch, Series: ch.URL().Series, Storage: storage})
+		Name:  name,
+		Charm: ch,
+		CharmOrigin: &state.CharmOrigin{
+			Source: "charm-hub",
+			Platform: &state.Platform{
+				OS:      base.OS,
+				Channel: base.Channel.String(),
+			}},
+		Storage: storage,
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	return app
 }
 
 func (s *JujuConnSuite) AddTestingApplicationWithBindings(c *gc.C, name string, ch *state.Charm, bindings map[string]string) *state.Application {
+	base, err := series.GetBaseFromSeries(ch.URL().Series)
+	c.Assert(err, jc.ErrorIsNil)
 	app, err := s.State.AddApplication(state.AddApplicationArgs{
-		Name: name, Charm: ch, Series: ch.URL().Series, EndpointBindings: bindings})
+		Name:  name,
+		Charm: ch,
+		CharmOrigin: &state.CharmOrigin{
+			Source: "charm-hub",
+			Platform: &state.Platform{
+				OS:      base.OS,
+				Channel: base.Channel.String(),
+			}},
+		EndpointBindings: bindings,
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	return app
 }

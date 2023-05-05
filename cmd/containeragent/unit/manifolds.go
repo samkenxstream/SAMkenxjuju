@@ -43,6 +43,8 @@ import (
 	"github.com/juju/juju/worker/muxhttpserver"
 	"github.com/juju/juju/worker/proxyupdater"
 	"github.com/juju/juju/worker/retrystrategy"
+	"github.com/juju/juju/worker/s3caller"
+	"github.com/juju/juju/worker/secretdrainworker"
 	"github.com/juju/juju/worker/uniter"
 	"github.com/juju/juju/worker/upgradesteps"
 )
@@ -89,6 +91,10 @@ type manifoldsConfig struct {
 	// UpdateLoggerConfig is a function that will save the specified
 	// config value as the logging config in the agent.conf file.
 	UpdateLoggerConfig func(string) error
+
+	// ProbeAddress describes the net dial address to use for binding the
+	// receiving agent probe requests.
+	ProbeAddress string
 
 	// ProbePort describes the http port to operator on for receiving agent
 	// probe requests.
@@ -148,6 +154,17 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 			APIConfigWatcherName: apiConfigWatcherName,
 			NewConnection:        apicaller.OnlyConnect,
 			Logger:               loggo.GetLogger("juju.worker.apicaller"),
+		}),
+
+		// The S3 API caller is a shim API that wraps the /charms REST
+		// API for uploading and downloading charms. It provides a
+		// S3-compatible API.
+		s3CallerName: s3caller.Manifold(s3caller.ManifoldConfig{
+			AgentName:            agentName,
+			APIConfigWatcherName: apiConfigWatcherName,
+			APICallerName:        apiCallerName,
+			NewS3Client:          s3caller.NewS3Client,
+			Logger:               loggo.GetLogger("juju.worker.s3caller"),
 		}),
 
 		// The log sender is a leaf worker that sends log messages to some
@@ -246,6 +263,24 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 			UpdateAgentFunc: config.UpdateLoggerConfig,
 		})),
 
+		// Probe HTTP server is a http server for handling probe requests from
+		// Kubernetes. It provides a mux that is used by the caas prober to
+		// register handlers.
+		probeHTTPServerName: muxhttpserver.Manifold(muxhttpserver.ManifoldConfig{
+			Logger:  loggo.GetLogger("juju.worker.probehttpserver"),
+			Address: config.ProbeAddress,
+			Port:    config.ProbePort,
+		}),
+
+		// Kubernetes probe handler responsible for reporting status for
+		// Kubernetes probes
+		caasProberName: caasprober.Manifold(caasprober.ManifoldConfig{
+			MuxName: probeHTTPServerName,
+			Providers: []string{
+				uniterName,
+			},
+		}),
+
 		// The charmdir resource coordinates whether the charm directory is
 		// available or not; after 'start' hook and before 'stop' hook
 		// executes, and not during upgrades.
@@ -281,6 +316,7 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 			AgentName:                    agentName,
 			ModelType:                    model.CAAS,
 			APICallerName:                apiCallerName,
+			S3CallerName:                 s3CallerName,
 			MachineLock:                  config.MachineLock,
 			Clock:                        config.Clock,
 			LeadershipTrackerName:        leadershipTrackerName,
@@ -310,6 +346,15 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 			Logger:        loggo.GetLogger("juju.worker.caasunitsmanager"),
 			Hub:           config.LocalHub,
 		}),
+
+		// The secretDrainWorker is the worker that drains secrets from the inactive backend to the current active backend.
+		secretDrainWorker: ifNotMigrating(secretdrainworker.Manifold(secretdrainworker.ManifoldConfig{
+			APICallerName:         apiCallerName,
+			Logger:                loggo.GetLogger("juju.worker.secretdrainworker"),
+			NewSecretsDrainFacade: secretdrainworker.NewSecretsDrainFacade,
+			NewWorker:             secretdrainworker.NewWorker,
+			NewBackendsClient:     secretdrainworker.NewBackendsClient,
+		})),
 	}
 
 	// If the container agent is colocated with the controller for the controller charm, then it doesn't
@@ -324,23 +369,6 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 			APICallerName: apiCallerName,
 			Logger:        loggo.GetLogger("juju.worker.apiaddressupdater"),
 		}))
-
-		// Probe HTTP server is a http server for handling probe requests from
-		// Kubernetes. It provides a mux that is used by the caas prober to
-		// register handlers.
-		dp[probeHTTPServerName] = muxhttpserver.Manifold(muxhttpserver.ManifoldConfig{
-			Logger: loggo.GetLogger("juju.worker.probehttpserver"),
-			Port:   config.ProbePort,
-		})
-
-		// Kubernetes probe handler responsible for reporting status for
-		// Kubernetes probes
-		dp[caasProberName] = caasprober.Manifold(caasprober.ManifoldConfig{
-			MuxName: probeHTTPServerName,
-			Providers: []string{
-				uniterName,
-			},
-		})
 	}
 
 	return dp
@@ -357,6 +385,7 @@ const (
 	agentName            = "agent"
 	apiConfigWatcherName = "api-config-watcher"
 	apiCallerName        = "api-caller"
+	s3CallerName         = "s3-caller"
 	uniterName           = "uniter"
 	logSenderName        = "log-sender"
 
@@ -382,6 +411,8 @@ const (
 
 	caasUnitTerminationWorker = "caas-unit-termination-worker"
 	caasUnitsManager          = "caas-units-manager"
+
+	secretDrainWorker = "secret-drain-worker"
 )
 
 type noopStatusSetter struct{}

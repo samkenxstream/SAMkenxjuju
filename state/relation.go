@@ -9,16 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 
 	"github.com/juju/juju/core/leadership"
-	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/status"
 )
 
@@ -182,51 +181,7 @@ func (r *Relation) SetSuspended(suspended bool, suspendedReason string) error {
 				return nil, errors.Trace(err)
 			}
 		}
-
-		var (
-			oc       *OfferConnection
-			err      error
-			checkOps []txn.Op
-		)
-		oc, err = r.st.OfferConnectionForRelation(r.Tag().Id())
-		if err != nil && !errors.IsNotFound(err) {
-			return nil, errors.Trace(err)
-		}
-		if err == nil {
-			checkOps = append(checkOps, txn.Op{
-				C:      offerConnectionsC,
-				Id:     fmt.Sprintf("%d", r.Id()),
-				Assert: txn.DocExists,
-			})
-		}
-		if !suspended && oc != nil {
-			// Can only resume a relation when the user of the associated connection has consume access
-			// - either via being a model admin or having been granted access.
-			isAdmin, err := r.st.isControllerOrModelAdmin(names.NewUserTag(oc.UserName()))
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			if !isAdmin {
-				// Not an admin so check for consume access and add the assert.
-				ok, err := r.checkConsumePermission(oc.OfferUUID(), oc.UserName())
-				if err != nil {
-					return nil, errors.Trace(err)
-				}
-				if !ok {
-					return nil, errors.Errorf(
-						"cannot resume relation %q where user %q does not have consume permission",
-						r.Tag().Id(), oc.UserName())
-				}
-				checkOps = append(checkOps, txn.Op{
-					C:  permissionsC,
-					Id: permissionID(applicationOfferKey(oc.OfferUUID()), userGlobalKey(strings.ToLower(oc.UserName()))),
-					Assert: bson.D{
-						{"access",
-							bson.D{{"$in", []permission.Access{permission.ConsumeAccess, permission.AdminAccess}}}}},
-				})
-			}
-		}
-		setOps := []txn.Op{{
+		return []txn.Op{{
 			C:      relationsC,
 			Id:     r.doc.DocID,
 			Assert: bson.D{{"suspended", r.doc.Suspended}},
@@ -234,8 +189,7 @@ func (r *Relation) SetSuspended(suspended bool, suspendedReason string) error {
 				{"$set", bson.D{{"suspended", suspended}}},
 				{"$set", bson.D{{"suspended-reason", suspendedReason}}},
 			},
-		}}
-		return append(setOps, checkOps...), nil
+		}}, nil
 	}
 
 	err := r.st.db().Run(buildTxn)
@@ -243,17 +197,6 @@ func (r *Relation) SetSuspended(suspended bool, suspendedReason string) error {
 		r.doc.Suspended = suspended
 	}
 	return err
-}
-
-func (r *Relation) checkConsumePermission(offerUUID, userId string) (bool, error) {
-	perm, err := r.st.GetOfferAccess(offerUUID, names.NewUserTag(userId))
-	if err != nil && !errors.IsNotFound(err) {
-		return false, errors.Trace(err)
-	}
-	if perm != permission.ConsumeAccess && perm != permission.AdminAccess {
-		return false, nil
-	}
-	return true, nil
 }
 
 // DestroyOperation returns a model operation that will allow relation to leave scope.
@@ -556,6 +499,11 @@ func (r *Relation) removeOps(ignoreApplication string, departingUnitName string,
 	ops = append(ops, tokenOps...)
 	offerOps := removeOfferConnectionsForRelationOps(r.Id())
 	ops = append(ops, offerOps...)
+	secretPermissionsOps, err := r.st.removeScopedSecretPermissionOps(r.Tag())
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	ops = append(ops, secretPermissionsOps...)
 	// This cleanup does not need to be forced.
 	cleanupOp := newCleanupOp(cleanupRelationSettings, fmt.Sprintf("r#%d#", r.Id()))
 	return append(ops, cleanupOp), nil

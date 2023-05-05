@@ -25,15 +25,24 @@ func NewClient(caller base.APICallCloser) *Client {
 
 // SecretDetails holds a secret metadata and value.
 type SecretDetails struct {
-	Metadata secrets.SecretMetadata
-	Value    secrets.SecretValue
-	Error    string
+	Metadata  secrets.SecretMetadata
+	Revisions []secrets.SecretRevisionMetadata
+	Value     secrets.SecretValue
+	Error     string
 }
 
 // ListSecrets lists the available secrets.
-func (api *Client) ListSecrets(showSecrets bool) ([]SecretDetails, error) {
+func (api *Client) ListSecrets(reveal bool, filter secrets.Filter) ([]SecretDetails, error) {
 	arg := params.ListSecretsArgs{
-		ShowSecrets: showSecrets,
+		ShowSecrets: reveal,
+		Filter: params.SecretsFilter{
+			OwnerTag: filter.OwnerTag,
+			Revision: filter.Revision,
+		},
+	}
+	if filter.URI != nil {
+		uri := filter.URI.String()
+		arg.Filter.URI = &uri
 	}
 	var response params.ListSecretResults
 	err := api.facade.FacadeCall("ListSecrets", arg, &response)
@@ -44,29 +53,39 @@ func (api *Client) ListSecrets(showSecrets bool) ([]SecretDetails, error) {
 	for i, r := range response.Results {
 		details := SecretDetails{
 			Metadata: secrets.SecretMetadata{
-				Path:           r.Path,
-				RotateInterval: r.RotateInterval,
-				Version:        r.Version,
-				Status:         secrets.SecretStatus(r.Status),
-				Description:    r.Description,
-				Tags:           r.Tags,
-				ID:             r.ID,
-				Provider:       r.Provider,
-				ProviderID:     r.ProviderID,
-				Revision:       r.Revision,
-				CreateTime:     r.CreateTime,
-				UpdateTime:     r.UpdateTime,
+				Version:          r.Version,
+				OwnerTag:         r.OwnerTag,
+				RotatePolicy:     secrets.RotatePolicy(r.RotatePolicy),
+				NextRotateTime:   r.NextRotateTime,
+				LatestRevision:   r.LatestRevision,
+				LatestExpireTime: r.LatestExpireTime,
+				Description:      r.Description,
+				Label:            r.Label,
+				CreateTime:       r.CreateTime,
+				UpdateTime:       r.UpdateTime,
 			},
 		}
-		url, err := secrets.ParseURL(r.URL)
+		uri, err := secrets.ParseURI(r.URI)
 		if err == nil {
-			details.Metadata.URL = url
+			details.Metadata.URI = uri
 		} else {
 			details.Error = err.Error()
 		}
-		if showSecrets && r.Value != nil {
+		details.Revisions = make([]secrets.SecretRevisionMetadata, len(r.Revisions))
+		for i, r := range r.Revisions {
+			details.Revisions[i] = secrets.SecretRevisionMetadata{
+				Revision:    r.Revision,
+				BackendName: r.BackendName,
+				CreateTime:  r.CreateTime,
+				UpdateTime:  r.UpdateTime,
+				ExpireTime:  r.ExpireTime,
+			}
+		}
+		if reveal && r.Value != nil {
 			if r.Value.Error == nil {
-				details.Value = secrets.NewSecretValue(r.Value.Data)
+				if data := secrets.NewSecretValue(r.Value.Data); !data.IsEmpty() {
+					details.Value = data
+				}
 			} else {
 				details.Error = r.Value.Error.Error()
 			}

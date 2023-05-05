@@ -4,27 +4,31 @@
 package modelconfig_test
 
 import (
+	"github.com/golang/mock/gomock"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
-	gitjujutesting "github.com/juju/testing"
+	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
+	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	"github.com/juju/juju/apiserver/facades/client/modelconfig"
+	"github.com/juju/juju/apiserver/facades/client/modelconfig/mocks"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/constraints"
+	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/feature"
 	"github.com/juju/juju/provider/dummy"
-	_ "github.com/juju/juju/provider/dummy"
 	"github.com/juju/juju/rpc/params"
+	secretsprovider "github.com/juju/juju/secrets/provider"
 	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/testing"
 )
 
 type modelconfigSuite struct {
-	gitjujutesting.IsolationSuite
+	testing.IsolationSuite
+	coretesting.JujuOSEnvSuite
 	backend    *mockBackend
 	authorizer apiservertesting.FakeAuthorizer
 	api        *modelconfig.ModelConfigAPIV3
@@ -33,18 +37,28 @@ type modelconfigSuite struct {
 var _ = gc.Suite(&modelconfigSuite{})
 
 func (s *modelconfigSuite) SetUpTest(c *gc.C) {
+	s.SetInitialFeatureFlags(feature.DeveloperMode)
 	s.IsolationSuite.SetUpTest(c)
+	s.JujuOSEnvSuite.SetUpTest(c)
 	s.authorizer = apiservertesting.FakeAuthorizer{
 		Tag:      names.NewUserTag("bruce@local"),
 		AdminTag: names.NewUserTag("bruce@local"),
 	}
 	s.backend = &mockBackend{
 		cfg: config.ConfigValues{
-			"type":            {"dummy", "model"},
-			"agent-version":   {"1.2.3.4", "model"},
-			"ftp-proxy":       {"http://proxy", "model"},
-			"authorized-keys": {testing.FakeAuthKeys, "model"},
-			"charmhub-url":    {"http://meshuggah.rocks", "model"},
+			"type":            {Value: "dummy", Source: "model"},
+			"agent-version":   {Value: "1.2.3.4", Source: "model"},
+			"ftp-proxy":       {Value: "http://proxy", Source: "model"},
+			"authorized-keys": {Value: coretesting.FakeAuthKeys, Source: "model"},
+			"charmhub-url":    {Value: "http://meshuggah.rocks", Source: "model"},
+		},
+		secretBackend: &coresecrets.SecretBackend{
+			ID:          "backend-1",
+			Name:        "backend-1",
+			BackendType: "vault",
+			Config: map[string]interface{}{
+				"endpoint": "http://0.0.0.0:8200",
+			},
 		},
 	}
 	var err error
@@ -52,14 +66,32 @@ func (s *modelconfigSuite) SetUpTest(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 }
 
-func (s *modelconfigSuite) TestModelGet(c *gc.C) {
+func (s *modelconfigSuite) TestAdminModelGet(c *gc.C) {
 	result, err := s.api.ModelGet()
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(result.Config, jc.DeepEquals, map[string]params.ConfigValue{
-		"type":          {"dummy", "model"},
-		"ftp-proxy":     {"http://proxy", "model"},
-		"agent-version": {Value: "1.2.3.4", Source: "model"},
-		"charmhub-url":  {"http://meshuggah.rocks", "model"},
+		"type":           {Value: "dummy", Source: "model"},
+		"ftp-proxy":      {Value: "http://proxy", Source: "model"},
+		"agent-version":  {Value: "1.2.3.4", Source: "model"},
+		"charmhub-url":   {Value: "http://meshuggah.rocks", Source: "model"},
+		"default-series": {Value: "", Source: "default"},
+	})
+}
+
+func (s *modelconfigSuite) TestUserModelGet(c *gc.C) {
+	s.authorizer = apiservertesting.FakeAuthorizer{
+		Tag:         names.NewUserTag("bruce@local"),
+		HasWriteTag: names.NewUserTag("bruce@local"),
+		AdminTag:    names.NewUserTag("mary@local"),
+	}
+	result, err := s.api.ModelGet()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result.Config, jc.DeepEquals, map[string]params.ConfigValue{
+		"type":           {Value: "dummy", Source: "model"},
+		"ftp-proxy":      {Value: "http://proxy", Source: "model"},
+		"agent-version":  {Value: "1.2.3.4", Source: "model"},
+		"charmhub-url":   {Value: "http://meshuggah.rocks", Source: "model"},
+		"default-series": {Value: "", Source: "default"},
 	})
 }
 
@@ -74,11 +106,12 @@ func (s *modelconfigSuite) assertConfigValueMissing(c *gc.C, key string) {
 	c.Assert(found, jc.IsFalse)
 }
 
-func (s *modelconfigSuite) TestModelSet(c *gc.C) {
+func (s *modelconfigSuite) TestAdminModelSet(c *gc.C) {
 	params := params.ModelSet{
 		Config: map[string]interface{}{
 			"some-key":  "value",
-			"other-key": "other value"},
+			"other-key": "other value",
+		},
 	}
 	err := s.api.ModelSet(params)
 	c.Assert(err, jc.ErrorIsNil)
@@ -100,7 +133,7 @@ func (s *modelconfigSuite) assertBlocked(c *gc.C, err error, msg string) {
 }
 
 func (s *modelconfigSuite) assertModelSetBlocked(c *gc.C, args map[string]interface{}, msg string) {
-	err := s.api.ModelSet(params.ModelSet{args})
+	err := s.api.ModelSet(params.ModelSet{Config: args})
 	s.assertBlocked(c, err, msg)
 }
 
@@ -111,13 +144,13 @@ func (s *modelconfigSuite) TestBlockChangesModelSet(c *gc.C) {
 }
 
 func (s *modelconfigSuite) TestModelSetCannotChangeAgentVersion(c *gc.C) {
-	old, err := config.New(config.UseDefaults, dummy.SampleConfig().Merge(testing.Attrs{
+	old, err := config.New(config.UseDefaults, dummy.SampleConfig().Merge(coretesting.Attrs{
 		"agent-version": "1.2.3.4",
 	}))
 	c.Assert(err, jc.ErrorIsNil)
 	s.backend.old = old
 	args := params.ModelSet{
-		map[string]interface{}{"agent-version": "9.9.9"},
+		Config: map[string]interface{}{"agent-version": "9.9.9"},
 	}
 	err = s.api.ModelSet(args)
 	c.Assert(err, gc.ErrorMatches, "agent-version cannot be changed")
@@ -132,13 +165,13 @@ func (s *modelconfigSuite) TestModelSetCannotChangeAgentVersion(c *gc.C) {
 }
 
 func (s *modelconfigSuite) TestModelSetCannotChangeCharmHubURL(c *gc.C) {
-	old, err := config.New(config.UseDefaults, dummy.SampleConfig().Merge(testing.Attrs{
+	old, err := config.New(config.UseDefaults, dummy.SampleConfig().Merge(coretesting.Attrs{
 		"charmhub-url": "http://meshuggah.rocks",
 	}))
 	c.Assert(err, jc.ErrorIsNil)
 	s.backend.old = old
 	args := params.ModelSet{
-		map[string]interface{}{"charmhub-url": "http://another-url.com"},
+		Config: map[string]interface{}{"charmhub-url": "http://another-url.com"},
 	}
 	err = s.api.ModelSet(args)
 	c.Assert(err, gc.ErrorMatches, "charmhub-url cannot be changed")
@@ -152,9 +185,69 @@ func (s *modelconfigSuite) TestModelSetCannotChangeCharmHubURL(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 }
 
+func (s *modelconfigSuite) TestModelSetCannotChangeBothDefaultSeriesAndDefaultBaseWithSeries(c *gc.C) {
+	old, err := config.New(config.UseDefaults, dummy.SampleConfig().Merge(coretesting.Attrs{
+		"default-series": "jammy",
+	}))
+	c.Assert(err, jc.ErrorIsNil)
+
+	s.backend.old = old
+	args := params.ModelSet{
+		Config: map[string]interface{}{
+			"default-series": "jammy",
+			"default-base":   "ubuntu@22.04",
+		},
+	}
+	err = s.api.ModelSet(args)
+	c.Assert(err, gc.ErrorMatches, "cannot set both default-series and default-base")
+
+	err = s.api.ModelSet(params.ModelSet{
+		Config: map[string]interface{}{
+			"default-series": "jammy",
+		},
+	})
+	c.Assert(err, jc.ErrorIsNil)
+
+	result, err := s.api.ModelGet()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result.Config["default-series"], gc.NotNil)
+	c.Assert(result.Config["default-series"].Value, gc.Equals, "jammy")
+	c.Assert(result.Config["default-base"].Value, gc.Equals, "ubuntu@22.04/stable")
+}
+
+func (s *modelconfigSuite) TestModelSetCannotChangeBothDefaultSeriesAndDefaultBaseWithBase(c *gc.C) {
+	old, err := config.New(config.UseDefaults, dummy.SampleConfig().Merge(coretesting.Attrs{
+		"default-base": "ubuntu@22.04",
+	}))
+	c.Assert(err, jc.ErrorIsNil)
+
+	s.backend.old = old
+	args := params.ModelSet{
+		Config: map[string]interface{}{
+			"default-series": "jammy",
+			"default-base":   "ubuntu@22.04",
+		},
+	}
+	err = s.api.ModelSet(args)
+	c.Assert(err, gc.ErrorMatches, "cannot set both default-series and default-base")
+
+	err = s.api.ModelSet(params.ModelSet{
+		Config: map[string]interface{}{
+			"default-series": "jammy",
+		},
+	})
+	c.Assert(err, jc.ErrorIsNil)
+
+	result, err := s.api.ModelGet()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result.Config["default-series"], gc.NotNil)
+	c.Assert(result.Config["default-series"].Value, gc.Equals, "jammy")
+	c.Assert(result.Config["default-base"].Value, gc.Equals, "ubuntu@22.04/stable")
+}
+
 func (s *modelconfigSuite) TestAdminCanSetLogTrace(c *gc.C) {
 	args := params.ModelSet{
-		map[string]interface{}{"logging-config": "<root>=DEBUG;somepackage=TRACE"},
+		Config: map[string]interface{}{"logging-config": "<root>=DEBUG;somepackage=TRACE"},
 	}
 	err := s.api.ModelSet(args)
 	c.Assert(err, jc.ErrorIsNil)
@@ -166,7 +259,7 @@ func (s *modelconfigSuite) TestAdminCanSetLogTrace(c *gc.C) {
 
 func (s *modelconfigSuite) TestUserCanSetLogNoTrace(c *gc.C) {
 	args := params.ModelSet{
-		map[string]interface{}{"logging-config": "<root>=DEBUG;somepackage=ERROR"},
+		Config: map[string]interface{}{"logging-config": "<root>=DEBUG;somepackage=ERROR"},
 	}
 	apiUser := names.NewUserTag("fred")
 	s.authorizer.Tag = apiUser
@@ -192,7 +285,7 @@ func (s *modelconfigSuite) TestUserReadAccess(c *gc.C) {
 
 func (s *modelconfigSuite) TestUserCannotSetLogTrace(c *gc.C) {
 	args := params.ModelSet{
-		map[string]interface{}{"logging-config": "<root>=DEBUG;somepackage=TRACE"},
+		Config: map[string]interface{}{"logging-config": "<root>=DEBUG;somepackage=TRACE"},
 	}
 	apiUser := names.NewUserTag("fred")
 	s.authorizer.Tag = apiUser
@@ -201,22 +294,85 @@ func (s *modelconfigSuite) TestUserCannotSetLogTrace(c *gc.C) {
 	c.Assert(err, gc.ErrorMatches, `only controller admins can set a model's logging level to TRACE`)
 }
 
-func (s *modelconfigSuite) TestCannotSetLoggingOutputWithoutFeatureFlag(c *gc.C) {
+func (s *modelconfigSuite) TestSetSecretBackend(c *gc.C) {
 	args := params.ModelSet{
-		map[string]interface{}{"logging-output": "syslog"},
+		Config: map[string]interface{}{"secret-backend": 1},
 	}
 	err := s.api.ModelSet(args)
-	c.Assert(err, gc.ErrorMatches, `cannot set "logging-output" without setting the "logging-output" feature flag`)
-	s.backend.features = feature.LoggingOutput
+	c.Assert(err, gc.ErrorMatches, `"secret-backend" config value is not a string`)
+
+	args.Config = map[string]interface{}{"secret-backend": ""}
+	err = s.api.ModelSet(args)
+	c.Assert(err, gc.ErrorMatches, `empty "secret-backend" config value not valid`)
+
+	args.Config = map[string]interface{}{"secret-backend": "auto"}
 	err = s.api.ModelSet(args)
 	c.Assert(err, jc.ErrorIsNil)
+	result, err := s.api.ModelGet()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result.Config["secret-backend"].Value, gc.Equals, "auto")
+}
+
+func (s *modelconfigSuite) TestSetSecretBackendExternal(c *gc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	vaultProvider := mocks.NewMockSecretBackendProvider(ctrl)
+	s.PatchValue(&commonsecrets.GetProvider, func(string) (secretsprovider.SecretBackendProvider, error) { return vaultProvider, nil })
+	vaultBackend := mocks.NewMockSecretsBackend(ctrl)
+
+	gomock.InOrder(
+		vaultProvider.EXPECT().Type().Return("vault"),
+		vaultProvider.EXPECT().NewBackend(&secretsprovider.ModelBackendConfig{
+			BackendConfig: secretsprovider.BackendConfig{
+				BackendType: "vault",
+				Config:      s.backend.secretBackend.Config,
+			},
+		}).Return(vaultBackend, nil),
+		vaultBackend.EXPECT().Ping().Return(nil),
+	)
+
+	args := params.ModelSet{
+		Config: map[string]interface{}{"secret-backend": "backend-1"},
+	}
+	err := s.api.ModelSet(args)
+	c.Assert(err, jc.ErrorIsNil)
+	result, err := s.api.ModelGet()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result.Config["secret-backend"].Value, gc.Equals, "backend-1")
+}
+
+func (s *modelconfigSuite) TestSetSecretBackendExternalValidationFailed(c *gc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	vaultProvider := mocks.NewMockSecretBackendProvider(ctrl)
+	s.PatchValue(&commonsecrets.GetProvider, func(string) (secretsprovider.SecretBackendProvider, error) { return vaultProvider, nil })
+	vaultBackend := mocks.NewMockSecretsBackend(ctrl)
+
+	gomock.InOrder(
+		vaultProvider.EXPECT().Type().Return("vault"),
+		vaultProvider.EXPECT().NewBackend(&secretsprovider.ModelBackendConfig{
+			BackendConfig: secretsprovider.BackendConfig{
+				BackendType: "vault",
+				Config:      s.backend.secretBackend.Config,
+			},
+		}).Return(vaultBackend, nil),
+		vaultBackend.EXPECT().Ping().Return(errors.New("not reachable")),
+	)
+
+	args := params.ModelSet{
+		Config: map[string]interface{}{"secret-backend": "backend-1"},
+	}
+	err := s.api.ModelSet(args)
+	c.Assert(err, gc.ErrorMatches, `cannot ping backend "backend-1": not reachable`)
 }
 
 func (s *modelconfigSuite) TestModelUnset(c *gc.C) {
 	err := s.backend.UpdateModelConfig(map[string]interface{}{"abc": 123}, nil)
 	c.Assert(err, jc.ErrorIsNil)
 
-	args := params.ModelUnset{[]string{"abc"}}
+	args := params.ModelUnset{Keys: []string{"abc"}}
 	err = s.api.ModelUnset(args)
 	c.Assert(err, jc.ErrorIsNil)
 	s.assertConfigValueMissing(c, "abc")
@@ -227,20 +383,23 @@ func (s *modelconfigSuite) TestBlockModelUnset(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	s.blockAllChanges(c, "TestBlockModelUnset")
 
-	args := params.ModelUnset{[]string{"abc"}}
+	args := params.ModelUnset{Keys: []string{"abc"}}
 	err = s.api.ModelUnset(args)
 	s.assertBlocked(c, err, "TestBlockModelUnset")
 }
 
 func (s *modelconfigSuite) TestModelUnsetMissing(c *gc.C) {
 	// It's okay to unset a non-existent attribute.
-	args := params.ModelUnset{[]string{"not_there"}}
+	args := params.ModelUnset{Keys: []string{"not_there"}}
 	err := s.api.ModelUnset(args)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *modelconfigSuite) TestSetSupportCredentals(c *gc.C) {
-	err := s.api.SetSLALevel(params.ModelSLA{params.ModelSLAInfo{"level", "bob"}, []byte("foobar")})
+	err := s.api.SetSLALevel(params.ModelSLA{
+		ModelSLAInfo: params.ModelSLAInfo{Level: "level", Owner: "bob"},
+		Credentials:  []byte("foobar"),
+	})
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -283,12 +442,12 @@ func (s *modelconfigSuite) TestClientGetModelConstraints(c *gc.C) {
 }
 
 type mockBackend struct {
-	cfg      config.ConfigValues
-	old      *config.Config
-	b        state.BlockType
-	features string
-	msg      string
-	cons     constraints.Value
+	cfg           config.ConfigValues
+	old           *config.Config
+	b             state.BlockType
+	msg           string
+	cons          constraints.Value
+	secretBackend *coresecrets.SecretBackend
 }
 
 func (m *mockBackend) SetModelConstraints(value constraints.Value) error {
@@ -308,14 +467,15 @@ func (m *mockBackend) Sequences() (map[string]int, error) {
 	return nil, nil
 }
 
-func (m *mockBackend) UpdateModelConfig(update map[string]interface{}, remove []string, validate ...state.ValidateConfigFunc) error {
+func (m *mockBackend) UpdateModelConfig(update map[string]interface{}, remove []string,
+	validate ...state.ValidateConfigFunc) error {
 	for _, validateFunc := range validate {
 		if err := validateFunc(update, remove, m.old); err != nil {
 			return err
 		}
 	}
 	for k, v := range update {
-		m.cfg[k] = config.ConfigValue{v, "model"}
+		m.cfg[k] = config.ConfigValue{Value: v, Source: "model"}
 	}
 	for _, n := range remove {
 		delete(m.cfg, n)
@@ -351,10 +511,11 @@ func (m *mockBackend) SpaceByName(string) error {
 	return nil
 }
 
-func (m *mockBackend) ControllerConfig() (controller.Config, error) {
-	cfg := testing.FakeControllerConfig()
-	cfg[controller.Features] = []interface{}{m.features}
-	return cfg, nil
+func (m *mockBackend) GetSecretBackend(name string) (*coresecrets.SecretBackend, error) {
+	if name == "invalid" {
+		return nil, errors.NotFoundf("invalid")
+	}
+	return m.secretBackend, nil
 }
 
 type mockBlock struct {

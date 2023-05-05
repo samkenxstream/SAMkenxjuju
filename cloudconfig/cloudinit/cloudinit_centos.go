@@ -8,14 +8,15 @@ import (
 	"fmt"
 	"strings"
 
-	corenetwork "github.com/juju/juju/core/network"
-	jujupackaging "github.com/juju/juju/packaging"
 	"github.com/juju/packaging/v2"
 	"github.com/juju/packaging/v2/config"
 	"gopkg.in/yaml.v2"
+
+	corenetwork "github.com/juju/juju/core/network"
+	jujupackaging "github.com/juju/juju/packaging"
 )
 
-//PackageHelper is the interface for configuring specific parameter of the package manager
+// PackageHelper is the interface for configuring specific parameter of the package manager
 type packageHelper interface {
 	// addPackageProxyCmd is a helper method which returns the corresponding runcmd
 	// to apply the package proxy settings.
@@ -25,11 +26,11 @@ type packageHelper interface {
 	getRequiredPackages() []string
 }
 
-//Implementation of PackageHelper for CentOS
+// Implementation of PackageHelper for CentOS
 type centOSHelper struct {
 }
 
-//Returns the list of required packages in CentOS
+// Returns the list of required packages in CentOS
 func (helper centOSHelper) getRequiredPackages() []string {
 	return []string{
 		"curl",
@@ -164,13 +165,6 @@ func (cfg *centOSCloudConfig) RenderScript() (string, error) {
 	return renderScriptCommon(cfg)
 }
 
-// AddCloudArchiveCloudTools is defined on the AdvancedPackagingConfig.
-func (cfg *centOSCloudConfig) AddCloudArchiveCloudTools() {
-	src, pref := config.GetCloudArchiveSource(cfg.series)
-	cfg.AddPackageSource(src)
-	cfg.AddPackagePreferences(pref)
-}
-
 func (cfg *centOSCloudConfig) getCommandsForAddingPackages() ([]string, error) {
 	var cmds []string
 
@@ -224,34 +218,21 @@ func (cfg *centOSCloudConfig) AddPackageCommands(
 		proxyCfg,
 		addUpdateScripts,
 		addUpgradeScripts,
-		cfg.series,
 	)
 }
 
 // addRequiredPackages is defined on the AdvancedPackagingConfig interface.
 func (cfg *centOSCloudConfig) addRequiredPackages() {
-
 	packages := cfg.helper.getRequiredPackages()
-
-	// The required packages need to come from the correct repo.
-	// For CentOS 7, this requires an rpm cloud archive be up.
-	// In the event of the addition of such a repository, its addition should
-	// happen in the utils/packaging/config package whilst leaving the below
-	// code untouched.
-	pkgConfer := cfg.getPackagingConfigurer(jujupackaging.YumPackageManager)
 	for _, pack := range packages {
-		if config.SeriesRequiresCloudArchiveTools(cfg.series) && pkgConfer.IsCloudArchivePackage(pack) {
-			cfg.AddPackage(strings.Join(pkgConfer.ApplyCloudArchiveTarget(pack), " "))
-		} else {
-			cfg.AddPackage(pack)
-		}
+		cfg.AddPackage(pack)
 	}
 }
 
-//TODO(bogdanteleaga, aznashwan): On ubuntu when we render the conf as yaml we
-//have apt_proxy and when we render it as bash we use the equivalent of this.
-//However on centOS even when rendering the YAML we use a helper function
-//addPackageProxyCmds. Research if calling the same is fine.
+// TODO(bogdanteleaga, aznashwan): On ubuntu when we render the conf as yaml we
+// have apt_proxy and when we render it as bash we use the equivalent of this.
+// However on centOS even when rendering the YAML we use a helper function
+// addPackageProxyCmds. Research if calling the same is fine.
 func (cfg *centOSCloudConfig) updateProxySettings(PackageManagerProxyConfig) error {
 	return nil
 }

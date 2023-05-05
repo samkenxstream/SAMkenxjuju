@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -33,7 +32,7 @@ var MetaResultString = `
 
 backup format version: 0 
 juju version:          0.0.0 
-series:                 
+base:                   
 
 controller UUID:       
 model UUID:             
@@ -58,7 +57,6 @@ func TestPackage(t *testing.T) {
 type BaseBackupsSuite struct {
 	jujutesting.FakeJujuXDGDataHomeSuite
 
-	command    cmd.Command
 	metaresult *params.BackupsMetadataResult
 	data       string
 
@@ -126,7 +124,7 @@ func (s *BaseBackupsSuite) setFailure(failure string) *fakeAPIClient {
 
 func (s *BaseBackupsSuite) setDownload() *fakeAPIClient {
 	client := s.setSuccess()
-	client.archive = ioutil.NopCloser(bytes.NewBufferString(s.data))
+	client.archive = io.NopCloser(bytes.NewBufferString(s.data))
 	return client
 }
 
@@ -155,7 +153,7 @@ func (s *BaseBackupsSuite) checkArchive(c *gc.C) {
 		}
 	})
 
-	data, err := ioutil.ReadAll(archive)
+	data, err := io.ReadAll(archive)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(string(data), gc.Equals, s.data)
 }

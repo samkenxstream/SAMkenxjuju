@@ -10,16 +10,20 @@ import (
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/secrets"
+	"github.com/juju/juju/secrets/provider"
 	coretesting "github.com/juju/juju/testing"
 )
 
+//go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/secretsstate.go github.com/juju/juju/apiserver/facades/client/secrets SecretsState
+//go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/secretsbackend.go github.com/juju/juju/secrets/provider SecretsBackend
 func TestPackage(t *testing.T) {
 	gc.TestingT(t)
 }
 
 func NewTestAPI(
-	service secrets.SecretsService,
+	state SecretsState,
+	backendConfigGetter func() (*provider.ModelBackendConfigInfo, error),
+	backendGetter func(*provider.ModelBackendConfig) (provider.SecretsBackend, error),
 	authorizer facade.Authorizer,
 ) (*SecretsAPI, error) {
 	if !authorizer.AuthClient() {
@@ -27,9 +31,12 @@ func NewTestAPI(
 	}
 
 	return &SecretsAPI{
-		authorizer:     authorizer,
-		controllerUUID: coretesting.ControllerTag.Id(),
-		modelUUID:      coretesting.ModelTag.Id(),
-		secretsService: service,
+		authorizer:          authorizer,
+		controllerUUID:      coretesting.ControllerTag.Id(),
+		modelUUID:           coretesting.ModelTag.Id(),
+		state:               state,
+		backends:            make(map[string]provider.SecretsBackend),
+		backendConfigGetter: backendConfigGetter,
+		backendGetter:       backendGetter,
 	}, nil
 }

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3/bson"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
@@ -123,11 +123,9 @@ func (s *ModelSummariesSuite) Setup4Models(c *gc.C) map[string]string {
 	return modelUUIDs
 }
 
-func (s *ModelSummariesSuite) modelNamesForUser(c *gc.C, user string) []string {
+func (s *ModelSummariesSuite) modelNamesForUser(c *gc.C, user string, isSuperuser bool) []string {
 	tag := names.NewUserTag(user)
-	isSuper, err := s.State.IsUserSuperuser(tag)
-	c.Assert(err, jc.ErrorIsNil)
-	modelQuery, closer, err := s.State.ModelQueryForUser(tag, isSuper)
+	modelQuery, closer, err := s.State.ModelQueryForUser(tag, isSuperuser)
 	defer closer()
 	c.Assert(err, jc.ErrorIsNil)
 	var docs []struct {
@@ -146,7 +144,7 @@ func (s *ModelSummariesSuite) modelNamesForUser(c *gc.C, user string) []string {
 
 func (s *ModelSummariesSuite) TestModelsForUserAdmin(c *gc.C) {
 	s.Setup4Models(c)
-	names := s.modelNamesForUser(c, s.Model.Owner().Name())
+	names := s.modelNamesForUser(c, s.Model.Owner().Name(), true)
 	// Admin always gets to see all models
 	c.Check(names, gc.DeepEquals, []string{"shared", "testmodel", "user1model", "user2model", "user3model"})
 }
@@ -196,21 +194,21 @@ func (s *ModelSummariesSuite) TestModelsForSuperuserWithAll(c *gc.C) {
 func (s *ModelSummariesSuite) TestModelsForUser1(c *gc.C) {
 	// User1 is only added to the model they own and the shared model as write
 	s.Setup4Models(c)
-	names := s.modelNamesForUser(c, "user1write")
+	names := s.modelNamesForUser(c, "user1write", false)
 	c.Check(names, gc.DeepEquals, []string{"shared", "user1model"})
 }
 
 func (s *ModelSummariesSuite) TestModelsForUser2(c *gc.C) {
 	// User2 is only added to the model they own and the shared model as read
 	s.Setup4Models(c)
-	names := s.modelNamesForUser(c, "user2read")
+	names := s.modelNamesForUser(c, "user2read", false)
 	c.Check(names, gc.DeepEquals, []string{"shared", "user2model"})
 }
 
 func (s *ModelSummariesSuite) TestModelsForUser3(c *gc.C) {
 	// User2 is only added to the model they own and the shared model as admin
 	s.Setup4Models(c)
-	names := s.modelNamesForUser(c, "user3admin")
+	names := s.modelNamesForUser(c, "user3admin", false)
 	c.Check(names, gc.DeepEquals, []string{"shared", "user3model"})
 }
 
@@ -237,10 +235,10 @@ func (s *ModelSummariesSuite) TestModelsForIgnoresImportingModels(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Since the new model is importing, when we do the list we shouldn't see it.
-	names := s.modelNamesForUser(c, "user3admin")
+	names := s.modelNamesForUser(c, "user3admin", false)
 	c.Check(names, gc.DeepEquals, []string{"shared", "user3model"})
 	// Superuser doesn't see importing models, either
-	names = s.modelNamesForUser(c, s.Model.Owner().Name())
+	names = s.modelNamesForUser(c, s.Model.Owner().Name(), true)
 	c.Check(names, gc.DeepEquals, []string{"shared", "testmodel", "user1model", "user2model", "user3model"})
 }
 
@@ -262,9 +260,6 @@ func (s *ModelSummariesSuite) TestContainsConfigInformation(c *gc.C) {
 	c.Assert(ok, jc.IsTrue)
 	c.Check(summaryA.AgentVersion, gc.NotNil)
 	c.Check(*summaryA.AgentVersion, gc.Equals, version)
-	series, ok := conf.DefaultSeries()
-	c.Assert(ok, jc.IsTrue)
-	c.Check(summaryA.DefaultSeries, gc.Equals, series)
 }
 
 func (s *ModelSummariesSuite) TestContainsProviderType(c *gc.C) {
@@ -338,7 +333,6 @@ func (s *ModelSummariesSuite) TestContainsModelStatusSuspended(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(shared.InvalidateModelCredential("test"), jc.ErrorIsNil)
 
-	s.State.StartSync()
 	user1, ph, err := s.StatePool.GetModel(modelNameToUUID["user1model"])
 	defer ph.Release()
 	c.Assert(err, jc.ErrorIsNil)
@@ -408,30 +402,30 @@ func (s *ModelSummariesSuite) TestContainsMachineInformation(c *gc.C) {
 	onecore := uint64(1)
 	twocores := uint64(2)
 	threecores := uint64(3)
-	m0, err := shared.AddMachine("quantal", state.JobHostUnits)
+	m0, err := shared.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m0.Life(), gc.Equals, state.Alive)
 	err = m0.SetInstanceInfo("i-12345", "", "nonce", &instance.HardwareCharacteristics{
 		CpuCores: &onecore,
 	}, nil, nil, nil, nil, nil)
 	c.Assert(err, jc.ErrorIsNil)
-	m1, err := shared.AddMachine("quantal", state.JobHostUnits)
+	m1, err := shared.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = m1.SetInstanceInfo("i-45678", "", "nonce", &instance.HardwareCharacteristics{
 		CpuCores: &twocores,
 	}, nil, nil, nil, nil, nil)
 	c.Assert(err, jc.ErrorIsNil)
-	m2, err := shared.AddMachine("quantal", state.JobHostUnits)
+	m2, err := shared.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = m2.SetInstanceInfo("i-78901", "", "nonce", &instance.HardwareCharacteristics{
 		CpuCores: &threecores,
 	}, nil, nil, nil, nil, nil)
 	c.Assert(err, jc.ErrorIsNil)
 	// No instance
-	_, err = shared.AddMachine("quantal", state.JobHostUnits)
+	_, err = shared.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	// Dying instance, should not count to Cores or Machine count
-	mDying, err := shared.AddMachine("quantal", state.JobHostUnits)
+	mDying, err := shared.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = mDying.SetInstanceInfo("i-78901", "", "nonce", &instance.HardwareCharacteristics{
 		CpuCores: &threecores,
@@ -440,7 +434,7 @@ func (s *ModelSummariesSuite) TestContainsMachineInformation(c *gc.C) {
 	err = mDying.Destroy()
 	c.Assert(err, jc.ErrorIsNil)
 	// Instance data, but no core count
-	m4, err := shared.AddMachine("quantal", state.JobHostUnits)
+	m4, err := shared.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	arch := arch.DefaultArchitecture
 	err = m4.SetInstanceInfo("i-78901", "", "nonce", &instance.HardwareCharacteristics{

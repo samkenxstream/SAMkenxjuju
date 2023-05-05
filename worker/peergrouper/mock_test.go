@@ -13,13 +13,12 @@ import (
 	"sync"
 
 	"github.com/juju/errors"
-	"github.com/juju/replicaset/v2"
+	"github.com/juju/replicaset/v3"
 	"github.com/juju/utils/v3/voyeur"
 	"github.com/juju/worker/v3"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
@@ -65,7 +64,9 @@ type errorPattern struct {
 // in path.Match.
 //
 // The standard form for errors is:
-//    Type.Function <arg>...
+//
+//	Type.Function <arg>...
+//
 // See individual functions for details.
 func (e *errorPatterns) setErrorFor(what string, err error) {
 	e.setErrorFuncFor(what, func() error {
@@ -342,7 +343,6 @@ type controllerDoc struct {
 	id         string
 	wantsVote  bool
 	hasVote    bool
-	instanceId instance.Id
 	addresses  []network.SpaceAddress
 	statusInfo status.StatusInfo
 	life       state.Life

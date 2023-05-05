@@ -17,8 +17,8 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
 	"github.com/juju/names/v4"
 	"github.com/juju/version/v2"
 
@@ -527,7 +527,6 @@ type ModelChecker struct {
 	foundBlobPaths set.Strings
 	session        *mgo.Session
 	model          *state.Model
-	system         *state.State
 
 	managedResources *mgo.Collection
 	resources        *mgo.Collection
@@ -989,8 +988,9 @@ var blobstoreFileFieldSelector = bson.M{"_id": 1, "filename": 1, "length": 1}
 // This should be called after checkUnreferencedResources, so that we have already
 // flagged every Blobstore.files object that has been referenced.
 // TODO: ideally we would have some way of giving a hint as to what the content is.
-//  We could consider looking at the first chunk for text content, or checking
-//  if the content is a .zip file, etc.
+//
+//	We could consider looking at the first chunk for text content, or checking
+//	if the content is a .zip file, etc.
 func (b *BlobStoreChecker) checkUnreferencedFiles() {
 	blobstoreDB := b.session.DB("blobstore")
 	blobFiles := blobstoreDB.C("blobstore.files")

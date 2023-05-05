@@ -14,14 +14,13 @@ import (
 	"github.com/juju/juju/cloudconfig/instancecfg"
 	"github.com/juju/juju/controller/authentication"
 	"github.com/juju/juju/core/network"
-	coreseries "github.com/juju/juju/core/series"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state/binarystorage"
 	"github.com/juju/juju/state/stateenvirons"
 )
 
-type backend interface {
+type InstanceConfigBackend interface {
 	Model() (Model, error)
 	Machine(string) (Machine, error)
 	ToolsStorage() (binarystorage.StorageCloser, error)
@@ -31,7 +30,7 @@ type backend interface {
 // is needed for machine cloud-init (for non-controllers only). It
 // is exposed for testing purposes.
 // TODO(rog) fix environs/manual tests so they do not need to call this, or move this elsewhere.
-func InstanceConfig(ctrlSt ControllerBackend, st backend, machineId, nonce, dataDir string) (*instancecfg.InstanceConfig, error) {
+func InstanceConfig(ctrlSt ControllerBackend, st InstanceConfigBackend, machineId, nonce, dataDir string) (*instancecfg.InstanceConfig, error) {
 	model, err := st.Model()
 	if err != nil {
 		return nil, errors.Annotate(err, "getting state model")
@@ -67,20 +66,14 @@ func InstanceConfig(ctrlSt ControllerBackend, st backend, machineId, nonce, data
 		return environs.GetEnviron(configGetter, environs.New)
 	}
 	toolsFinder := common.NewToolsFinder(configGetter, st, urlGetter, newEnviron)
-	findToolsResult, err := toolsFinder.FindTools(params.FindToolsParams{
-		Number:       agentVersion,
-		MajorVersion: -1,
-		MinorVersion: -1,
-		OSType:       coreseries.DefaultOSTypeNameFromSeries(machine.Series()),
-		Arch:         *hc.Arch,
+	toolsList, err := toolsFinder.FindAgents(common.FindAgentsParams{
+		Number: agentVersion,
+		OSType: machine.Base().OS,
+		Arch:   *hc.Arch,
 	})
 	if err != nil {
 		return nil, errors.Annotate(err, "finding agent binaries")
 	}
-	if findToolsResult.Error != nil {
-		return nil, errors.Annotate(findToolsResult.Error, "finding agent binaries")
-	}
-	toolsList := findToolsResult.List
 
 	controllerConfig, err := ctrlSt.ControllerConfig()
 	if err != nil {
@@ -110,8 +103,12 @@ func InstanceConfig(ctrlSt ControllerBackend, st backend, machineId, nonce, data
 		return nil, errors.Annotate(err, "setting up machine authentication")
 	}
 
+	base, err := series.ParseBase(machine.Base().OS, machine.Base().Channel)
+	if err != nil {
+		return nil, errors.Annotate(err, "getting machine base")
+	}
 	icfg, err := instancecfg.NewInstanceConfig(ctrlSt.ControllerTag(), machineId, nonce, modelConfig.ImageStream(),
-		machine.Series(), apiInfo,
+		base, apiInfo,
 	)
 	if err != nil {
 		return nil, errors.Annotate(err, "initializing instance config")

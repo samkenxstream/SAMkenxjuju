@@ -5,7 +5,6 @@ package equinix
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/golang/mock/gomock"
 	jc "github.com/juju/testing/checkers"
@@ -13,11 +12,14 @@ import (
 	"github.com/packethost/packngo"
 	gc "gopkg.in/check.v1"
 
+	jtesting "github.com/juju/testing"
+
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/cloudconfig/instancecfg"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
@@ -26,14 +28,12 @@ import (
 	"github.com/juju/juju/provider/equinix/mocks"
 	"github.com/juju/juju/testing"
 	"github.com/juju/juju/tools"
-	jtesting "github.com/juju/testing"
 )
 
 type environProviderSuite struct {
 	jtesting.IsolationSuite
 	provider environs.EnvironProvider
 	spec     environscloudspec.CloudSpec
-	requests []*http.Request
 }
 
 var _ = gc.Suite(&environProviderSuite{})
@@ -45,6 +45,7 @@ func (s *environProviderSuite) SetUpSuite(c *gc.C) {
 func (s *environProviderSuite) TearDownSuite(c *gc.C) {
 	s.IsolationSuite.TearDownSuite(c)
 }
+
 func (s *environProviderSuite) TearDownTest(c *gc.C) {
 	s.IsolationSuite.TearDownTest(c)
 }
@@ -266,6 +267,7 @@ func NewPackngoCreateDeviceMatcher(hostname, itype, metro, os, projectID string)
 func (m *packngoCreateDeviceMatcher) String() string {
 	return ""
 }
+
 func (m *packngoCreateDeviceMatcher) Matches(x interface{}) bool {
 	req, ok := x.(*packngo.DeviceCreateRequest)
 	if !ok {
@@ -520,6 +522,87 @@ func (s *environProviderSuite) TestStartInstance(c *gc.C) {
 				},
 			},
 		},
+		{
+			ID:          "18e285e0-1872-11ea-8d71-362b9e155667",
+			Slug:        "c3.large.arm",
+			Name:        "c3.large.arm",
+			Description: "c3.large.arm",
+			Line:        "baremetal",
+			Legacy:      true,
+			Specs: &packngo.Specs{
+				Cpus: []*packngo.Cpus{
+					{
+						Count: 1,
+						Type:  "Ampere Altra Q80-30 80-core processor @ 2.8GHz",
+					},
+				},
+				Memory: &packngo.Memory{
+					Total: "32GB",
+				},
+				Drives: []*packngo.Drives{
+					{
+						Count: 2,
+						Size:  "960GB",
+						Type:  "NVME",
+					},
+				},
+			},
+			Pricing: &packngo.Pricing{
+				Hour: 2,
+			},
+			DeploymentTypes: []string{
+				"on_demand",
+				"spot_market",
+			},
+			Class: "c3.large.arm",
+			AvailableInMetros: []packngo.Metro{
+				{
+					ID:      "108b2cfb-246b-45e3-885a-bf3e82fce1a0",
+					Name:    "Amsterdam",
+					Code:    "am",
+					Country: "NL",
+				},
+			},
+		},
+		{
+			ID:          "351c618b-760f-45c5-b45d-7044111a6a31",
+			Slug:        "nope.large.x86",
+			Name:        "nope.large.x86",
+			Description: "Tests that without on_demand this plan will not be returned",
+			Line:        "baremetal",
+			Legacy:      true,
+			Specs: &packngo.Specs{
+				Cpus: []*packngo.Cpus{
+					{
+						Count: 1,
+						Type:  "Intel(R) Xeon(R) E-2278G CPU @ 3.40GHz",
+					},
+				},
+				Memory: &packngo.Memory{
+					Total: "32GB",
+				},
+				Drives: []*packngo.Drives{
+					{
+						Count: 2,
+						Size:  "480GB",
+						Type:  "ssd",
+					},
+				},
+			},
+			Pricing: &packngo.Pricing{
+				Hour: 1.20,
+			},
+			DeploymentTypes: []string{},
+			Class:           "nope.small.x86",
+			AvailableInMetros: []packngo.Metro{
+				{
+					ID:      "108b2cfb-246b-45e3-885a-bf3e82fce1a0",
+					Name:    "Amsterdam",
+					Code:    "am",
+					Country: "NL",
+				},
+			},
+		},
 	}, nil, nil)
 
 	os := mocks.NewMockOSService(cntrl)
@@ -562,7 +645,8 @@ func (s *environProviderSuite) TestStartInstance(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(env, gc.NotNil)
 	cons := constraints.Value{}
-	iConfig, err := instancecfg.NewBootstrapInstanceConfig(testing.FakeControllerConfig(), cons, cons, "focal", "", nil)
+	base := series.MakeDefaultBase("ubuntu", "20.04")
+	iConfig, err := instancecfg.NewBootstrapInstanceConfig(testing.FakeControllerConfig(), cons, cons, base, "", nil)
 	c.Assert(err, jc.ErrorIsNil)
 	_, err = env.StartInstance(environContext.NewCloudCallContext(context.TODO()), environs.StartInstanceParams{
 		ControllerUUID:   env.Config().UUID(),
@@ -578,14 +662,6 @@ func (s *environProviderSuite) TestStartInstance(c *gc.C) {
 		},
 	})
 	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *environProviderSuite) testOpenError(c *gc.C, spec environscloudspec.CloudSpec, expect string) {
-	_, err := environs.Open(context.TODO(), s.provider, environs.OpenParams{
-		Cloud:  spec,
-		Config: makeTestModelConfig(c),
-	})
-	c.Assert(err, gc.ErrorMatches, expect)
 }
 
 func makeTestModelConfig(c *gc.C, extra ...testing.Attrs) *config.Config {
@@ -650,7 +726,8 @@ func (*EquinixUtils) TestWaitDeviceActive_ReturnFailed(c *gc.C) {
 		State: "failed",
 	}, nil, nil).Times(1)
 	cl.Devices = device
-	waitDeviceActive(environContext.NewEmptyCloudCallContext(), cl, "100")
+	_, err := waitDeviceActive(environContext.NewEmptyCloudCallContext(), cl, "100")
+	c.Assert(err, gc.Not(jc.ErrorIsNil))
 }
 
 func (*EquinixUtils) TestIsDistroSupported(c *gc.C) {
@@ -665,7 +742,7 @@ func (*EquinixUtils) TestIsDistroSupported(c *gc.C) {
 				Version: "20.10",
 			},
 			ic: &instances.InstanceConstraint{
-				Series: "20.10",
+				Base: series.MakeDefaultBase("ubuntu", "20.10"),
 			},
 			expect: false,
 		},

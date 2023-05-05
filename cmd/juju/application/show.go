@@ -15,6 +15,7 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -22,14 +23,15 @@ const showApplicationDoc = `
 The command takes deployed application names or aliases as an argument.
 
 The command does an exact search. It does not support wildcards.
+`
 
-Examples:
+const showApplicationExamples = `
     juju show-application mysql
     juju show-application mysql wordpress
 
     juju show-application myapplication
-      where "myapplication" is the application name alias, see "juju help deploy" for more information
 
+where "myapplication" is the application name alias; see "juju help deploy" for more information.
 `
 
 // NewShowApplicationCommand returns a command that displays applications info.
@@ -53,10 +55,11 @@ type showApplicationCommand struct {
 // Info implements Command.Info.
 func (c *showApplicationCommand) Info() *cmd.Info {
 	showCmd := &cmd.Info{
-		Name:    "show-application",
-		Args:    "<application name or alias>",
-		Purpose: "Displays information about an application.",
-		Doc:     showApplicationDoc,
+		Name:     "show-application",
+		Args:     "<application name or alias>",
+		Purpose:  "Displays information about an application.",
+		Doc:      showApplicationDoc,
+		Examples: showApplicationExamples,
 	}
 	return jujucmd.Info(showCmd)
 }
@@ -171,7 +174,7 @@ func formatApplicationInfos(all []params.ApplicationResult) (map[string]Applicat
 // ApplicationInfo defines the serialization behaviour of the application information.
 type ApplicationInfo struct {
 	Charm            string                     `yaml:"charm,omitempty" json:"charm,omitempty"`
-	Series           string                     `yaml:"series,omitempty" json:"series,omitempty"`
+	Base             string                     `yaml:"base,omitempty" json:"base,omitempty"`
 	Channel          string                     `yaml:"channel,omitempty" json:"channel,omitempty"`
 	Constraints      constraints.Value          `yaml:"constraints,omitempty" json:"constraints,omitempty"`
 	Principal        bool                       `yaml:"principal" json:"principal"`
@@ -207,9 +210,13 @@ func createApplicationInfo(details params.ApplicationResult) (names.ApplicationT
 
 	}
 
+	base, err := series.ParseBase(details.Base.Name, details.Base.Channel)
+	if err != nil {
+		return names.ApplicationTag{}, ApplicationInfo{}, errors.Trace(err)
+	}
 	info := ApplicationInfo{
 		Charm:            details.Charm,
-		Series:           details.Series,
+		Base:             base.DisplayString(),
 		Channel:          details.Channel,
 		Constraints:      details.Constraints,
 		Principal:        details.Principal,

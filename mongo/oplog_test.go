@@ -8,9 +8,9 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	jujutesting "github.com/juju/testing"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3/arch"
 	gc "gopkg.in/check.v1"
@@ -71,7 +71,7 @@ func (s *oplogSuite) TestWithRealOplog(c *gc.C) {
 	// Update foo.bar and see the update reported.
 	err := coll.UpdateId("thing", bson.M{"$set": bson.M{"blah": 42}})
 	c.Assert(err, jc.ErrorIsNil)
-	assertOplog("u", bson.D{{"diff", bson.D{{"i", bson.D{{"blah", 42}}}}}}, bson.D{{"_id", "thing"}})
+	assertOplog("u", bson.D{{"$set", bson.D{{"blah", 42}}}}, bson.D{{"_id", "thing"}})
 
 	// Insert into another collection (shouldn't be reported due to filter).
 	s.insertDoc(c, session, db.C("elsewhere"), bson.M{"_id": "boo"})
@@ -226,8 +226,8 @@ func (s *oplogSuite) TestNewMongoTimestampBeforeUnixEpoch(c *gc.C) {
 	c.Assert(mongo.NewMongoTimestamp(time.Time{}), gc.Equals, bson.MongoTimestamp(0))
 }
 
-func (s *oplogSuite) startMongoWithReplicaset(c *gc.C) (*jujutesting.MgoInstance, *mgo.Session) {
-	inst := &jujutesting.MgoInstance{EnableReplicaSet: true}
+func (s *oplogSuite) startMongoWithReplicaset(c *gc.C) (*mgotesting.MgoInstance, *mgo.Session) {
+	inst := &mgotesting.MgoInstance{EnableReplicaSet: true}
 	err := inst.Start(nil)
 	c.Assert(err, jc.ErrorIsNil)
 	s.AddCleanup(func(*gc.C) { inst.Destroy() })
@@ -244,15 +244,15 @@ func (s *oplogSuite) startMongoWithReplicaset(c *gc.C) (*jujutesting.MgoInstance
 	return inst, s.dialMongo(c, inst)
 }
 
-func (s *oplogSuite) startMongo(c *gc.C) (*jujutesting.MgoInstance, *mgo.Session) {
-	var inst jujutesting.MgoInstance
+func (s *oplogSuite) startMongo(c *gc.C) (*mgotesting.MgoInstance, *mgo.Session) {
+	var inst mgotesting.MgoInstance
 	err := inst.Start(nil)
 	c.Assert(err, jc.ErrorIsNil)
 	s.AddCleanup(func(*gc.C) { inst.Destroy() })
 	return &inst, s.dialMongo(c, &inst)
 }
 
-func (s *oplogSuite) dialMongo(c *gc.C, inst *jujutesting.MgoInstance) *mgo.Session {
+func (s *oplogSuite) dialMongo(c *gc.C, inst *mgotesting.MgoInstance) *mgo.Session {
 	session, err := inst.Dial()
 	c.Assert(err, jc.ErrorIsNil)
 	s.AddCleanup(func(*gc.C) { session.Close() })

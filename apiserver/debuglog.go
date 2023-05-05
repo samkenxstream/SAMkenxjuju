@@ -16,6 +16,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 
+	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/httpcontext"
 	"github.com/juju/juju/apiserver/websocket"
 	"github.com/juju/juju/rpc/params"
@@ -32,6 +33,7 @@ type debugLogHandler struct {
 	authenticator httpcontext.Authenticator
 	authorizer    httpcontext.Authorizer
 	handle        debugLogHandlerFunc
+	tokenParser   authentication.TokenParser
 }
 
 type debugLogHandlerFunc func(
@@ -48,12 +50,14 @@ func newDebugLogHandler(
 	authenticator httpcontext.Authenticator,
 	authorizer httpcontext.Authorizer,
 	handle debugLogHandlerFunc,
+	tokenParser authentication.TokenParser,
 ) *debugLogHandler {
 	return &debugLogHandler{
 		ctxt:          ctxt,
 		authenticator: authenticator,
 		authorizer:    authorizer,
 		handle:        handle,
+		tokenParser:   tokenParser,
 	}
 }
 
@@ -69,22 +73,23 @@ func newDebugLogHandler(
 // on the apiclient.
 //
 // Args for the HTTP request are as follows:
-//   includeEntity -> []string - lists entity tags to include in the response
-//      - tags may finish with a '*' to match a prefix e.g.: unit-mysql-*, machine-2
-//      - if none are set, then all lines are considered included
-//   includeModule -> []string - lists logging modules to include in the response
-//      - if none are set, then all lines are considered included
-//   excludeEntity -> []string - lists entity tags to exclude from the response
-//      - as with include, it may finish with a '*'
-//   excludeModule -> []string - lists logging modules to exclude from the response
-//   limit -> uint - show *at most* this many lines
-//   backlog -> uint
-//      - go back this many lines from the end before starting to filter
-//      - has no meaning if 'replay' is true
-//   level -> string one of [TRACE, DEBUG, INFO, WARNING, ERROR]
-//   replay -> string - one of [true, false], if true, start the file from the start
-//   noTail -> string - one of [true, false], if true, existing logs are sent back,
-//      - but the command does not wait for new ones.
+//
+//	includeEntity -> []string - lists entity tags to include in the response
+//	   - tags may finish with a '*' to match a prefix e.g.: unit-mysql-*, machine-2
+//	   - if none are set, then all lines are considered included
+//	includeModule -> []string - lists logging modules to include in the response
+//	   - if none are set, then all lines are considered included
+//	excludeEntity -> []string - lists entity tags to exclude from the response
+//	   - as with include, it may finish with a '*'
+//	excludeModule -> []string - lists logging modules to exclude from the response
+//	limit -> uint - show *at most* this many lines
+//	backlog -> uint
+//	   - go back this many lines from the end before starting to filter
+//	   - has no meaning if 'replay' is true
+//	level -> string one of [TRACE, DEBUG, INFO, WARNING, ERROR]
+//	replay -> string - one of [true, false], if true, start the file from the start
+//	noTail -> string - one of [true, false], if true, existing logs are sent back,
+//	   - but the command does not wait for new ones.
 func (h *debugLogHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	handler := func(conn *websocket.Conn) {
 		socket := &debugLogSocketImpl{conn}
@@ -92,7 +97,7 @@ func (h *debugLogHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Authentication and authorization has to be done after the http
 		// connection has been upgraded to a websocket.
 
-		authInfo, err := h.authenticator.Authenticate(req)
+		authInfo, err := h.authenticator.Authenticate(req, h.tokenParser)
 		if err != nil {
 			socket.sendError(errors.Annotate(err, "authentication failed"))
 			return

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/caas/kubernetes/provider/constants"
+	"github.com/juju/juju/caas/kubernetes/provider/pebble"
 	"github.com/juju/juju/caas/kubernetes/provider/resources"
 	"github.com/juju/juju/caas/kubernetes/provider/storage"
 	"github.com/juju/juju/caas/kubernetes/provider/utils"
@@ -52,18 +54,22 @@ import (
 var logger = loggo.GetLogger("juju.kubernetes.provider.application")
 
 const (
-	charmVolumeName              = "charm-data"
-	agentProbeInitialDelay int32 = 30
-	agentProbePeriod       int32 = 10
-	agentProbeSuccess      int32 = 1
-	agentProbeFailure      int32 = 2
+	containerAgentPebblePort = "38812"
 
-	containerPebblePortStart   = 38813 // Arbitrary, but PEBBLE -> P38813 -> Port 38813
+	// containerProbeInitialDelay is the initial delay in seconds before the probe starts.
 	containerProbeInitialDelay = 30
-	containerProbeTimeout      = 1
-	containerProbePeriod       = 5
-	containerProbeSuccess      = 1
-	containerProbeFailure      = 1
+	// containerProbeTimeout is the timeout for the probe to complete in seconds.
+	containerProbeTimeout = 1
+	// containerProbePeriod is the number of seconds between each probe.
+	containerProbePeriod = 5
+	// containerProbeSuccess is the number of successful probes to mark the check as healthy.
+	containerProbeSuccess = 1
+	// containerProbeFailure is the number of failed probes to mark the check as unhealthy.
+	containerProbeFailure = 1
+)
+
+var (
+	containerAgentPebbleVersion = version.MustParse("2.9.37")
 )
 
 type app struct {
@@ -276,7 +282,7 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 						Spec: *podSpec,
 					},
 					PodManagementPolicy: appsv1.ParallelPodManagement,
-					ServiceName:         headlessServiceName(a.name),
+					ServiceName:         HeadlessServiceName(a.name),
 				},
 			},
 		}
@@ -534,7 +540,7 @@ type annotationUpdater interface {
 }
 
 func (a *app) upgradeHeadlessService(applier resources.Applier, ver version.Number) error {
-	r := resources.NewService(headlessServiceName(a.name), a.namespace, nil)
+	r := resources.NewService(HeadlessServiceName(a.name), a.namespace, nil)
 	if err := r.Get(context.Background(), a.client); err != nil {
 		return errors.Trace(err)
 	}
@@ -629,12 +635,14 @@ func (a *app) Exists() (caas.DeploymentState, error) {
 	return state, nil
 }
 
-func headlessServiceName(appName string) string {
+// HeadlessServiceName is an idempotent function for returning the name of the
+// endpoints service juju make for applications.
+func HeadlessServiceName(appName string) string {
 	return fmt.Sprintf("%s-endpoints", appName)
 }
 
 func (a *app) configureHeadlessService(name string, annotation annotations.Annotation) error {
-	svc := resources.NewService(headlessServiceName(name), a.namespace, &corev1.Service{
+	svc := resources.NewService(HeadlessServiceName(name), a.namespace, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: a.labels(),
 			Annotations: annotation.
@@ -667,10 +675,7 @@ func (a *app) configureDefaultService(annotation annotations.Annotation) (err er
 			}},
 		},
 	})
-	if err = svc.Get(context.Background(), a.client); errors.IsNotFound(err) {
-		return svc.Apply(context.Background(), a.client)
-	}
-	return errors.Trace(err)
+	return svc.Apply(context.Background(), a.client)
 }
 
 // UpdateService updates the default service with specific service type and port mappings.
@@ -684,7 +689,9 @@ func (a *app) UpdateService(param caas.ServiceParam) error {
 	svc.Service.Spec.Type = corev1.ServiceType(param.Type)
 	svc.Service.Spec.Ports = make([]corev1.ServicePort, len(param.Ports))
 	for i, p := range param.Ports {
-		svc.Service.Spec.Ports[i] = convertServicePort(p)
+		if svc.Service.Spec.Ports[i], err = convertServicePort(p); err != nil {
+			return errors.Trace(err)
+		}
 	}
 
 	applier := a.newApplier()
@@ -695,13 +702,26 @@ func (a *app) UpdateService(param caas.ServiceParam) error {
 	return applier.Run(context.Background(), a.client, false)
 }
 
-func convertServicePort(p caas.ServicePort) corev1.ServicePort {
-	return corev1.ServicePort{
-		Name:       p.Name,
-		Port:       int32(p.Port),
-		TargetPort: intstr.FromInt(p.TargetPort),
-		Protocol:   corev1.Protocol(p.Protocol),
+func convertServicePort(port caas.ServicePort) (out corev1.ServicePort, err error) {
+	var protocol corev1.Protocol
+
+	switch port.Protocol {
+	case "TCP", "tcp":
+		protocol = corev1.ProtocolTCP
+	case "UDP", "udp":
+		protocol = corev1.ProtocolUDP
+	case "SCTP", "sctp":
+		protocol = corev1.ProtocolSCTP
+	default:
+		return out, errors.NotValidf("protocol %q for service %q", port.Protocol, port.Name)
 	}
+
+	return corev1.ServicePort{
+		Name:       port.Name,
+		Port:       int32(port.Port),
+		TargetPort: intstr.FromInt(port.TargetPort),
+		Protocol:   protocol,
+	}, nil
 }
 
 func (a *app) getService() (*resources.Service, error) {
@@ -715,19 +735,37 @@ func (a *app) getService() (*resources.Service, error) {
 	return svc, nil
 }
 
+const portNamePrefix = "juju-"
+
 // UpdatePorts updates port mappings on the specified service.
 func (a *app) UpdatePorts(ports []caas.ServicePort, updateContainerPorts bool) error {
 	svc, err := a.getService()
 	if err != nil {
 		return errors.Annotatef(err, "getting existing service %q", a.name)
 	}
-	svc.Service.Spec.Ports = make([]corev1.ServicePort, len(ports))
-	for i, port := range ports {
-		svc.Service.Spec.Ports[i] = convertServicePort(port)
+	var replacePortsPatchType = types.MergePatchType
+	// We want to replace rather than merge here.
+	svc.PatchType = &replacePortsPatchType
+
+	var expectedPorts []corev1.ServicePort
+	for _, p := range svc.Service.Spec.Ports {
+		if !strings.HasPrefix(p.Name, portNamePrefix) {
+			// The ports are not mamanged by Juju should be kept.
+			expectedPorts = append(expectedPorts, p)
+		}
 	}
+	for _, port := range ports {
+		sp, err := convertServicePort(port)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		sp.Name = portNamePrefix + sp.Name
+		expectedPorts = append(expectedPorts, sp)
+	}
+	svc.Service.Spec.Ports = expectedPorts
+
 	applier := a.newApplier()
 	applier.Apply(svc)
-
 	if updateContainerPorts {
 		if err := a.updateContainerPorts(applier, svc.Service.Spec.Ports); err != nil {
 			return errors.Trace(err)
@@ -932,7 +970,7 @@ func (a *app) Delete() error {
 	switch a.deploymentType {
 	case caas.DeploymentStateful:
 		applier.Delete(resources.NewStatefulSet(a.name, a.namespace, nil))
-		applier.Delete(resources.NewService(headlessServiceName(a.name), a.namespace, nil))
+		applier.Delete(resources.NewService(HeadlessServiceName(a.name), a.namespace, nil))
 	case caas.DeploymentStateless:
 		applier.Delete(resources.NewDeployment(a.name, a.namespace, nil))
 	case caas.DeploymentDaemon:
@@ -1169,7 +1207,7 @@ func (a *app) Units() ([]caas.Unit, error) {
 		// Gather info about how filesystems are attached/mounted to the pod.
 		// The mount name represents the filesystem tag name used by Juju.
 		for _, volMount := range p.Spec.Containers[0].VolumeMounts {
-			if volMount.Name == charmVolumeName {
+			if volMount.Name == constants.CharmVolumeName {
 				continue
 			}
 			vol, ok := volumesByName[volMount.Name]
@@ -1229,7 +1267,7 @@ func (a *app) Units() ([]caas.Unit, error) {
 func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec, error) {
 	jujuDataDir := paths.DataDir(paths.OSUnixLike)
 
-	containerNames := []string(nil)
+	containerNames := config.ExistingContainers
 	containers := []caas.ContainerConfig(nil)
 	for _, v := range config.Containers {
 		containerNames = append(containerNames, v.Name)
@@ -1256,78 +1294,132 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 			Value: features,
 		})
 	}
-	containerSpecs := []corev1.Container{{
-		Name:            constants.ApplicationCharmContainer,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Image:           config.CharmBaseImagePath,
-		WorkingDir:      jujuDataDir,
-		Command:         []string{"/charm/bin/containeragent"},
-		Args: []string{
-			"unit",
-			"--data-dir", jujuDataDir,
-			"--charm-modified-version", strconv.Itoa(config.CharmModifiedVersion),
-			"--append-env", "PATH=$PATH:/charm/bin",
-			"--show-log",
+	charmContainerCommand := []string{"/charm/bin/pebble"}
+	charmContainerArgs := []string{
+		"run",
+		"--http", fmt.Sprintf(":%s", containerAgentPebblePort),
+		"--verbose",
+	}
+	charmContainerLivenessProbe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/v1/health?level=alive",
+				Port: intstr.Parse(containerAgentPebblePort),
+			},
 		},
-		Env: env,
-		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:  pointer.Int64Ptr(0),
-			RunAsGroup: pointer.Int64Ptr(0),
+		InitialDelaySeconds: containerProbeInitialDelay,
+		TimeoutSeconds:      containerProbeTimeout,
+		PeriodSeconds:       containerProbePeriod,
+		SuccessThreshold:    containerProbeSuccess,
+		FailureThreshold:    containerProbeFailure,
+	}
+	charmContainerReadinessProbe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/v1/health?level=ready",
+				Port: intstr.Parse(containerAgentPebblePort),
+			},
 		},
-		LivenessProbe: &corev1.Probe{
+		InitialDelaySeconds: containerProbeInitialDelay,
+		TimeoutSeconds:      containerProbeTimeout,
+		PeriodSeconds:       containerProbePeriod,
+		SuccessThreshold:    containerProbeSuccess,
+		FailureThreshold:    containerProbeFailure,
+	}
+	charmContainerStartupProbe := charmContainerLivenessProbe
+	charmContainerExtraVolumeMounts := []corev1.VolumeMount{
+		{
+			Name:      constants.CharmVolumeName,
+			MountPath: constants.DefaultPebbleDir,
+			SubPath:   "containeragent/pebble",
+		},
+	}
+
+	// (tlm) lp1997253. If the agent version is less than
+	// containerAgentPebbleVersion we need to keep still using the old args
+	// supported by the init command and the associated probes. By not doing
+	// this we will have full container restarts.
+	if config.AgentVersion.Compare(containerAgentPebbleVersion) < 0 {
+		charmContainerExtraVolumeMounts = []corev1.VolumeMount{}
+		charmContainerLivenessProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: constants.AgentHTTPPathLiveness,
 					Port: intstr.Parse(constants.AgentHTTPProbePort),
 				},
 			},
-			InitialDelaySeconds: agentProbeInitialDelay,
-			PeriodSeconds:       agentProbePeriod,
-			SuccessThreshold:    agentProbeSuccess,
-			FailureThreshold:    agentProbeFailure,
-		},
-		ReadinessProbe: &corev1.Probe{
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			SuccessThreshold:    1,
+			FailureThreshold:    2,
+		}
+		charmContainerReadinessProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: constants.AgentHTTPPathReadiness,
 					Port: intstr.Parse(constants.AgentHTTPProbePort),
 				},
 			},
-			InitialDelaySeconds: agentProbeInitialDelay,
-			PeriodSeconds:       agentProbePeriod,
-			SuccessThreshold:    agentProbeSuccess,
-			FailureThreshold:    agentProbeFailure,
-		},
-		StartupProbe: &corev1.Probe{
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			SuccessThreshold:    1,
+			FailureThreshold:    2,
+		}
+		charmContainerStartupProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: constants.AgentHTTPPathStartup,
 					Port: intstr.Parse(constants.AgentHTTPProbePort),
 				},
 			},
-			InitialDelaySeconds: agentProbeInitialDelay,
-			PeriodSeconds:       agentProbePeriod,
-			SuccessThreshold:    agentProbeSuccess,
-			FailureThreshold:    agentProbeFailure,
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			SuccessThreshold:    1,
+			FailureThreshold:    2,
+		}
+		charmContainerCommand = []string{"/charm/bin/containeragent"}
+		charmContainerArgs = []string{
+			"unit",
+			"--data-dir", jujuDataDir,
+			"--charm-modified-version", strconv.Itoa(config.CharmModifiedVersion),
+			"--append-env", "PATH=$PATH:/charm/bin",
+			"--show-log",
+		}
+	}
+
+	containerSpecs := []corev1.Container{{
+		Name:            constants.ApplicationCharmContainer,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Image:           config.CharmBaseImagePath,
+		WorkingDir:      jujuDataDir,
+		Command:         charmContainerCommand,
+		Args:            charmContainerArgs,
+		Env:             env,
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  pointer.Int64Ptr(0),
+			RunAsGroup: pointer.Int64Ptr(0),
 		},
-		VolumeMounts: []corev1.VolumeMount{
+		LivenessProbe:  charmContainerLivenessProbe,
+		ReadinessProbe: charmContainerReadinessProbe,
+		StartupProbe:   charmContainerStartupProbe,
+		VolumeMounts: append([]corev1.VolumeMount{
 			{
-				Name:      charmVolumeName,
+				Name:      constants.CharmVolumeName,
 				MountPath: "/charm/bin",
 				SubPath:   "charm/bin",
 				ReadOnly:  true,
 			},
 			{
-				Name:      charmVolumeName,
+				Name:      constants.CharmVolumeName,
 				MountPath: jujuDataDir,
 				SubPath:   strings.TrimPrefix(jujuDataDir, "/"),
 			},
 			{
-				Name:      charmVolumeName,
+				Name:      constants.CharmVolumeName,
 				MountPath: "/charm/containers",
 				SubPath:   "charm/containers",
 			},
-		},
+		}, charmContainerExtraVolumeMounts...),
 	}}
 
 	imagePullSecrets := []corev1.LocalObjectReference(nil)
@@ -1347,7 +1439,7 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 				"run",
 				"--create-dirs",
 				"--hold",
-				"--http", fmt.Sprintf(":%d", containerPebblePortStart+i),
+				"--http", fmt.Sprintf(":%s", pebble.WorkloadHealthCheckPort(i)),
 				"--verbose",
 			},
 			Env: []corev1.EnvVar{{
@@ -1358,12 +1450,7 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 				Value: "/charm/container/pebble.socket",
 			}},
 			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/v1/health?level=alive",
-						Port: intstr.FromInt(containerPebblePortStart + i),
-					},
-				},
+				ProbeHandler:        pebble.LivenessHandler(pebble.WorkloadHealthCheckPort(i)),
 				InitialDelaySeconds: containerProbeInitialDelay,
 				TimeoutSeconds:      containerProbeTimeout,
 				PeriodSeconds:       containerProbePeriod,
@@ -1371,12 +1458,7 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 				FailureThreshold:    containerProbeFailure,
 			},
 			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/v1/health?level=ready",
-						Port: intstr.FromInt(containerPebblePortStart + i),
-					},
-				},
+				ProbeHandler:        pebble.ReadinessHandler(pebble.WorkloadHealthCheckPort(i)),
 				InitialDelaySeconds: containerProbeInitialDelay,
 				TimeoutSeconds:      containerProbeTimeout,
 				PeriodSeconds:       containerProbePeriod,
@@ -1390,13 +1472,13 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      charmVolumeName,
+					Name:      constants.CharmVolumeName,
 					MountPath: "/charm/bin/pebble",
 					SubPath:   "charm/bin/pebble",
 					ReadOnly:  true,
 				},
 				{
-					Name:      charmVolumeName,
+					Name:      constants.CharmVolumeName,
 					MountPath: "/charm/container",
 					SubPath:   fmt.Sprintf("charm/containers/%s", v.Name),
 				},
@@ -1406,6 +1488,31 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 			imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: a.imagePullSecretName(v.Name)})
 		}
 		containerSpecs = append(containerSpecs, container)
+	}
+
+	containerAgentArgs := []string{
+		"init",
+		"--containeragent-pebble-dir", "/containeragent/pebble",
+		"--charm-modified-version", strconv.Itoa(config.CharmModifiedVersion),
+		"--data-dir", jujuDataDir,
+		"--bin-dir", "/charm/bin",
+	}
+	charmInitAdditionalMounts := []corev1.VolumeMount{
+		{
+			Name:      constants.CharmVolumeName,
+			MountPath: "/containeragent/pebble",
+			SubPath:   "containeragent/pebble",
+		},
+	}
+	// (tlm) lp1997253. If the agent version is less then containerAgentPebbleVersion
+	// we need to keep still using the old args supported by the init command
+	if config.AgentVersion.Compare(containerAgentPebbleVersion) < 0 {
+		charmInitAdditionalMounts = []corev1.VolumeMount{}
+		containerAgentArgs = []string{
+			"init",
+			"--data-dir", jujuDataDir,
+			"--bin-dir", "/charm/bin",
+		}
 	}
 
 	automountToken := true
@@ -1421,7 +1528,7 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 			Image:           config.AgentImagePath,
 			WorkingDir:      jujuDataDir,
 			Command:         []string{"/opt/containeragent"},
-			Args:            []string{"init", "--data-dir", jujuDataDir, "--bin-dir", "/charm/bin"},
+			Args:            containerAgentArgs,
 			Env: []corev1.EnvVar{
 				{
 					Name:  constants.EnvJujuContainerNames,
@@ -1453,36 +1560,36 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 					},
 				},
 			},
-			VolumeMounts: []corev1.VolumeMount{
+			VolumeMounts: append([]corev1.VolumeMount{
 				{
-					Name:      charmVolumeName,
+					Name:      constants.CharmVolumeName,
 					MountPath: jujuDataDir,
 					SubPath:   strings.TrimPrefix(jujuDataDir, "/"),
 				},
 				{
-					Name:      charmVolumeName,
+					Name:      constants.CharmVolumeName,
 					MountPath: "/charm/bin",
 					SubPath:   "charm/bin",
 				},
 				// DO we need this in init container????
 				{
-					Name:      charmVolumeName,
+					Name:      constants.CharmVolumeName,
 					MountPath: "/charm/containers",
 					SubPath:   "charm/containers",
 				},
-			},
+			}, charmInitAdditionalMounts...),
 		}},
 		Containers: containerSpecs,
 		Volumes: []corev1.Volume{
 			{
-				Name: charmVolumeName,
+				Name: constants.CharmVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				},
 			},
 		},
 	}
-	err := ApplyConstraints(spec, a.name, config.Constraints)
+	err := ApplyConstraints(spec, a.name, config.Constraints, configureConstraint)
 	if err != nil {
 		return nil, errors.Annotate(err, "processing constraints")
 	}

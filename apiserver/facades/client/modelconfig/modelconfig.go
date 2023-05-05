@@ -4,15 +4,18 @@
 package modelconfig
 
 import (
+	"fmt"
+
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 
 	"github.com/juju/juju/apiserver/common"
+	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/feature"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
 )
@@ -79,11 +82,34 @@ func (c *ModelConfigAPI) canReadModel() error {
 	return nil
 }
 
+func (c *ModelConfigAPI) isModelAdmin() (bool, error) {
+	isAdmin, err := c.auth.HasPermission(permission.SuperuserAccess, c.backend.ControllerTag())
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	if isAdmin {
+		return true, nil
+	}
+	isAdmin, err = c.auth.HasPermission(permission.AdminAccess, c.backend.ModelTag())
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	return isAdmin, nil
+}
+
 // ModelGet implements the server-side part of the
 // model-config CLI command.
 func (c *ModelConfigAPI) ModelGet() (params.ModelConfigResults, error) {
 	result := params.ModelConfigResults{}
 	if err := c.canReadModel(); err != nil {
+		return result, errors.Trace(err)
+	}
+	isAdmin, err := c.isModelAdmin()
+	if err != nil {
+		return result, errors.Trace(err)
+	}
+	defaultSchema, err := config.Schema(nil)
+	if err != nil {
 		return result, errors.Trace(err)
 	}
 
@@ -100,11 +126,47 @@ func (c *ModelConfigAPI) ModelGet() (params.ModelConfigResults, error) {
 		if attr == config.AuthorizedKeysKey {
 			continue
 		}
+
+		// TODO (stickupkid): Remove this when we remove series.
+		// This essentially, always ensures that we report back a default-series
+		// if we have a default-base.
+		if attr == config.DefaultBaseKey && val.Value != "" {
+			base, err := series.ParseBaseFromString(val.Value.(string))
+			if err != nil {
+				return result, errors.Trace(err)
+			}
+
+			s, err := series.GetSeriesFromBase(base)
+			if err != nil {
+				return result, errors.Trace(err)
+			}
+
+			result.Config[config.DefaultSeriesKey] = params.ConfigValue{
+				Source: val.Source,
+				Value:  s,
+			}
+		}
+
+		// Only admins get to see attributes marked as secret.
+		if attr, ok := defaultSchema[attr]; ok && attr.Secret && !isAdmin {
+			continue
+		}
+
 		result.Config[attr] = params.ConfigValue{
 			Value:  val.Value,
 			Source: val.Source,
 		}
 	}
+
+	// TODO (stickupkid): For backwards compatibility we need to ensure that
+	// we always report back a default-series.
+	if _, ok := result.Config[config.DefaultSeriesKey]; !ok {
+		result.Config[config.DefaultSeriesKey] = params.ConfigValue{
+			Value:  "",
+			Source: "default",
+		}
+	}
+
 	return result, nil
 }
 
@@ -118,6 +180,23 @@ func (c *ModelConfigAPI) ModelSet(args params.ModelSet) error {
 	if err := c.check.ChangeAllowed(); err != nil {
 		return errors.Trace(err)
 	}
+	isAdmin, err := c.isModelAdmin()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defaultSchema, err := config.Schema(nil)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Only admins get to set attributes marked as secret.
+	for attr := range args.Config {
+		if attr, ok := defaultSchema[attr]; ok && attr.Secret && !isAdmin {
+			return apiservererrors.ErrPerm
+		}
+	}
+
+	// Series to base translations.
+	checkUpdateDefaultBase := c.checkUpdateDefaultBase()
 
 	// Make sure we don't allow changing agent-version.
 	checkAgentVersion := c.checkAgentVersion()
@@ -131,13 +210,55 @@ func (c *ModelConfigAPI) ModelSet(args params.ModelSet) error {
 	// Make sure DefaultSpace exists.
 	checkDefaultSpace := c.checkDefaultSpace()
 
-	// To use the logging-output feature, the feature flag needs to be set.
-	checkLoggingConfig := c.checkLoggingOutput()
+	// Make sure the secret backend exists.
+	checkSecretBackend := c.checkSecretBackend()
 
 	// Replace any deprecated attributes with their new values.
 	attrs := config.ProcessDeprecatedAttributes(args.Config)
-	return c.backend.UpdateModelConfig(attrs, nil,
-		checkAgentVersion, checkLogTrace, checkDefaultSpace, checkCharmhubURL, checkLoggingConfig)
+	return c.backend.UpdateModelConfig(attrs,
+		nil,
+		checkAgentVersion,
+		checkLogTrace,
+		checkDefaultSpace,
+		checkCharmhubURL,
+		checkSecretBackend,
+		checkUpdateDefaultBase,
+	)
+}
+
+func (c *ModelConfigAPI) checkUpdateDefaultBase() state.ValidateConfigFunc {
+	return func(updateAttrs map[string]interface{}, removeAttrs []string, oldConfig *config.Config) error {
+		cfgSeries, defaultSeriesOK := updateAttrs[config.DefaultSeriesKey]
+		_, defaultBaseOK := updateAttrs[config.DefaultBaseKey]
+
+		// If there is no default series, there is nothing to do.
+		if !defaultSeriesOK {
+			return nil
+		} else if defaultSeriesOK && defaultBaseOK {
+			// If the default-series is set and the default-base is set, error
+			// out, as you can't change both.
+			return errors.New("cannot set both default-series and default-base")
+		}
+
+		if defaultSeriesOK {
+			// If the default-series is set, but empty, then we need to patch the
+			// base.
+			if cfgSeries == "" {
+				updateAttrs[config.DefaultBaseKey] = ""
+			} else {
+				// Ensure that the new default-series updates the default-base.
+				base, err := series.GetBaseFromSeries(cfgSeries.(string))
+				if err != nil {
+					return errors.Trace(err)
+				}
+
+				updateAttrs[config.DefaultBaseKey] = base.String()
+			}
+			// Always remove the default-series.
+			delete(updateAttrs, config.DefaultSeriesKey)
+		}
+		return nil
+	}
 }
 
 func (c *ModelConfigAPI) checkLogTrace() state.ValidateConfigFunc {
@@ -219,20 +340,32 @@ func (c *ModelConfigAPI) checkCharmhubURL() state.ValidateConfigFunc {
 	}
 }
 
-func (c *ModelConfigAPI) checkLoggingOutput() state.ValidateConfigFunc {
+func (c *ModelConfigAPI) checkSecretBackend() state.ValidateConfigFunc {
 	return func(updateAttrs map[string]interface{}, removeAttrs []string, oldConfig *config.Config) error {
-		v, ok := updateAttrs[config.LoggingOutputKey]
-		if !ok || v == "" {
+		v, ok := updateAttrs[config.SecretBackendKey]
+		if !ok {
 			return nil
 		}
-		cfg, err := c.backend.ControllerConfig()
+		backendName, ok := v.(string)
+		if !ok {
+			return errors.NewNotValid(nil, fmt.Sprintf("%q config value is not a string", config.SecretBackendKey))
+		}
+		if backendName == "" {
+			return errors.NotValidf("empty %q config value", config.SecretBackendKey)
+		}
+		if backendName == config.DefaultSecretBackend {
+			return nil
+		}
+		backend, err := c.backend.GetSecretBackend(backendName)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if !cfg.Features().Contains(feature.LoggingOutput) {
-			return errors.Errorf("cannot set %q without setting the %q feature flag", config.LoggingOutputKey, feature.LoggingOutput)
+		p, err := commonsecrets.GetProvider(backend.BackendType)
+		if err != nil {
+			return errors.Annotatef(err, "cannot get backend for provider type %q", backend.BackendType)
 		}
-		return nil
+		err = commonsecrets.PingBackend(p, backend.Config)
+		return errors.Annotatef(err, "cannot ping backend %q", backend.Name)
 	}
 }
 
@@ -245,6 +378,16 @@ func (c *ModelConfigAPI) ModelUnset(args params.ModelUnset) error {
 	if err := c.check.ChangeAllowed(); err != nil {
 		return errors.Trace(err)
 	}
+
+	// If we're attempting to remove the default-series, then we need to
+	// swap that out for the default-base.
+	for i, key := range args.Keys {
+		if key == config.DefaultSeriesKey {
+			args.Keys[i] = config.DefaultBaseKey
+			break
+		}
+	}
+
 	return c.backend.UpdateModelConfig(nil, args.Keys)
 }
 
@@ -258,7 +401,7 @@ func (c *ModelConfigAPI) GetModelConstraints() (params.GetConstraintsResults, er
 	if err != nil {
 		return params.GetConstraintsResults{}, err
 	}
-	return params.GetConstraintsResults{cons}, nil
+	return params.GetConstraintsResults{Constraints: cons}, nil
 }
 
 // SetModelConstraints sets the constraints for the model.

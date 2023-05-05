@@ -31,6 +31,9 @@ import (
 	"github.com/juju/juju/juju/osenv"
 	"github.com/juju/juju/utils/proxy"
 	"github.com/juju/juju/worker/logsender"
+
+	// Import the secret providers.
+	_ "github.com/juju/juju/secrets/provider/all"
 )
 
 var logger = loggo.GetLogger("juju.cmd.containeragent")
@@ -188,6 +191,5 @@ type command func(*cmd.Context, []string) int
 type commandFactory struct {
 	containerAgentCmd command
 	jujuExec          command
-	jujuDumpLogs      command
 	jujuIntrospect    command
 }

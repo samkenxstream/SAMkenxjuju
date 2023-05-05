@@ -1,15 +1,24 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package state
 
 import (
-	"github.com/juju/description/v3"
+	"strings"
+
+	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
+	"github.com/juju/utils/v3"
+
+	"github.com/juju/description/v4"
 
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/environs/config"
 )
 
 // Migration import tasks provide a boundary of isolation between the
@@ -217,36 +226,43 @@ type FirewallRulesInput interface {
 	FirewallRulesDescription
 }
 
+// FirewallRulesOutput describes the methods used to set firewall rules
+// on the dest model
+type FirewallRulesOutput interface {
+	UpdateModelConfig(map[string]interface{}, []string, ...ValidateConfigFunc) error
+}
+
 // ImportFirewallRules describes a way to import firewallRules from a
 // description.
 type ImportFirewallRules struct{}
 
 // Execute the import on the firewall rules description, carefully modelling
 // the dependencies we have.
-func (rules ImportFirewallRules) Execute(src FirewallRulesInput, runner TransactionRunner) error {
+func (rules ImportFirewallRules) Execute(src FirewallRulesInput, dst FirewallRulesOutput) error {
 	firewallRules := src.FirewallRules()
 	if len(firewallRules) == 0 {
 		return nil
 	}
 
-	ops := make([]txn.Op, len(firewallRules))
-	for i, rule := range firewallRules {
-		serviceType := rule.WellKnownService()
-		doc := firewallRulesDoc{
-			Id:               serviceType,
-			WellKnownService: serviceType,
-			WhitelistCIDRS:   rule.WhitelistCIDRs(),
+	for _, rule := range firewallRules {
+		var err error
+		cidrs := strings.Join(rule.WhitelistCIDRs(), ",")
+		switch firewall.WellKnownServiceType(rule.WellKnownService()) {
+		case firewall.SSHRule:
+			err = dst.UpdateModelConfig(map[string]interface{}{
+				config.SSHAllowKey: cidrs,
+			}, nil)
+		case firewall.JujuApplicationOfferRule:
+			// SAASIngressAllow cannot be empty. If it is, leave as it's default value
+			if cidrs != "" {
+				err = dst.UpdateModelConfig(map[string]interface{}{
+					config.SAASIngressAllowKey: cidrs,
+				}, nil)
+			}
 		}
-		ops[i] = txn.Op{
-			C:      firewallRulesC,
-			Id:     doc.Id,
-			Assert: txn.DocMissing,
-			Insert: doc,
+		if err != nil {
+			return errors.Trace(err)
 		}
-	}
-
-	if err := runner.RunTransaction(ops); err != nil {
-		return errors.Trace(err)
 	}
 	return nil
 }
@@ -493,6 +509,230 @@ func (ImportExternalControllers) Execute(src ExternalControllersInput, runner Tr
 			return errors.Trace(err)
 		}
 		ops[i] = src.MakeExternalControllerOp(doc, existing)
+	}
+
+	if err := runner.RunTransaction(ops); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
+// SecretsDescription defines an in-place usage for reading secrets.
+type SecretsDescription interface {
+	Secrets() []description.Secret
+	RemoteSecrets() []description.RemoteSecret
+}
+
+// SecretConsumersState is used to create secret consumer keys
+// for use in the state model.
+type SecretConsumersState interface {
+	SecretConsumerKey(uri *secrets.URI, subject string) string
+}
+
+// SecretsInput describes the input used for migrating secrets.
+type SecretsInput interface {
+	DocModelNamespace
+	SecretConsumersState
+	SecretsDescription
+}
+
+type secretConsumersStateShim struct {
+	stateModelNamspaceShim
+}
+
+func (s *secretConsumersStateShim) SecretConsumerKey(uri *secrets.URI, subject string) string {
+	return s.st.secretConsumerKey(uri, subject)
+}
+
+// ImportSecrets describes a way to import secrets from a
+// description.
+type ImportSecrets struct{}
+
+// Execute the import on the secrets description, carefully modelling
+// the dependencies we have.
+func (ImportSecrets) Execute(src SecretsInput, runner TransactionRunner, knownSecretBackends set.Strings) error {
+	allSecrets := src.Secrets()
+	if len(allSecrets) == 0 {
+		return nil
+	}
+
+	seenBackendIds := set.NewStrings()
+	var ops []txn.Op
+	for _, secret := range allSecrets {
+		uri := &secrets.URI{ID: secret.Id()}
+		docID := src.DocID(secret.Id())
+		owner, err := secret.Owner()
+		if err != nil {
+			return errors.Annotatef(err, "invalid owner for secret %q", secret.Id())
+		}
+		ops = append(ops, txn.Op{
+			C:      secretMetadataC,
+			Id:     docID,
+			Assert: txn.DocMissing,
+			Insert: secretMetadataDoc{
+				DocID:            docID,
+				Version:          secret.Version(),
+				OwnerTag:         owner.String(),
+				Description:      secret.Description(),
+				Label:            secret.Label(),
+				LatestRevision:   secret.LatestRevision(),
+				LatestExpireTime: secret.LatestExpireTime(),
+				RotatePolicy:     secret.RotatePolicy(),
+				CreateTime:       secret.Created(),
+				UpdateTime:       secret.Updated(),
+			},
+		})
+		if secret.NextRotateTime() != nil {
+			nextRotateTime := secret.NextRotateTime()
+			ops = append(ops, txn.Op{
+				C:      secretRotateC,
+				Id:     docID,
+				Assert: txn.DocMissing,
+				Insert: secretRotationDoc{
+					DocID:          docID,
+					NextRotateTime: *nextRotateTime,
+				},
+			})
+		}
+		for _, rev := range secret.Revisions() {
+			key := secretRevisionKey(uri, rev.Number())
+			dataCopy := make(secretsDataMap)
+			for k, v := range rev.Content() {
+				dataCopy[k] = v
+			}
+			var valueRef *valueRefDoc
+			if len(dataCopy) == 0 {
+				valueRef = &valueRefDoc{
+					BackendID:  rev.ValueRef().BackendID(),
+					RevisionID: rev.ValueRef().RevisionID(),
+				}
+				if !utils.IsValidUUIDString(valueRef.BackendID) && !seenBackendIds.Contains(valueRef.BackendID) {
+					if !knownSecretBackends.Contains(valueRef.BackendID) {
+						return errors.New("target controller does not have all required secret backends set up")
+					}
+					ops = append(ops, txn.Op{
+						C:      secretBackendsC,
+						Id:     valueRef.BackendID,
+						Assert: txn.DocExists,
+					})
+				}
+				seenBackendIds.Add(valueRef.BackendID)
+			}
+			ops = append(ops, txn.Op{
+				C:      secretRevisionsC,
+				Id:     key,
+				Assert: txn.DocMissing,
+				Insert: secretRevisionDoc{
+					DocID:         key,
+					Revision:      rev.Number(),
+					CreateTime:    rev.Created(),
+					UpdateTime:    rev.Updated(),
+					ExpireTime:    rev.ExpireTime(),
+					Obsolete:      rev.Obsolete(),
+					PendingDelete: rev.PendingDelete(),
+					Data:          dataCopy,
+					ValueRef:      valueRef,
+					OwnerTag:      owner.String(),
+				},
+			})
+		}
+		for subject, access := range secret.ACL() {
+			key := src.SecretConsumerKey(uri, subject)
+			ops = append(ops, txn.Op{
+				C:      secretPermissionsC,
+				Id:     key,
+				Assert: txn.DocMissing,
+				Insert: secretPermissionDoc{
+					DocID:   key,
+					Subject: subject,
+					Scope:   access.Scope(),
+					Role:    access.Role(),
+				},
+			})
+		}
+		for _, info := range secret.Consumers() {
+			consumer, err := info.Consumer()
+			if err != nil {
+				return errors.Annotatef(err, "invalid consumer for secret %q", secret.Id())
+			}
+			key := src.SecretConsumerKey(uri, consumer.String())
+			ops = append(ops, txn.Op{
+				C:      secretConsumersC,
+				Id:     key,
+				Assert: txn.DocMissing,
+				Insert: secretConsumerDoc{
+					DocID:           key,
+					ConsumerTag:     consumer.String(),
+					Label:           info.Label(),
+					CurrentRevision: info.CurrentRevision(),
+					LatestRevision:  info.LatestRevision(),
+				},
+			})
+		}
+		for _, info := range secret.RemoteConsumers() {
+			consumer, err := info.Consumer()
+			if err != nil {
+				return errors.Annotatef(err, "invalid consumer for secret %q", secret.Id())
+			}
+			key := src.SecretConsumerKey(uri, consumer.String())
+			ops = append(ops, txn.Op{
+				C:      secretRemoteConsumersC,
+				Id:     key,
+				Assert: txn.DocMissing,
+				Insert: secretRemoteConsumerDoc{
+					DocID:           key,
+					ConsumerTag:     consumer.String(),
+					CurrentRevision: info.CurrentRevision(),
+					LatestRevision:  info.LatestRevision(),
+				},
+			})
+		}
+	}
+
+	if err := runner.RunTransaction(ops); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
+// RemoteSecretsInput describes the input used for migrating remote secret consumer info.
+type RemoteSecretsInput interface {
+	DocModelNamespace
+	SecretConsumersState
+	SecretsDescription
+}
+
+// ImportRemoteSecrets describes a way to import remote
+// secrets from a description.
+type ImportRemoteSecrets struct{}
+
+// Execute the import on the remote secrets description.
+func (ImportRemoteSecrets) Execute(src RemoteSecretsInput, runner TransactionRunner) error {
+	allRemoteSecrets := src.RemoteSecrets()
+	if len(allRemoteSecrets) == 0 {
+		return nil
+	}
+
+	var ops []txn.Op
+	for _, info := range allRemoteSecrets {
+		uri := &secrets.URI{ID: info.ID(), SourceUUID: info.SourceUUID()}
+		consumer, err := info.Consumer()
+		if err != nil {
+			return errors.Annotatef(err, "invalid consumer for remote secret %q", uri)
+		}
+		key := src.SecretConsumerKey(uri, consumer.String())
+		ops = append(ops, txn.Op{
+			C:      secretConsumersC,
+			Id:     key,
+			Assert: txn.DocMissing,
+			Insert: secretConsumerDoc{
+				DocID:           key,
+				ConsumerTag:     consumer.String(),
+				Label:           info.Label(),
+				CurrentRevision: info.CurrentRevision(),
+				LatestRevision:  info.LatestRevision(),
+			},
+		})
 	}
 
 	if err := runner.RunTransaction(ops); err != nil {

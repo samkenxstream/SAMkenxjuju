@@ -21,13 +21,9 @@ const (
 	findSummary = "Queries the CharmHub store for available charms or bundles."
 	findDoc     = `
 The find command queries the CharmHub store for available charms or bundles.
-
-Examples:
+`
+	findExamples = `
     juju find wordpress
-
-See also:
-    info
-    download
 `
 )
 
@@ -58,10 +54,15 @@ type findCommand struct {
 // part of the cmd.Command interface.
 func (c *findCommand) Info() *cmd.Info {
 	info := &cmd.Info{
-		Name:    "find",
-		Args:    "[options] <query>",
-		Purpose: findSummary,
-		Doc:     findDoc,
+		Name:     "find",
+		Args:     "[options] <query>",
+		Purpose:  findSummary,
+		Doc:      findDoc,
+		Examples: findExamples,
+		SeeAlso: []string{
+			"info",
+			"download",
+		},
 	}
 	return jujucmd.Info(info)
 }
@@ -78,7 +79,7 @@ func (c *findCommand) SetFlags(f *gnuflag.FlagSet) {
 	})
 
 	f.StringVar(&c.category, "category", "", `filter by a category name`)
-	f.StringVar(&c.channel, "channel", "", `filter by channel. "latest" can be omitted, so "stable" also matches "latest/stable"`)
+	f.StringVar(&c.channel, "channel", "", `filter by channel"`)
 	f.StringVar(&c.charmType, "type", "", `search by a given type <charm|bundle>`)
 	f.StringVar(&c.publisher, "publisher", "", `search by a given publisher`)
 

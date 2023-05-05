@@ -5,25 +5,24 @@ package state
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time" // Only used for time types.
 
-	"github.com/juju/charm/v9"
-	charmrepotesting "github.com/juju/charmrepo/v7/testing"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/clock/testclock"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
-	jujutxn "github.com/juju/txn/v2"
-	txntesting "github.com/juju/txn/v2/testing"
+	jujutxn "github.com/juju/txn/v3"
+	txntesting "github.com/juju/txn/v3/testing"
 	jutils "github.com/juju/utils/v3"
 	"github.com/juju/worker/v3"
 	"github.com/kr/pretty"
@@ -32,12 +31,15 @@ import (
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/secrets"
+	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/mongo"
 	"github.com/juju/juju/mongo/utils"
 	"github.com/juju/juju/state/storage"
 	"github.com/juju/juju/state/watcher"
 	"github.com/juju/juju/testcharms"
+	"github.com/juju/juju/testcharms/repo"
 	"github.com/juju/juju/version"
 )
 
@@ -58,7 +60,6 @@ const (
 
 var (
 	BinarystorageNew              = &binarystorageNew
-	ImageStorageNewStorage        = &imageStorageNewStorage
 	MachineIdLessThan             = machineIdLessThan
 	CombineMeterStatus            = combineMeterStatus
 	ApplicationGlobalKey          = applicationGlobalKey
@@ -129,15 +130,35 @@ func SetRetryHooks(c *gc.C, st *State, block, check func()) txntesting.Transacti
 	return txntesting.SetRetryHooks(c, newRunnerForHooks(st), block, check)
 }
 
+func SetMaxTxnAttempts(c *gc.C, st *State, n int) {
+	st.maxTxnAttempts = n
+	db := st.database.(*database)
+	db.maxTxnAttempts = n
+	runner := jujutxn.NewRunner(jujutxn.RunnerParams{
+		Database:                  db.raw,
+		Clock:                     st.stateClock,
+		TransactionCollectionName: "txns",
+		ChangeLogName:             "-",
+		ServerSideTransactions:    true,
+		MaxRetryAttempts:          db.maxTxnAttempts,
+	})
+	db.runner = runner
+	return
+}
+
 func newRunnerForHooks(st *State) jujutxn.Runner {
 	db := st.database.(*database)
 	runner := jujutxn.NewRunner(jujutxn.RunnerParams{
-		Database: db.raw,
-		Clock:    st.stateClock,
+		Database:                  db.raw,
+		Clock:                     st.stateClock,
+		TransactionCollectionName: "txns",
+		ChangeLogName:             "-",
+		ServerSideTransactions:    true,
 		RunTransactionObserver: func(t jujutxn.Transaction) {
 			txnLogger.Tracef("ran transaction in %.3fs (retries: %d) %# v\nerr: %v",
 				t.Duration.Seconds(), t.Attempt, pretty.Formatter(t.Ops), t.Error)
 		},
+		MaxRetryAttempts: db.maxTxnAttempts,
 	})
 	db.runner = runner
 	return runner
@@ -183,6 +204,24 @@ func ControllerRefCount(st *State, controllerUUID string) (int, error) {
 	return nsRefcounts.read(refcounts, key)
 }
 
+func IncSecretConsumerRefCount(st *State, uri *secrets.URI, inc int) error {
+	refCountCollection, ccloser := st.db().GetCollection(refcountsC)
+	defer ccloser()
+	incOp, err := nsRefcounts.CreateOrIncRefOp(refCountCollection, uri.ID, inc)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return st.db().RunTransaction([]txn.Op{incOp})
+}
+
+func SecretBackendRefCount(st *State, backendID string) (int, error) {
+	refcounts, closer := st.db().GetCollection(globalRefcountsC)
+	defer closer()
+
+	key := secretBackendRefCountKey(backendID)
+	return nsRefcounts.read(refcounts, key)
+}
+
 func AddTestingCharm(c *gc.C, st *State, name string) *Charm {
 	return addCharm(c, st, "quantal", testcharms.Repo.CharmDir(name))
 }
@@ -191,7 +230,7 @@ func AddTestingCharmWithSeries(c *gc.C, st *State, name string, series string) *
 	return addCharm(c, st, series, testcharms.Repo.CharmDir(name))
 }
 
-func getCharmRepo(series string) *charmrepotesting.Repo {
+func getCharmRepo(series string) *repo.CharmRepo {
 	// ALl testing charms for state are under `quantal` except `kubernetes`.
 	if series == "kubernetes" {
 		return testcharms.RepoForSeries(series)
@@ -223,7 +262,7 @@ func AddTestingCharmhubCharmForSeries(c *gc.C, st *State, series, name string) *
 func AddTestingCharmMultiSeries(c *gc.C, st *State, name string) *Charm {
 	ch := testcharms.Repo.CharmDir(name)
 	ident := fmt.Sprintf("%s-%d", ch.Meta().Name, ch.Revision())
-	curl := charm.MustParseURL("cs:" + ident)
+	curl := charm.MustParseURL("ch:" + ident)
 	info := CharmInfo{
 		Charm:       ch,
 		ID:          curl,
@@ -243,12 +282,15 @@ func AddTestingApplication(c *gc.C, st *State, name string, ch *Charm) *Applicat
 	})
 }
 
-func AddTestingApplicationForSeries(c *gc.C, st *State, series, name string, ch *Charm) *Application {
+func AddTestingApplicationForBase(c *gc.C, st *State, base Base, name string, ch *Charm) *Application {
 	return addTestingApplication(c, addTestingApplicationParams{
-		st:     st,
-		series: series,
-		name:   name,
-		ch:     ch,
+		st: st,
+		origin: &CharmOrigin{Platform: &Platform{
+			OS:      base.OS,
+			Channel: base.Channel,
+		}},
+		name: name,
+		ch:   ch,
 	})
 }
 
@@ -262,10 +304,33 @@ func AddTestingApplicationWithNumUnits(c *gc.C, st *State, numUnits int, name st
 }
 
 func AddTestingApplicationWithStorage(c *gc.C, st *State, name string, ch *Charm, storage map[string]StorageConstraints) *Application {
+	series := ch.URL().Series
+	if series == "kubernetes" {
+		series = "focal"
+	}
+	base, err := coreseries.GetBaseFromSeries(series)
+	c.Assert(err, jc.ErrorIsNil)
+	var source string
+	switch ch.URL().Schema {
+	case "local":
+		source = "local"
+	case "ch":
+		source = "charm-hub"
+	case "cs":
+		source = "charm-store"
+	}
+	origin := &CharmOrigin{
+		Source: source,
+		Platform: &Platform{
+			OS:      base.OS,
+			Channel: base.Channel.String(),
+		},
+	}
 	return addTestingApplication(c, addTestingApplicationParams{
 		st:      st,
 		name:    name,
 		ch:      ch,
+		origin:  origin,
 		storage: storage,
 	})
 }
@@ -289,23 +354,49 @@ func AddTestingApplicationWithBindings(c *gc.C, st *State, name string, ch *Char
 }
 
 type addTestingApplicationParams struct {
-	st           *State
-	series, name string
-	ch           *Charm
-	origin       *CharmOrigin
-	bindings     map[string]string
-	storage      map[string]StorageConstraints
-	devices      map[string]DeviceConstraints
-	numUnits     int
+	st       *State
+	name     string
+	ch       *Charm
+	origin   *CharmOrigin
+	bindings map[string]string
+	storage  map[string]StorageConstraints
+	devices  map[string]DeviceConstraints
+	numUnits int
 }
 
 func addTestingApplication(c *gc.C, params addTestingApplicationParams) *Application {
 	c.Assert(params.ch, gc.NotNil)
+	origin := params.origin
+	if origin == nil {
+		base, err := coreseries.GetBaseFromSeries(params.ch.URL().Series)
+		c.Assert(err, jc.ErrorIsNil)
+		var channel *Channel
+		// local charms cannot have a channel
+		if charm.CharmHub.Matches(params.ch.URL().Schema) {
+			channel = &Channel{Risk: "stable"}
+		}
+		var source string
+		switch params.ch.URL().Schema {
+		case "local":
+			source = "local"
+		case "ch":
+			source = "charm-hub"
+		case "cs":
+			source = "charm-store"
+		}
+		origin = &CharmOrigin{
+			Channel: channel,
+			Source:  source,
+			Platform: &Platform{
+				OS:      base.OS,
+				Channel: base.Channel.String(),
+			},
+		}
+	}
 	app, err := params.st.AddApplication(AddApplicationArgs{
 		Name:             params.name,
-		Series:           params.series,
 		Charm:            params.ch,
-		CharmOrigin:      params.origin,
+		CharmOrigin:      origin,
 		EndpointBindings: params.bindings,
 		Storage:          params.storage,
 		Devices:          params.devices,
@@ -315,7 +406,7 @@ func addTestingApplication(c *gc.C, params addTestingApplicationParams) *Applica
 	return app
 }
 
-func addCustomCharmWithManifest(c *gc.C, st *State, repo *charmrepotesting.Repo, name, filename, content, series string, revision int, manifest bool) *Charm {
+func addCustomCharmWithManifest(c *gc.C, st *State, repo *repo.CharmRepo, name, filename, content, series string, revision int, manifest bool) *Charm {
 	path := repo.ClonedDirPath(c.MkDir(), name)
 	if filename != "" {
 		if manifest {
@@ -325,11 +416,11 @@ bases:
   channel: "18.04"
 `
 			manifestYAML := filepath.Join(path, "manifest.yaml")
-			err := ioutil.WriteFile(manifestYAML, []byte(manifestContent), 0644)
+			err := os.WriteFile(manifestYAML, []byte(manifestContent), 0644)
 			c.Assert(err, jc.ErrorIsNil)
 		}
 		config := filepath.Join(path, filename)
-		err := ioutil.WriteFile(config, []byte(content), 0644)
+		err := os.WriteFile(config, []byte(content), 0644)
 		c.Assert(err, jc.ErrorIsNil)
 	}
 	ch, err := charm.ReadCharmDir(path)
@@ -340,7 +431,7 @@ bases:
 	return addCharm(c, st, series, ch)
 }
 
-func addCustomCharm(c *gc.C, st *State, repo *charmrepotesting.Repo, name, filename, content, series string, revision int) *Charm {
+func addCustomCharm(c *gc.C, st *State, repo *repo.CharmRepo, name, filename, content, series string, revision int) *Charm {
 	return addCustomCharmWithManifest(c, st, repo, name, filename, content, series, revision, false)
 }
 
@@ -724,7 +815,7 @@ func RemoveUnitRelations(c *gc.C, rel *Relation) {
 // PrimeUnitStatusHistory will add count history elements, advancing the test clock by
 // one second for each entry.
 func PrimeUnitStatusHistory(
-	c *gc.C, clock *testclock.Clock,
+	c *gc.C, clock testclock.AdvanceableClock,
 	unit *Unit, statusVal status.Status,
 	count, batchSize int,
 	nextData func(int) map[string]interface{},
@@ -1002,10 +1093,6 @@ func ModelBackendFromStorageBackend(sb *StorageBackend) modelBackend {
 	return sb.mb
 }
 
-func (st *State) IsUserSuperuser(user names.UserTag) (bool, error) {
-	return st.isUserSuperuser(user)
-}
-
 func (st *State) ModelQueryForUser(user names.UserTag, isSuperuser bool) (mongo.Query, SessionCloser, error) {
 	return st.modelQueryForUser(user, isSuperuser)
 }
@@ -1023,6 +1110,7 @@ func GetCloudContainerStatusHistory(st *State, name string, filter status.Status
 		db:        st.db(),
 		globalKey: globalCloudContainerKey(name),
 		filter:    filter,
+		clock:     st.clock(),
 	}
 	return statusHistory(args)
 }
@@ -1048,14 +1136,29 @@ func MachinePortOps(st *State, m description.Machine) ([]txn.Op, error) {
 	return []txn.Op{resolver.machinePortsOp(m)}, nil
 }
 
-func GetSecretRotateTime(c *gc.C, st *State, id int) time.Time {
+func ApplicationPortOps(st *State, a description.Application) ([]txn.Op, error) {
+	resolver := &importer{st: st}
+	return []txn.Op{resolver.applicationPortsOp(a)}, nil
+}
+
+func GetSecretNextRotateTime(c *gc.C, st *State, id string) time.Time {
 	secretRotateCollection, closer := st.db().GetCollection(secretRotateC)
 	defer closer()
 
 	var doc secretRotationDoc
-	err := secretRotateCollection.FindId(secretGlobalKey(id)).One(&doc)
+	err := secretRotateCollection.FindId(id).One(&doc)
 	c.Assert(err, jc.ErrorIsNil)
-	return doc.LastRotateTime
+	return doc.NextRotateTime.UTC()
+}
+
+func GetSecretBackendNextRotateInfo(c *gc.C, st *State, id string) (string, time.Time) {
+	secretBackendRotateCollection, closer := st.db().GetCollection(secretBackendsRotateC)
+	defer closer()
+
+	var doc secretBackendRotationDoc
+	err := secretBackendRotateCollection.FindId(id).One(&doc)
+	c.Assert(err, jc.ErrorIsNil)
+	return doc.Name, doc.NextRotateTime.UTC()
 }
 
 // ModelBackendShim is required to live here in the export_test.go file because
@@ -1093,7 +1196,7 @@ func (s ModelBackendShim) db() Database {
 	return s.Database
 }
 
-func (s ModelBackendShim) modelUUID() string {
+func (s ModelBackendShim) ModelUUID() string {
 	return ""
 }
 
@@ -1101,7 +1204,7 @@ func (s ModelBackendShim) modelName() (string, error) {
 	return "", nil
 }
 
-func (s ModelBackendShim) isController() bool {
+func (s ModelBackendShim) IsController() bool {
 	return false
 }
 
@@ -1146,4 +1249,20 @@ func (st *State) ScheduleForceCleanup(kind cleanupKind, name string, maxWait tim
 
 func GetCollectionCappedInfo(coll *mgo.Collection) (bool, int, error) {
 	return getCollectionCappedInfo(coll)
+}
+
+func (m *Model) AllActionIDsHasActionNotifications() ([]string, error) {
+	actionNotifications, closer := m.st.db().GetCollection(actionNotificationsC)
+	defer closer()
+
+	docs := []actionNotificationDoc{}
+	err := actionNotifications.Find(nil).All(&docs)
+	if err != nil {
+		return nil, errors.Annotatef(err, "cannot get all actions")
+	}
+	actionIDs := make([]string, len(docs))
+	for i, doc := range docs {
+		actionIDs[i] = doc.ActionID
+	}
+	return actionIDs, nil
 }

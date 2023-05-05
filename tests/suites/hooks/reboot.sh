@@ -10,7 +10,7 @@ run_start_hook_fires_after_reboot() {
 	# log level is WARNING.
 	juju model-config -m "${model_name}" logging-config="<root>=INFO;unit=DEBUG"
 
-	juju deploy cs:~jameinel/ubuntu-lite-6
+	juju deploy jameinel-ubuntu-lite --revision 9 --channel stable
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 
 	# Ensure that the implicit start hook after reboot detection does not
@@ -30,7 +30,7 @@ run_start_hook_fires_after_reboot() {
 	echo "[+] ensuring that implicit start hook does not fire after restarting the (unified) unit agent"
 	juju ssh ubuntu-lite/0 'sudo service jujud-machine-0 restart'
 	echo
-	wait_for "ubuntu-lite" "$(charm_rev "ubuntu-lite" 6)"
+	wait_for "ubuntu-lite" "$(charm_rev "ubuntu-lite" 9)"
 	logs=$(juju debug-log --include-module juju.worker.uniter --replay --no-tail | grep -n "reboot detected" || true)
 	echo "$logs" | sed 's/^/    | /g'
 	if [ -n "$logs" ]; then
@@ -42,10 +42,10 @@ run_start_hook_fires_after_reboot() {
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 
 	# Ensure that the implicit start hook does not fire after upgrading the unit
-	juju upgrade-charm ubuntu-lite --revision 7
+	juju refresh ubuntu-lite --revision 10
 	echo
 	sleep 1
-	wait_for "ubuntu-lite" "$(charm_rev "ubuntu-lite" 7)"
+	wait_for "ubuntu-lite" "$(charm_rev "ubuntu-lite" 10)"
 	logs=$(juju debug-log --include-module juju.worker.uniter --replay --no-tail | grep -n "reboot detected" || true)
 	echo "$logs" | sed 's/^/    | /g'
 	if [ -n "$logs" ]; then
@@ -83,10 +83,10 @@ run_reboot_monitor_state_cleanup() {
 	ensure "${model_name}" "${file}"
 
 	# mysql charm does not have stable channel, so we use edge channel
-	juju deploy mysql --channel=edge
+	juju deploy mysql --channel=edge --force --series jammy
 	# Deploy mysql/rsyslog-forwarder-ha. The latter is a subordinate
 	juju deploy rsyslog-forwarder-ha
-	juju add-relation rsyslog-forwarder-ha mysql
+	juju integrate rsyslog-forwarder-ha mysql
 	wait_for "mysql" "$(idle_condition "mysql")"
 	wait_for "rsyslog-forwarder-ha" "$(idle_subordinate_condition "rsyslog-forwarder-ha" "mysql")"
 
@@ -109,7 +109,7 @@ run_reboot_monitor_state_cleanup() {
 
 	wait_for_subordinate_count "mysql"
 	num_files=$(juju ssh mysql/0 'ls -1 /var/run/juju/reboot-monitor/ | wc -l' 2>/dev/null | tr -d "[:space:]")
-	echo "   | number of monitor state files: ''${num_files}"
+	echo "   | number of monitor state files: ${num_files}"
 	if [ "$num_files" != "1" ]; then
 		# shellcheck disable=SC2046
 		echo $(red "Expected one remaining reboot monitor state file after subordinate removal; got ${num_files}")

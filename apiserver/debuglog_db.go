@@ -10,6 +10,7 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/httpcontext"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/rpc/params"
@@ -20,8 +21,9 @@ func newDebugLogDBHandler(
 	ctxt httpContext,
 	authenticator httpcontext.Authenticator,
 	authorizer httpcontext.Authorizer,
+	tokenParser authentication.TokenParser,
 ) http.Handler {
-	return newDebugLogHandler(ctxt, authenticator, authorizer, handleDebugLogDBRequest)
+	return newDebugLogHandler(ctxt, authenticator, authorizer, handleDebugLogDBRequest, tokenParser)
 }
 
 func handleDebugLogDBRequest(
@@ -32,8 +34,8 @@ func handleDebugLogDBRequest(
 	socket debugLogSocket,
 	stop <-chan struct{},
 ) error {
-	params := makeLogTailerParams(reqParams)
-	tailer, err := newLogTailer(st, params)
+	tailerParams := makeLogTailerParams(reqParams)
+	tailer, err := newLogTailer(st, tailerParams)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -68,8 +70,8 @@ func handleDebugLogDBRequest(
 	}
 }
 
-func makeLogTailerParams(reqParams debugLogParams) state.LogTailerParams {
-	params := state.LogTailerParams{
+func makeLogTailerParams(reqParams debugLogParams) corelogger.LogTailerParams {
+	tailerParams := corelogger.LogTailerParams{
 		MinLevel:      reqParams.filterLevel,
 		NoTail:        reqParams.noTail,
 		StartTime:     reqParams.startTime,
@@ -82,9 +84,9 @@ func makeLogTailerParams(reqParams debugLogParams) state.LogTailerParams {
 		ExcludeLabel:  reqParams.excludeLabel,
 	}
 	if reqParams.fromTheStart {
-		params.InitialLines = 0
+		tailerParams.InitialLines = 0
 	}
-	return params
+	return tailerParams
 }
 
 func formatLogRecord(r *corelogger.LogRecord) *params.LogMessage {
@@ -101,6 +103,6 @@ func formatLogRecord(r *corelogger.LogRecord) *params.LogMessage {
 
 var newLogTailer = _newLogTailer // For replacing in tests
 
-func _newLogTailer(st state.LogTailerState, params state.LogTailerParams) (state.LogTailer, error) {
-	return state.NewLogTailer(st, params)
+func _newLogTailer(st state.LogTailerState, params corelogger.LogTailerParams) (corelogger.LogTailer, error) {
+	return state.NewLogTailer(st, params, nil)
 }

@@ -4,7 +4,7 @@
 package state
 
 import (
-	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v3"
 
 	"github.com/juju/juju/state/bakerystorage"
 	"github.com/juju/juju/state/cloudimagemetadata"
@@ -13,25 +13,25 @@ import (
 // allCollections should be the single source of truth for information about
 // any collection we use. It's broken up into 4 main sections:
 //
-//  * infrastructure: we really don't have any business touching these once
-//    we've created them. They should have the rawAccess attribute set, so that
-//    multiModelRunner will consider them forbidden.
+//   - infrastructure: we really don't have any business touching these once
+//     we've created them. They should have the rawAccess attribute set, so that
+//     multiModelRunner will consider them forbidden.
 //
-//  * global: these hold information external to models. They may include
-//    model metadata, or references; but they're generally not relevant
-//    from the perspective of a given model.
+//   - global: these hold information external to models. They may include
+//     model metadata, or references; but they're generally not relevant
+//     from the perspective of a given model.
 //
-//  * local (in opposition to global; and for want of a better term): these
-//    hold information relevant *within* specific models (machines,
-//    applications, relations, settings, bookkeeping, etc) and should generally be
-//    read via an modelStateCollection, and written via a multiModelRunner. This is
-//    the most common form of collection, and the above access should usually
-//    be automatic via Database.Collection and Database.Runner.
+//   - local (in opposition to global; and for want of a better term): these
+//     hold information relevant *within* specific models (machines,
+//     applications, relations, settings, bookkeeping, etc) and should generally be
+//     read via an modelStateCollection, and written via a multiModelRunner. This is
+//     the most common form of collection, and the above access should usually
+//     be automatic via Database.Collection and Database.Runner.
 //
-//  * raw-access: there's certainly data that's a poor fit for mgo/txn. Most
-//    forms of logs, for example, will benefit both from the speedy insert and
-//    worry-free bulk deletion; so raw-access collections are fine. Just don't
-//    try to run transactions that reference them.
+//   - raw-access: there's certainly data that's a poor fit for mgo/txn. Most
+//     forms of logs, for example, will benefit both from the speedy insert and
+//     worry-free bulk deletion; so raw-access collections are fine. Just don't
+//     try to run transactions that reference them.
 //
 // Please do not use collections not referenced here; and when adding new
 // collections, please document them, and make an effort to put them in an
@@ -55,14 +55,6 @@ func allCollections() CollectionSchema {
 				// by mgo/txn.Runner.ResumeAll.
 				Key: []string{"s"},
 			}},
-		},
-		txnLogC: {
-			// This collection is used by mgo/txn to record the set of documents
-			// affected by each successful transaction; and by state/watcher to
-			// generate a stream of document-resolution events that are delivered
-			// to, and interpreted by, both state and the multiwatcher.
-			global:    true,
-			rawAccess: true,
 		},
 
 		// ------------------
@@ -194,16 +186,6 @@ func allCollections() CollectionSchema {
 			rawAccess: true,
 		},
 
-		// This collection tracks who holds which lease when the store
-		// is managed by raft - so that transactions can still make
-		// assertions about holding the lease.
-		leaseHoldersC: {
-			global: true,
-			indexes: []mgo.Index{{
-				Key: []string{"model-uuid", "namespace"},
-			}},
-		},
-
 		// This collection holds the last time the model user connected
 		// to the model.
 		modelUserLastConnectionC: {
@@ -246,6 +228,8 @@ func allCollections() CollectionSchema {
 		charmsC: {
 			indexes: []mgo.Index{{
 				Key: []string{"model-uuid"},
+			}, {
+				Key: []string{"bundlesha256"},
 			}},
 		},
 		applicationsC: {
@@ -529,13 +513,6 @@ func allCollections() CollectionSchema {
 		// relationNetworksC holds required ingress or egress cidrs for remote relations.
 		relationNetworksC: {},
 
-		// firewallRulesC holds firewall rules for defined service types.
-		firewallRulesC: {
-			indexes: []mgo.Index{{
-				Key: []string{"model-uuid"},
-			}},
-		},
-
 		// podSpecsC holds the CAAS pod specifications,
 		// for applications.
 		podSpecsC: {},
@@ -549,20 +526,52 @@ func allCollections() CollectionSchema {
 		cloudServicesC: {},
 
 		secretMetadataC: {
-			global: true,
 			indexes: []mgo.Index{{
-				Key: []string{"controller-uuid", "model-uuid", "_id"},
+				Key: []string{"owner-tag", "label", "model-uuid"},
 			}},
 		},
 
-		secretValuesC: {
-			global: true,
+		secretRevisionsC: {
+			indexes: []mgo.Index{{
+				Key: []string{"revision", "_id"},
+			}},
+		},
+
+		secretConsumersC: {
+			indexes: []mgo.Index{{
+				Key: []string{"consumer-tag", "label", "model-uuid"},
+			}},
+		},
+
+		secretRemoteConsumersC: {
+			indexes: []mgo.Index{{
+				Key: []string{"consumer-tag", "model-uuid"},
+			}},
+		},
+
+		secretPermissionsC: {
+			indexes: []mgo.Index{{
+				Key: []string{"subject-tag", "scope-tag", "model-uuid"},
+			}},
 		},
 
 		secretRotateC: {
+			indexes: []mgo.Index{{
+				Key: []string{"owner-tag", "model-uuid"},
+			}},
+		},
+
+		secretBackendsC: {
 			global: true,
 			indexes: []mgo.Index{{
-				Key: []string{"owner"},
+				Key: []string{"name"},
+			}},
+		},
+
+		secretBackendsRotateC: {
+			global: true,
+			indexes: []mgo.Index{{
+				Key: []string{"model-uuid"},
 			}},
 		},
 
@@ -610,7 +619,6 @@ const (
 	globalRefcountsC           = "globalRefcounts"
 	globalSettingsC            = "globalSettings"
 	instanceDataC              = "instanceData"
-	leaseHoldersC              = "leaseholders"
 	machinesC                  = "machines"
 	machineRemovalsC           = "machineremovals"
 	machineUpgradeSeriesLocksC = "machineUpgradeSeriesLocks"
@@ -654,7 +662,6 @@ const (
 	linkLayerDevicesC          = "linklayerdevices"
 	ipAddressesC               = "ip.addresses"
 	toolsmetadataC             = "toolsmetadata"
-	txnLogC                    = "txns.log"
 	txnsC                      = "txns"
 	unitsC                     = "units"
 	unitStatesC                = "unitstates"
@@ -673,10 +680,23 @@ const (
 	remoteEntitiesC      = "remoteEntities"
 	externalControllersC = "externalControllers"
 	relationNetworksC    = "relationNetworks"
-	firewallRulesC       = "firewallRules"
 
 	// Secrets
-	secretMetadataC = "secretMetadata"
-	secretValuesC   = "secretValues"
-	secretRotateC   = "secretRotate"
+	secretMetadataC        = "secretMetadata"
+	secretRevisionsC       = "secretRevisions"
+	secretConsumersC       = "secretConsumers"
+	secretRemoteConsumersC = "secretRemoteConsumers"
+	secretPermissionsC     = "secretPermissions"
+	secretRotateC          = "secretRotate"
+	secretBackendsC        = "secretBackends"
+	secretBackendsRotateC  = "secretBackendsRotate"
 )
+
+// watcherIgnoreList contains all the collections in mongo that should not be watched by the
+// TxnWatcher.
+var watcherIgnoreList = []string{
+	bakeryStorageItemsC,
+	sequenceC,
+	refcountsC,
+	statusesHistoryC,
+}

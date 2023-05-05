@@ -6,6 +6,7 @@ package undertaker_test
 import (
 	"time"
 
+	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
@@ -15,12 +16,15 @@ import (
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/rpc/params"
+	"github.com/juju/juju/secrets/provider"
+	_ "github.com/juju/juju/secrets/provider/all"
 	"github.com/juju/juju/state"
 	coretesting "github.com/juju/juju/testing"
 )
 
 type undertakerSuite struct {
 	coretesting.BaseSuite
+	secrets *mockSecrets
 }
 
 var _ = gc.Suite(&undertakerSuite{})
@@ -37,7 +41,22 @@ func (s *undertakerSuite) setupStateAndAPI(c *gc.C, isSystem bool, modelName str
 	}
 
 	st := newMockState(names.NewUserTag("admin"), modelName, isSystem)
-	api, err := undertaker.NewUndertaker(st, nil, authorizer)
+	s.secrets = &mockSecrets{}
+	s.PatchValue(&undertaker.GetProvider, func(string) (provider.SecretBackendProvider, error) { return s.secrets, nil })
+
+	api, err := undertaker.NewUndertaker(st, nil, authorizer, func() (*provider.ModelBackendConfigInfo, error) {
+		return &provider.ModelBackendConfigInfo{
+			ActiveID: "backend-id",
+			Configs: map[string]provider.ModelBackendConfig{
+				"backend-id": {
+					ModelUUID: "9d3d3b19-2b0c-4a3f-acde-0b1645586a72",
+					BackendConfig: provider.BackendConfig{
+						BackendType: "some-backend",
+					},
+				},
+			},
+		}, nil
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	return st, api
 }
@@ -52,7 +71,9 @@ func (s *undertakerSuite) TestNoPerms(c *gc.C) {
 		_, err := undertaker.NewUndertaker(
 			st,
 			nil,
-			authorizer,
+			authorizer, func() (*provider.ModelBackendConfigInfo, error) {
+				return nil, errors.NotImplemented
+			},
 		)
 		c.Assert(err, gc.ErrorMatches, "permission denied")
 	}
@@ -138,6 +159,7 @@ func (s *undertakerSuite) TestDeadRemoveModel(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	c.Assert(otherSt.removed, jc.IsTrue)
+	c.Assert(s.secrets.cleanedUUID, gc.Equals, otherSt.model.uuid)
 }
 
 func (s *undertakerSuite) TestModelConfig(c *gc.C) {

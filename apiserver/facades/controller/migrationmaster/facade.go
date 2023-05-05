@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/naturalsort"
@@ -16,8 +16,10 @@ import (
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/core/leadership"
 	coremigration "github.com/juju/juju/core/migration"
 	coremodel "github.com/juju/juju/core/model"
+	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/migration"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state/watcher"
@@ -26,12 +28,14 @@ import (
 // API implements the API required for the model migration
 // master worker.
 type API struct {
-	backend         Backend
-	precheckBackend migration.PrecheckBackend
-	pool            migration.Pool
-	authorizer      facade.Authorizer
-	resources       facade.Resources
-	presence        facade.Presence
+	backend                 Backend
+	precheckBackend         migration.PrecheckBackend
+	pool                    migration.Pool
+	authorizer              facade.Authorizer
+	resources               facade.Resources
+	presence                facade.Presence
+	environscloudspecGetter func(names.ModelTag) (environscloudspec.CloudSpec, error)
+	leadership              leadership.Reader
 }
 
 // NewAPI creates a new API server endpoint for the model migration
@@ -43,17 +47,21 @@ func NewAPI(
 	resources facade.Resources,
 	authorizer facade.Authorizer,
 	presence facade.Presence,
+	environscloudspecGetter func(names.ModelTag) (environscloudspec.CloudSpec, error),
+	leadership leadership.Reader,
 ) (*API, error) {
 	if !authorizer.AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
 	return &API{
-		backend:         backend,
-		precheckBackend: precheckBackend,
-		pool:            pool,
-		authorizer:      authorizer,
-		resources:       resources,
-		presence:        presence,
+		backend:                 backend,
+		precheckBackend:         precheckBackend,
+		pool:                    pool,
+		authorizer:              authorizer,
+		resources:               resources,
+		presence:                presence,
+		environscloudspecGetter: environscloudspecGetter,
+		leadership:              leadership,
 	}, nil
 }
 
@@ -139,6 +147,42 @@ func (api *API) ModelInfo() (params.MigrationModelInfo, error) {
 	}, nil
 }
 
+// SourceControllerInfo returns the details required to connect to
+// the source controller for model migration.
+func (api *API) SourceControllerInfo() (params.MigrationSourceInfo, error) {
+	empty := params.MigrationSourceInfo{}
+
+	localRelatedModels, err := api.backend.AllLocalRelatedModels()
+	if err != nil {
+		return empty, errors.Annotate(err, "retrieving local related models")
+	}
+
+	cfg, err := api.backend.ControllerConfig()
+	if err != nil {
+		return empty, errors.Annotate(err, "retrieving controller config")
+	}
+	cacert, _ := cfg.CACert()
+
+	hostports, err := api.backend.APIHostPortsForClients()
+	if err != nil {
+		return empty, errors.Trace(err)
+	}
+	var addr []string
+	for _, section := range hostports {
+		for _, hostport := range section {
+			addr = append(addr, hostport.String())
+		}
+	}
+
+	return params.MigrationSourceInfo{
+		LocalRelatedModels: localRelatedModels,
+		ControllerTag:      names.NewControllerTag(cfg.ControllerUUID()).String(),
+		ControllerAlias:    cfg.ControllerName(),
+		Addrs:              addr,
+		CACert:             cacert,
+	}, nil
+}
+
 // SetPhase sets the phase of the active model migration. The provided
 // phase must be a valid phase value, for example QUIESCE" or
 // "ABORT". See the core/migration package for the complete list.
@@ -177,6 +221,7 @@ func (api *API) Prechecks(arg params.PrechecksArgs) error {
 		arg.TargetControllerVersion,
 		api.presence.ModelPresence(model.UUID()),
 		api.presence.ModelPresence(controllerModel.UUID()),
+		api.environscloudspecGetter,
 	)
 }
 
@@ -196,7 +241,12 @@ func (api *API) SetStatusMessage(args params.SetMigrationStatusMessageArgs) erro
 func (api *API) Export() (params.SerializedModel, error) {
 	var serialized params.SerializedModel
 
-	model, err := api.backend.Export()
+	leaders, err := api.leadership.Leaders()
+	if err != nil {
+		return serialized, err
+	}
+
+	model, err := api.backend.Export(leaders)
 	if err != nil {
 		return serialized, err
 	}

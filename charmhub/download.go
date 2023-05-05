@@ -6,12 +6,11 @@ package charmhub
 import (
 	"context"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 )
 
@@ -195,7 +194,7 @@ func (c *downloadClient) downloadFromURL(ctx context.Context, resourceURL *url.U
 	// Ensure we drain the response body so this connection can be reused. As
 	// there is no error message, we have no ability other than to check the
 	// status codes.
-	_, _ = io.Copy(ioutil.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {

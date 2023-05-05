@@ -5,7 +5,7 @@ package agent
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -95,7 +95,7 @@ func (s *commonMachineSuite) assertChannelActive(c *gc.C, aChannel chan struct{}
 }
 
 func fakeCmd(path string) {
-	err := ioutil.WriteFile(path, []byte("#!/bin/bash --norc\nexit 0"), 0755)
+	err := os.WriteFile(path, []byte("#!/bin/bash --norc\nexit 0"), 0755)
 	if err != nil {
 		panic(err)
 	}
@@ -109,14 +109,14 @@ func (s *commonMachineSuite) TearDownTest(c *gc.C) {
 // machine agent's directory.  It returns the new machine, the
 // agent's configuration and the tools currently running.
 func (s *commonMachineSuite) primeAgent(c *gc.C, jobs ...state.MachineJob) (m *state.Machine, agentConfig agent.ConfigSetterWriter, tools *tools.Tools) {
-	vers := coretesting.CurrentVersion(c)
+	vers := coretesting.CurrentVersion()
 	return s.primeAgentVersion(c, vers, jobs...)
 }
 
 // primeAgentVersion is similar to primeAgent, but permits the
 // caller to specify the version.Binary to prime with.
 func (s *commonMachineSuite) primeAgentVersion(c *gc.C, vers version.Binary, jobs ...state.MachineJob) (m *state.Machine, agentConfig agent.ConfigSetterWriter, tools *tools.Tools) {
-	m, err := s.State.AddMachine("quantal", jobs...)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), jobs...)
 	c.Assert(err, jc.ErrorIsNil)
 	return s.primeAgentWithMachine(c, m, vers)
 }

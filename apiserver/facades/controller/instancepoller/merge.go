@@ -8,8 +8,8 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2/txn"
-	jujutxn "github.com/juju/txn/v2"
+	"github.com/juju/mgo/v3/txn"
+	jujutxn "github.com/juju/txn/v3"
 
 	"github.com/juju/juju/apiserver/common/networkingcommon"
 	"github.com/juju/juju/core/network"
@@ -92,9 +92,9 @@ func (o *mergeMachineLinkLayerOp) Build(attempt int) ([]txn.Op, error) {
 // If we locate multiple existing devices with the hardware address,
 // such as will be the case for bridged NICs, fallback through the
 // following options.
-// - If there is a device that already has a provider ID, use that name.
-// - If the devices are of different types, choose an ethernet device over
-//   a bridge (as observed for MAAS).
+//   - If there is a device that already has a provider ID, use that name.
+//   - If the devices are of different types, choose an ethernet device over
+//     a bridge (as observed for MAAS).
 func (o *mergeMachineLinkLayerOp) normaliseIncoming() {
 	incoming := o.Incoming()
 

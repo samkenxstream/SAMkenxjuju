@@ -6,7 +6,6 @@ package commands
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,7 +25,6 @@ import (
 	"github.com/juju/juju/cmd/juju/cloud"
 	"github.com/juju/juju/cmd/modelcmd"
 	jujuos "github.com/juju/juju/core/os"
-	"github.com/juju/juju/feature"
 	"github.com/juju/juju/juju/osenv"
 	"github.com/juju/juju/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/testing"
@@ -66,7 +64,7 @@ func configHelpText() string {
 }
 
 func syncToolsHelpText() string {
-	return helpText(newSyncToolsCommand(), "juju sync-agent-binaries")
+	return helpText(newSyncAgentBinaryCommand(), "juju sync-agent-binary")
 }
 
 func (s *MainSuite) TestRunMain(c *gc.C) {
@@ -147,20 +145,20 @@ func (s *MainSuite) TestRunMain(c *gc.C) {
 		code:    2,
 		out:     "ERROR option provided but not defined: --model\n",
 	}, {
-		summary: "juju sync-agent-binaries registered properly",
-		args:    []string{"sync-agent-binaries", "--help"},
+		summary: "juju sync-agent-binary registered properly",
+		args:    []string{"sync-agent-binary", "--help"},
 		code:    0,
 		out:     syncToolsHelpText(),
 	}, {
 		summary: "check version command returns a fully qualified version string",
 		args:    []string{"version"},
 		code:    0,
-		out:     testing.CurrentVersion(c).String() + "\n",
+		out:     testing.CurrentVersion().String() + "\n",
 	}, {
 		summary: "check --version command returns a fully qualified version string",
 		args:    []string{"--version"},
 		code:    0,
-		out:     testing.CurrentVersion(c).String() + "\n",
+		out:     testing.CurrentVersion().String() + "\n",
 	}} {
 		c.Logf("test %d: %s", i, t.summary)
 		out := badrun(c, t.code, t.args...)
@@ -180,7 +178,7 @@ func (s *MainSuite) TestActualRunJujuArgOrder(c *gc.C) {
 	for i, test := range tests {
 		c.Logf("test %d: %v", i, test)
 		badrun(c, 0, test...)
-		content, err := ioutil.ReadFile(logpath)
+		content, err := os.ReadFile(logpath)
 		c.Assert(err, jc.ErrorIsNil)
 		c.Assert(string(content), gc.Matches, "(.|\n)*running juju(.|\n)*command finished(.|\n)*")
 		err = os.Remove(logpath)
@@ -263,7 +261,7 @@ func (s *MainSuite) TestRunNoUpdateCloud(c *gc.C) {
 }
 
 func checkVersionOutput(c *gc.C, output string) {
-	ver := testing.CurrentVersion(c)
+	ver := testing.CurrentVersion()
 	c.Check(output, gc.Equals, ver.String()+"\n")
 }
 
@@ -284,23 +282,19 @@ var commandNames = []string{
 	"add-k8s",
 	"add-machine",
 	"add-model",
-	"add-relation", // alias for 'integrate'
+	"add-secret-backend",
 	"add-space",
 	"add-ssh-key",
 	"add-storage",
-	"add-subnet",
 	"add-unit",
 	"add-user",
 	"agree",
 	"agreements",
-	"attach",
 	"attach-resource",
 	"attach-storage",
 	"autoload-credentials",
 	"bind",
 	"bootstrap",
-	"budget",
-	"cached-images",
 	"cancel-task",
 	"change-user-password",
 	"charm-resources",
@@ -312,7 +306,6 @@ var commandNames = []string{
 	"controllers",
 	"create-backup",
 	"create-storage-pool",
-	"create-wallet",
 	"credentials",
 	"dashboard",
 	"debug-code",
@@ -329,6 +322,7 @@ var commandNames = []string{
 	"disable-command",
 	"disable-user",
 	"disabled-commands",
+	"documentation",
 	"download",
 	"download-backup",
 	"enable-command",
@@ -341,14 +335,12 @@ var commandNames = []string{
 	"find",
 	"find-offers",
 	"firewall-rules",
-	"get-constraints",
-	"get-model-constraints",
+	"constraints",
+	"model-constraints",
 	"grant",
 	"grant-cloud",
 	"help",
 	"help-tool",
-	"hook-tool",
-	"hook-tools",
 	"import-filesystem",
 	"import-ssh-key",
 	"info",
@@ -356,7 +348,6 @@ var commandNames = []string{
 	"kill-controller",
 	"list-actions",
 	"list-agreements",
-	"list-cached-images",
 	"list-charm-resources",
 	"list-clouds",
 	"list-controllers",
@@ -368,16 +359,16 @@ var commandNames = []string{
 	"list-offers",
 	"list-operations",
 	"list-payloads",
-	"list-plans",
 	"list-regions",
 	"list-resources",
+	"list-secret-backends",
+	"list-secrets",
 	"list-spaces",
 	"list-ssh-keys",
 	"list-storage",
 	"list-storage-pools",
 	"list-subnets",
 	"list-users",
-	"list-wallets",
 	"login",
 	"logout",
 	"machines",
@@ -392,22 +383,20 @@ var commandNames = []string{
 	"offers",
 	"operations",
 	"payloads",
-	"plans",
 	"refresh",
 	"regions",
 	"register",
 	"relate", // alias for integrate
 	"reload-spaces",
 	"remove-application",
-	"remove-cached-images",
 	"remove-cloud",
-	"remove-consumed-application",
 	"remove-credential",
 	"remove-k8s",
 	"remove-machine",
 	"remove-offer",
 	"remove-relation",
 	"remove-saas",
+	"remove-secret-backend",
 	"remove-space",
 	"remove-ssh-key",
 	"remove-storage",
@@ -425,16 +414,16 @@ var commandNames = []string{
 	"run",
 	"scale-application",
 	"scp",
+	"secrets",
+	"secret-backends",
+	"set-application-base",
 	"set-credential",
 	"set-constraints",
-	"set-default-credential",
+	"set-default-credentials",
 	"set-default-region",
 	"set-firewall-rule",
 	"set-meter-status",
 	"set-model-constraints",
-	"set-plan",
-	"set-series",
-	"set-wallet",
 	"show-action",
 	"show-application",
 	"show-cloud",
@@ -445,15 +434,14 @@ var commandNames = []string{
 	"show-model",
 	"show-offer",
 	"show-operation",
-	"show-status",
+	"show-secret",
+	"show-secret-backend",
 	"show-status-log",
 	"show-storage",
 	"show-space",
 	"show-task",
 	"show-unit",
 	"show-user",
-	"show-wallet",
-	"sla",
 	"spaces",
 	"ssh",
 	"ssh-keys",
@@ -463,8 +451,7 @@ var commandNames = []string{
 	"subnets",
 	"suspend-relation",
 	"switch",
-	"sync-agent-binaries",
-	"sync-tools",
+	"sync-agent-binary",
 	"trust",
 	"unexpose",
 	"unregister",
@@ -473,27 +460,23 @@ var commandNames = []string{
 	"update-public-clouds",
 	"update-credential",
 	"update-credentials",
+	"update-secret-backend",
 	"update-storage-pool",
-	"upgrade-charm",
 	"upgrade-controller",
-	"upgrade-juju",
 	"upgrade-model",
-	"upgrade-series",
+	"upgrade-machine",
 	"users",
 	"version",
 	"wait-for",
-	"wallets",
 	"whoami",
 }
 
 // optionalFeatures are feature flags that impact registration of commands.
-var optionalFeatures = []string{
-	feature.Secrets,
-}
+var optionalFeatures = []string{}
 
 // These are the commands that are behind the `devFeatures`.
 var commandNamesBehindFlags = set.NewStrings(
-	"list-secrets", "secrets",
+	"list-secrets", "secrets", "show-secret",
 )
 
 func (s *MainSuite) TestHelpCommands(c *gc.C) {
@@ -586,7 +569,8 @@ func (s *MainSuite) TestRegisterCommands(c *gc.C) {
 	stub := &jujutesting.Stub{}
 
 	registry := &stubRegistry{stub: stub}
-	registry.names = append(registry.names, "help") // implicit
+	registry.names = append(registry.names, "help")          // implicit
+	registry.names = append(registry.names, "documentation") //implicit
 	registerCommands(registry)
 	sort.Strings(registry.names)
 
@@ -600,11 +584,11 @@ func (s *MainSuite) TestRegisterCommandsWhitelist(c *gc.C) {
 	stubRegistry := &stubRegistry{stub: &jujutesting.Stub{}}
 	registry := jujuCommandRegistry{
 		commandRegistry: stubRegistry,
-		whitelist:       set.NewStrings("show-status"),
+		whitelist:       set.NewStrings("status"),
 		excluded:        set.NewStrings(),
 	}
 	registerCommands(registry)
-	c.Assert(stubRegistry.names, jc.SameContents, []string{"show-status", "status"})
+	c.Assert(stubRegistry.names, jc.SameContents, []string{"status"})
 }
 
 func (s *MainSuite) TestRegisterCommandsEmbedded(c *gc.C) {

@@ -16,6 +16,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/series"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/context"
@@ -24,7 +25,7 @@ import (
 	"github.com/juju/juju/storage"
 )
 
-//go:generate go run github.com/golang/mock/mockgen -package testing -destination testing/package_mock.go github.com/juju/juju/environs EnvironProvider,CloudEnvironProvider,ProviderSchema,ProviderCredentials,FinalizeCredentialContext,FinalizeCloudContext,CloudFinalizer,CloudDetector,CloudRegionDetector,ModelConfigUpgrader,ConfigGetter,CloudDestroyer,Environ,InstancePrechecker,Firewaller,InstanceTagger,InstanceTypesFetcher,Upgrader,UpgradeStep,DefaultConstraintsChecker,ProviderCredentialsRegister,RequestFinalizeCredential,NetworkingEnviron
+//go:generate go run github.com/golang/mock/mockgen -package testing -destination testing/package_mock.go -write_package_comment=false github.com/juju/juju/environs EnvironProvider,CloudEnvironProvider,ProviderSchema,ProviderCredentials,FinalizeCredentialContext,FinalizeCloudContext,CloudFinalizer,CloudDetector,CloudRegionDetector,ModelConfigUpgrader,ConfigGetter,CloudDestroyer,Environ,InstancePrechecker,Firewaller,InstanceTagger,InstanceTypesFetcher,Upgrader,UpgradeStep,DefaultConstraintsChecker,ProviderCredentialsRegister,RequestFinalizeCredential,NetworkingEnviron
 
 type ConnectorInfo interface {
 	ConnectionProxyInfo() (proxy.Proxier, error)
@@ -469,8 +470,8 @@ type InstanceLister interface {
 // PrecheckInstanceParams contains the parameters for
 // InstancePrechecker.PrecheckInstance.
 type PrecheckInstanceParams struct {
-	// Series contains the series of the machine.
-	Series string
+	// Base contains the base of the machine.
+	Base series.Base
 
 	// Constraints contains the machine constraints.
 	Constraints constraints.Value
@@ -635,6 +636,10 @@ type HardwareCharacteristicsDetector interface {
 	// DetectHardware returns the hardware characteristics for the
 	// controller instance.
 	DetectHardware() (*instance.HardwareCharacteristics, error)
+	// UpdateModelConstraints returns true if the model constraints should
+	// be updated based on the returns of DetectSeries() and
+	// DetectHardware().
+	UpdateModelConstraints() bool
 }
 
 // SupportedFeatureEnumerator is implemented by environments that can report

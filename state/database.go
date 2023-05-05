@@ -12,9 +12,9 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/featureflag"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/txn"
-	jujutxn "github.com/juju/txn/v2"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/txn"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/kr/pretty"
 
 	"github.com/juju/juju/controller"
@@ -30,7 +30,7 @@ func dontCloseAnything() {}
 
 //go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/database_mock.go github.com/juju/juju/state Database
 //go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/mongo_mock.go github.com/juju/juju/mongo Collection,Query
-//go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/txn_mock.go github.com/juju/txn Runner
+//go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/txn_mock.go github.com/juju/txn/v3 Runner
 //go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/clock_mock.go github.com/juju/clock Clock
 
 // Database exposes the mongodb capabilities that most of state should see.
@@ -98,6 +98,11 @@ type Database interface {
 	// Run is a convenience method running a transaction using a
 	// transaction building function.
 	Run(transactions jujutxn.TransactionSource) error
+
+	// Run is a convenience method running a transaction using a
+	// transaction building function using a "raw" transaction runner
+	// that won't perform model filtering.
+	RunRaw(transactions jujutxn.TransactionSource) error
 
 	// Schema returns the schema used to load the database. The returned schema
 	// is not a copy and must not be modified.
@@ -189,14 +194,6 @@ func (schema CollectionSchema) Create(
 	for name, info := range schema {
 		rawCollection := db.C(name)
 		if spec := info.explicitCreate; spec != nil {
-			// We allow the max txn log collection size to be overridden by the user.
-			if name == txnLogC && settings != nil {
-				maxSize := settings.MaxTxnLogSizeMB()
-				if maxSize > 0 {
-					logger.Infof("overriding max txn log collection size: %dM", maxSize)
-					spec.MaxBytes = maxSize * 1024 * 1024
-				}
-			}
 			if err := createCollection(rawCollection, spec); err != nil {
 				return mongo.MaybeUnauthorizedf(err, "cannot create collection %q", name)
 			}
@@ -263,6 +260,10 @@ type database struct {
 	// clock is used to time how long transactions take to run
 	clock clock.Clock
 
+	// maxTxnAttempts is used when creating the txn runner to control how
+	// many attempts a txn should have.
+	maxTxnAttempts int
+
 	mu           sync.RWMutex
 	queryTracker *queryTracker
 }
@@ -274,12 +275,13 @@ type RunTransactionObserverFunc func(dbName, modelUUID string, attempt int, dura
 func (db *database) copySession(modelUUID string) (*database, SessionCloser) {
 	session := db.raw.Session.Copy()
 	return &database{
-		raw:        db.raw.With(session),
-		schema:     db.schema,
-		modelUUID:  modelUUID,
-		runner:     db.runner,
-		ownSession: true,
-		clock:      db.clock,
+		raw:            db.raw.With(session),
+		schema:         db.schema,
+		modelUUID:      modelUUID,
+		runner:         db.runner,
+		ownSession:     true,
+		clock:          db.clock,
+		maxTxnAttempts: db.maxTxnAttempts,
 	}, session.Close
 }
 
@@ -385,11 +387,13 @@ func (db *database) TransactionRunner() (runner jujutxn.Runner, closer SessionCl
 			}
 		}
 		params := jujutxn.RunnerParams{
-			Database:               raw,
-			RunTransactionObserver: observer,
-			Clock:                  db.clock,
-			ServerSideTransactions: true,
-			MaxRetryAttempts:       40,
+			Database:                  raw,
+			RunTransactionObserver:    observer,
+			Clock:                     db.clock,
+			TransactionCollectionName: "txns",
+			ChangeLogName:             "-",
+			ServerSideTransactions:    true,
+			MaxRetryAttempts:          db.maxTxnAttempts,
 		}
 		runner = jujutxn.NewRunner(params)
 	}
@@ -430,6 +434,16 @@ func (db *database) RunRawTransaction(ops []txn.Op) error {
 func (db *database) Run(transactions jujutxn.TransactionSource) error {
 	runner, closer := db.TransactionRunner()
 	defer closer()
+	return runner.Run(transactions)
+}
+
+// RunRaw is part of the Database interface.
+func (db *database) RunRaw(transactions jujutxn.TransactionSource) error {
+	runner, closer := db.TransactionRunner()
+	defer closer()
+	if multiRunner, ok := runner.(*multiModelRunner); ok {
+		runner = multiRunner.rawRunner
+	}
 	return runner.Run(transactions)
 }
 

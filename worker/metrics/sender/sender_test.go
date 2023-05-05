@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
+	"os"
 	"path"
 	"path/filepath"
 	"time"
 
-	corecharm "github.com/juju/charm/v9"
+	corecharm "github.com/juju/charm/v10"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
@@ -183,7 +183,7 @@ func (s *senderSuite) TestSendingFails(c *gc.C) {
 }
 
 func (s *senderSuite) TestDataErrorIgnored(c *gc.C) {
-	err := ioutil.WriteFile(filepath.Join(s.spoolDir, "foo.meta"), []byte{}, 0644)
+	err := os.WriteFile(filepath.Join(s.spoolDir, "foo.meta"), []byte{}, 0644)
 	c.Assert(err, jc.ErrorIsNil)
 	apiSender := newTestAPIMetricSender()
 

@@ -1,24 +1,21 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package charms provides a client for accessing the charms API.
 package charms
 
 import (
 	"archive/zip"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/version/v2"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	api "github.com/juju/juju/api/client/resources"
@@ -71,8 +68,6 @@ type ResolvedCharm struct {
 
 // ResolveCharms resolves the given charm URLs with an optionally specified
 // preferred channel.
-// ResolveCharms is only supported in version 3 and above, it is expected that
-// the consumer of the client is intended to handle the fallback.
 func (c *Client) ResolveCharms(charms []CharmToResolve) ([]ResolvedCharm, error) {
 	args := params.ResolveCharmsWithChannel{
 		Resolve: make([]params.ResolveCharmWithChannel, len(charms)),
@@ -97,8 +92,13 @@ func (c *Client) ResolveCharms(charms []CharmToResolve) ([]ResolvedCharm, error)
 		curl, err := charm.ParseURL(r.URL)
 		if err != nil {
 			resolvedCharms[i] = ResolvedCharm{Error: err}
+			continue
 		}
-		origin := apicharm.APICharmOrigin(r.Origin)
+		origin, err := apicharm.APICharmOrigin(r.Origin)
+		if err != nil {
+			resolvedCharms[i] = ResolvedCharm{Error: err}
+			continue
+		}
 		resolvedCharms[i] = ResolvedCharm{
 			URL:             curl,
 			Origin:          origin,
@@ -118,12 +118,11 @@ type DownloadInfo struct {
 
 // GetDownloadInfo will get a download information from the given charm URL
 // using the appropriate charm store.
-func (c *Client) GetDownloadInfo(curl *charm.URL, origin apicharm.Origin, mac *macaroon.Macaroon) (DownloadInfo, error) {
+func (c *Client) GetDownloadInfo(curl *charm.URL, origin apicharm.Origin) (DownloadInfo, error) {
 	args := params.CharmURLAndOrigins{
 		Entities: []params.CharmURLAndOrigin{{
 			CharmURL: curl.String(),
 			Origin:   origin.ParamsCharmOrigin(),
-			Macaroon: mac,
 		}},
 	}
 	var results params.DownloadInfoResults
@@ -134,9 +133,13 @@ func (c *Client) GetDownloadInfo(curl *charm.URL, origin apicharm.Origin, mac *m
 		return DownloadInfo{}, errors.Errorf("expected one result, received %d", num)
 	}
 	result := results.Results[0]
+	origin, err := apicharm.APICharmOrigin(result.Origin)
+	if err != nil {
+		return DownloadInfo{}, errors.Trace(err)
+	}
 	return DownloadInfo{
 		URL:    result.URL,
-		Origin: apicharm.APICharmOrigin(result.Origin),
+		Origin: origin,
 	}, nil
 }
 
@@ -152,43 +155,12 @@ func (c *Client) AddCharm(curl *charm.URL, origin apicharm.Origin, force bool) (
 		URL:    curl.String(),
 		Origin: origin.ParamsCharmOrigin(),
 		Force:  force,
-		// Deprecated: Series is used here to communicate with older
-		// controllers and instead we use Origin to describe the platform.
-		Series: origin.Series,
 	}
 	var result params.CharmOriginResult
 	if err := c.facade.FacadeCall("AddCharm", args, &result); err != nil {
 		return apicharm.Origin{}, errors.Trace(err)
 	}
-	return apicharm.APICharmOrigin(result.Origin), nil
-}
-
-// AddCharmWithAuthorization is like AddCharm except it also provides
-// the given charmstore macaroon for the juju server to use when
-// obtaining the charm from the charm store or from charm hub. The
-// macaroon is conventionally obtained from the /delegatable-macaroon
-// endpoint in the charm store.
-//
-// If the AddCharmWithAuthorization API call fails because of an
-// authorization error when retrieving the charm from the charm store,
-// an error satisfying params.IsCodeUnauthorized will be returned.
-// Force is used to overload any validation errors that could occur during
-// a deploy
-func (c *Client) AddCharmWithAuthorization(curl *charm.URL, origin apicharm.Origin, csMac *macaroon.Macaroon, force bool) (apicharm.Origin, error) {
-	args := params.AddCharmWithAuth{
-		URL:                curl.String(),
-		Origin:             origin.ParamsCharmOrigin(),
-		CharmStoreMacaroon: csMac,
-		Force:              force,
-		// Deprecated: Series is used here to communicate with older
-		// controllers and instead we use Origin to describe the platform.
-		Series: origin.Series,
-	}
-	var result params.CharmOriginResult
-	if err := c.facade.FacadeCall("AddCharmWithAuthorization", args, &result); err != nil {
-		return apicharm.Origin{}, errors.Trace(err)
-	}
-	return apicharm.APICharmOrigin(result.Origin), nil
+	return apicharm.APICharmOrigin(result.Origin)
 }
 
 // AddLocalCharm prepares the given charm with a local: schema in its
@@ -213,7 +185,7 @@ func (c *Client) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bool, agen
 	switch ch := ch.(type) {
 	case *charm.CharmDir:
 		var err error
-		if archive, err = ioutil.TempFile("", "charm"); err != nil {
+		if archive, err = os.CreateTemp("", "charm"); err != nil {
 			return nil, errors.Annotate(err, "cannot create temp file")
 		}
 		defer os.Remove(archive.Name())

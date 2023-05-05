@@ -178,7 +178,7 @@ func (s *firewallerSuite) TestWatchOpenedPorts(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }
 
@@ -186,7 +186,7 @@ func (s *firewallerSuite) TestAreManuallyProvisioned(c *gc.C) {
 	defer s.ctrl.Finish()
 
 	m, err := s.State.AddOneMachine(state.MachineTemplate{
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		Jobs:       []state.MachineJob{state.JobHostUnits},
 		InstanceId: "2",
 		Nonce:      "manual:",
@@ -321,6 +321,6 @@ func (s *firewallerSuite) TestWatchSubnets(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned"
 	// in the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }

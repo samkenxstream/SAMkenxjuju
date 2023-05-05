@@ -9,7 +9,7 @@ import (
 	"mime"
 	"net/http"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 
@@ -77,10 +77,10 @@ func setFilename(filename string, req *http.Request) {
 // contains the name of the file being uploaded, see mime.FormatMediaType and
 // RFC 1867 (http://tools.ietf.org/html/rfc1867):
 //
-//   The original local file name may be supplied as well, either as a
-//  'filename' parameter either of the 'content-disposition: form-data'
-//   header or in the case of multiple files in a 'content-disposition:
-//   file' header of the subpart.
+//	 The original local file name may be supplied as well, either as a
+//	'filename' parameter either of the 'content-disposition: form-data'
+//	 header or in the case of multiple files in a 'content-disposition:
+//	 file' header of the subpart.
 const FilenameParamForContentDispositionHeader = "filename"
 
 // HTTPRequest generates a new HTTP request.

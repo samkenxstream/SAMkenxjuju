@@ -10,6 +10,7 @@ import (
 	gomock "github.com/golang/mock/gomock"
 	lxd "github.com/juju/juju/container/lxd"
 	network "github.com/juju/juju/core/network"
+	series "github.com/juju/juju/core/series"
 	environs "github.com/juju/juju/environs"
 	cloudspec "github.com/juju/juju/environs/cloudspec"
 	client "github.com/lxc/lxd/client"
@@ -259,18 +260,18 @@ func (mr *MockServerMockRecorder) FilterContainers(arg0 interface{}, arg1 ...int
 }
 
 // FindImage mocks base method.
-func (m *MockServer) FindImage(arg0, arg1 string, arg2 []lxd.ServerSpec, arg3 bool, arg4 environs.StatusCallbackFunc) (lxd.SourcedImage, error) {
+func (m *MockServer) FindImage(arg0 series.Base, arg1 string, arg2 api.InstanceType, arg3 []lxd.ServerSpec, arg4 bool, arg5 environs.StatusCallbackFunc) (lxd.SourcedImage, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FindImage", arg0, arg1, arg2, arg3, arg4)
+	ret := m.ctrl.Call(m, "FindImage", arg0, arg1, arg2, arg3, arg4, arg5)
 	ret0, _ := ret[0].(lxd.SourcedImage)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // FindImage indicates an expected call of FindImage.
-func (mr *MockServerMockRecorder) FindImage(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
+func (mr *MockServerMockRecorder) FindImage(arg0, arg1, arg2, arg3, arg4, arg5 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindImage", reflect.TypeOf((*MockServer)(nil).FindImage), arg0, arg1, arg2, arg3, arg4)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindImage", reflect.TypeOf((*MockServer)(nil).FindImage), arg0, arg1, arg2, arg3, arg4, arg5)
 }
 
 // GetCertificate mocks base method.
@@ -319,22 +320,6 @@ func (mr *MockServerMockRecorder) GetConnectionInfo() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetConnectionInfo", reflect.TypeOf((*MockServer)(nil).GetConnectionInfo))
 }
 
-// GetContainer mocks base method.
-func (m *MockServer) GetContainer(arg0 string) (*api.Container, string, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetContainer", arg0)
-	ret0, _ := ret[0].(*api.Container)
-	ret1, _ := ret[1].(string)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// GetContainer indicates an expected call of GetContainer.
-func (mr *MockServerMockRecorder) GetContainer(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetContainer", reflect.TypeOf((*MockServer)(nil).GetContainer), arg0)
-}
-
 // GetContainerProfiles mocks base method.
 func (m *MockServer) GetContainerProfiles(arg0 string) ([]string, error) {
 	m.ctrl.T.Helper()
@@ -350,20 +335,36 @@ func (mr *MockServerMockRecorder) GetContainerProfiles(arg0 interface{}) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetContainerProfiles", reflect.TypeOf((*MockServer)(nil).GetContainerProfiles), arg0)
 }
 
-// GetContainerState mocks base method.
-func (m *MockServer) GetContainerState(arg0 string) (*api.ContainerState, string, error) {
+// GetInstance mocks base method.
+func (m *MockServer) GetInstance(arg0 string) (*api.Instance, string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetContainerState", arg0)
-	ret0, _ := ret[0].(*api.ContainerState)
+	ret := m.ctrl.Call(m, "GetInstance", arg0)
+	ret0, _ := ret[0].(*api.Instance)
 	ret1, _ := ret[1].(string)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
 }
 
-// GetContainerState indicates an expected call of GetContainerState.
-func (mr *MockServerMockRecorder) GetContainerState(arg0 interface{}) *gomock.Call {
+// GetInstance indicates an expected call of GetInstance.
+func (mr *MockServerMockRecorder) GetInstance(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetContainerState", reflect.TypeOf((*MockServer)(nil).GetContainerState), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInstance", reflect.TypeOf((*MockServer)(nil).GetInstance), arg0)
+}
+
+// GetInstanceState mocks base method.
+func (m *MockServer) GetInstanceState(arg0 string) (*api.InstanceState, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetInstanceState", arg0)
+	ret0, _ := ret[0].(*api.InstanceState)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetInstanceState indicates an expected call of GetInstanceState.
+func (mr *MockServerMockRecorder) GetInstanceState(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInstanceState", reflect.TypeOf((*MockServer)(nil).GetInstanceState), arg0)
 }
 
 // GetNICsFromProfile mocks base method.

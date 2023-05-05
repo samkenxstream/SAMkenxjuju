@@ -4,12 +4,12 @@
 package storage_test
 
 import (
-	"io/ioutil"
+	"io"
 	"strings"
 
-	"github.com/juju/blobstore/v2"
+	"github.com/juju/blobstore/v3"
 	"github.com/juju/errors"
-	gitjujutesting "github.com/juju/testing"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
@@ -20,7 +20,7 @@ import (
 const testUUID = "9f484882-2f18-4fd2-967d-db9663db7bea"
 
 type StorageSuite struct {
-	gitjujutesting.MgoSuite
+	mgotesting.MgoSuite
 	testing.BaseSuite
 	managedStorage blobstore.ManagedStorage
 	storage        storage.Storage
@@ -62,7 +62,7 @@ func (s *StorageSuite) TestStorageGet(c *gc.C) {
 	defer r.Close()
 	c.Assert(length, gc.Equals, int64(3))
 
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(data), gc.Equals, "abc")
 }
@@ -76,7 +76,7 @@ func (s *StorageSuite) TestStoragePut(c *gc.C) {
 	defer r.Close()
 
 	c.Assert(length, gc.Equals, int64(3))
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(data), gc.Equals, "abc")
 }

@@ -4,9 +4,7 @@
 package operation_test
 
 import (
-	"time"
-
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
@@ -16,6 +14,7 @@ import (
 	"github.com/juju/juju/worker/common/charmrunner"
 	"github.com/juju/juju/worker/uniter/hook"
 	"github.com/juju/juju/worker/uniter/operation"
+	"github.com/juju/juju/worker/uniter/runner"
 	"github.com/juju/juju/worker/uniter/runner/context"
 	"github.com/juju/juju/worker/uniter/runner/jujuc"
 )
@@ -201,7 +200,7 @@ func (s *RunHookSuite) getExecuteRunnerTest(
 
 	// Target is supplied for the special-cased pre-series-upgrade hook.
 	// This is the only one of the designated unit hooks with validation.
-	op, err := newHook(factory, hook.Info{Kind: kind, SeriesUpgradeTarget: "focal"})
+	op, err := newHook(factory, hook.Info{Kind: kind, MachineUpgradeTarget: "ubuntu@20.04"})
 
 	c.Assert(err, jc.ErrorIsNil)
 	return op, callbacks, runnerFactory
@@ -237,6 +236,10 @@ func (s *RunHookSuite) assertStateMatches(
 	c.Assert(st.Step, gc.Equals, step)
 	c.Assert(st.Hook, gc.NotNil)
 	c.Assert(st.Hook.Kind, gc.Equals, hookKind)
+	if step == operation.Queued {
+		c.Assert(st.HookStep, gc.NotNil)
+		c.Assert(*st.HookStep, gc.Equals, step)
+	}
 }
 
 func (s *RunHookSuite) TestExecuteRequeueRebootError(c *gc.C) {
@@ -285,6 +288,21 @@ func (s *RunHookSuite) TestExecuteOtherError(c *gc.C) {
 	c.Assert(*runnerFactory.MockNewHookRunner.runner.MockRunHook.gotName, gc.Equals, "config-changed")
 	c.Assert(*callbacks.MockNotifyHookFailed.gotName, gc.Equals, "config-changed")
 	c.Assert(*callbacks.MockNotifyHookFailed.gotContext, gc.Equals, runnerFactory.MockNewHookRunner.runner.context)
+	c.Assert(callbacks.MockNotifyHookCompleted.gotName, gc.IsNil)
+}
+
+func (s *RunHookSuite) TestExecuteTerminated(c *gc.C) {
+	runErr := runner.ErrTerminated
+	op, callbacks, runnerFactory := s.getExecuteRunnerTest(c, operation.Factory.NewRunHook, hooks.ConfigChanged, runErr)
+	_, err := op.Prepare(operation.State{})
+	c.Assert(err, jc.ErrorIsNil)
+
+	newState, err := op.Execute(operation.State{})
+	c.Assert(err, gc.Equals, runner.ErrTerminated)
+
+	s.assertStateMatches(c, newState, operation.RunHook, operation.Queued, hooks.ConfigChanged)
+
+	c.Assert(*runnerFactory.MockNewHookRunner.runner.MockRunHook.gotName, gc.Equals, "config-changed")
 	c.Assert(callbacks.MockNotifyHookCompleted.gotName, gc.IsNil)
 }
 
@@ -618,10 +636,12 @@ func (s *RunHookSuite) assertCommitSuccess_RelationBroken_SetStatus(c *gc.C, sus
 
 	newState, err := op.Execute(operation.State{})
 	c.Assert(err, jc.ErrorIsNil)
+	step := operation.Done
 	c.Assert(newState, gc.DeepEquals, &operation.State{
-		Kind: operation.RunHook,
-		Step: operation.Done,
-		Hook: &hook.Info{Kind: hooks.RelationBroken},
+		Kind:     operation.RunHook,
+		Step:     step,
+		Hook:     &hook.Info{Kind: hooks.RelationBroken},
+		HookStep: &step,
 	})
 	if suspended && leader {
 		c.Assert(ctx.relation.status, gc.Equals, relation.Suspended)
@@ -884,19 +904,38 @@ func (s *RunHookSuite) TestRunningHookMessageForSecretsHooks(c *gc.C) {
 		"secret-rotate",
 		hook.Info{
 			Kind:      hooks.SecretRotate,
-			SecretURL: "secret://app/mariadb/password",
+			SecretURI: "secret:9m4e2mr0ui3e8a215n4g",
 		},
 	)
-	c.Assert(msg, gc.Equals, `running secret-rotate hook for secret://app/mariadb/password`)
+	c.Assert(msg, gc.Equals, `running secret-rotate hook for secret:9m4e2mr0ui3e8a215n4g`)
+}
+
+func (s *RunHookSuite) TestRunningHookMessageForSecretHooksWithRevision(c *gc.C) {
+	msg := operation.RunningHookMessage(
+		"secret-expired",
+		hook.Info{
+			Kind:           hooks.SecretExpired,
+			SecretURI:      "secret:9m4e2mr0ui3e8a215n4g",
+			SecretRevision: 666,
+		},
+	)
+	c.Assert(msg, gc.Equals, `running secret-expired hook for secret:9m4e2mr0ui3e8a215n4g/666`)
 }
 
 func (s *RunHookSuite) TestCommitSuccess_SecretRotate_SetRotated(c *gc.C) {
 	callbacks := &CommitHookCallbacks{
 		MockCommitHook: &MockCommitHook{},
 	}
-	factory := newOpFactory(nil, callbacks)
+	runnerFactory := &MockRunnerFactory{
+		MockNewHookRunner: &MockNewHookRunner{
+			runner: &MockRunner{
+				context: &MockContext{},
+			},
+		},
+	}
+	factory := newOpFactory(runnerFactory, callbacks)
 	op, err := factory.NewRunHook(hook.Info{
-		Kind: hooks.SecretRotate, SecretURL: "secret://app/mariadb/password",
+		Kind: hooks.SecretRotate, SecretURI: "secret:9m4e2mr0ui3e8a215n4g",
 	})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -905,17 +944,24 @@ func (s *RunHookSuite) TestCommitSuccess_SecretRotate_SetRotated(c *gc.C) {
 		Step: operation.Pending,
 	}
 
-	now := time.Now()
+	_, err = op.Prepare(operation.State{})
+	c.Assert(err, jc.ErrorIsNil)
 	newState, err := op.Commit(operation.State{})
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(newState, jc.DeepEquals, expectState)
-	c.Assert(callbacks.rotatedSecretURL, gc.Equals, "secret://app/mariadb/password")
-	c.Assert(callbacks.rotatedSecretTime.After(now), jc.IsTrue)
+	c.Assert(callbacks.rotatedSecretURI, gc.Equals, "secret:9m4e2mr0ui3e8a215n4g")
+	c.Assert(callbacks.rotatedOldRevision, gc.Equals, 666)
 }
 
-func (s *RunHookSuite) TestPrepareHookError_SecretRotate_NotLeader(c *gc.C) {
+func (s *RunHookSuite) TestPrepareSecretHookError_NotLeader(c *gc.C) {
+	s.assertPrepareSecretHookErrorNotLeader(c, hooks.SecretRotate)
+	s.assertPrepareSecretHookErrorNotLeader(c, hooks.SecretExpired)
+	s.assertPrepareSecretHookErrorNotLeader(c, hooks.SecretRemove)
+}
+
+func (s *RunHookSuite) assertPrepareSecretHookErrorNotLeader(c *gc.C, kind hooks.Kind) {
 	callbacks := &PrepareHookCallbacks{
-		MockPrepareHook: &MockPrepareHook{nil, string(hooks.SecretRotate), nil},
+		MockPrepareHook: &MockPrepareHook{nil, string(kind), nil},
 	}
 	runnerFactory := &MockRunnerFactory{
 		MockNewHookRunner: &MockNewHookRunner{
@@ -927,7 +973,7 @@ func (s *RunHookSuite) TestPrepareHookError_SecretRotate_NotLeader(c *gc.C) {
 	factory := newOpFactory(runnerFactory, callbacks)
 
 	op, err := factory.NewRunHook(hook.Info{
-		Kind: hooks.SecretRotate, SecretURL: "secret://app/mariadb/password",
+		Kind: kind, SecretURI: "secret:9m4e2mr0ui3e8a215n4g", SecretRevision: 666,
 	})
 	c.Assert(err, jc.ErrorIsNil)
 

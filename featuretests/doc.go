@@ -2,7 +2,7 @@
 // Licensed under the AGPLv3, see LICENCE file for details.
 
 /*
-This package contains functional tests only. Each feature-set of
+Package featuretests contains functional tests only. Each feature-set of
 Juju should have it's own file in which all the happy-paths are
 tested.
 
@@ -19,6 +19,7 @@ feature. The place for that is in unit tests within Juju Core.
 
 To run tests excluding the functional tests in this package, specify
 the "--featuretests=false" option:
+
 	go test github.com/juju/juju/... --featuretests=false
 */
 package featuretests

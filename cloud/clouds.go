@@ -1,13 +1,10 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package cloud provides functionality to parse information
-// describing clouds, including regions, supported auth types etc.
 package cloud
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"sort"
@@ -373,7 +370,7 @@ func JujuPublicCloudsPath() string {
 // are found, returns the fallback public cloud metadata.
 func PublicCloudMetadata(searchPath ...string) (result map[string]Cloud, fallbackUsed bool, err error) {
 	for _, file := range searchPath {
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		if err != nil && os.IsNotExist(err) {
 			continue
 		}
@@ -404,23 +401,25 @@ func ParseOneCloud(data []byte) (Cloud, error) {
 // The expected regular yaml formal is:
 //
 // clouds:
-//   garage-maas:
-//     type: maas
-//     auth-types: [oauth1]
-//     endpoint: "http://garagemaas"
-//     skip-tls-verify: true`
-//   ...
+//
+//	garage-maas:
+//	  type: maas
+//	  auth-types: [oauth1]
+//	  endpoint: "http://garagemaas"
+//	  skip-tls-verify: true`
+//	...
 //
 // It also accepts a yaml format without the 'clouds' key at the top,
 // e.g.
 //
 // garage-maas:
-//   type: maas
-//   auth-types: [oauth1]
-//   endpoint: "http://garagemaas"
-//   skip-tls-verify: true`
-// ...
 //
+//	type: maas
+//	auth-types: [oauth1]
+//	endpoint: "http://garagemaas"
+//	skip-tls-verify: true`
+//
+// ...
 func ParseCloudMetadata(data []byte) (map[string]Cloud, error) {
 	var metadata cloudSet
 

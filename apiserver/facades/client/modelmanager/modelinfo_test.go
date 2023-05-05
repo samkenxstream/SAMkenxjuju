@@ -8,15 +8,17 @@ import (
 	"time"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
-	gitjujutesting "github.com/juju/testing"
+	jujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/version/v2"
 	gc "gopkg.in/check.v1"
+	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/apiserver/common"
+	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	"github.com/juju/juju/apiserver/facades/client/modelmanager"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
 	"github.com/juju/juju/caas"
@@ -27,12 +29,14 @@ import (
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/rpc/params"
+	"github.com/juju/juju/secrets/provider"
 	"github.com/juju/juju/state"
 	coretesting "github.com/juju/juju/testing"
 	jujuversion "github.com/juju/juju/version"
@@ -213,6 +217,7 @@ func (s *modelInfoSuite) expectedModelInfo(c *gc.C, credentialValidity *bool) pa
 		CloudRegion:        "some-region",
 		CloudCredentialTag: "cloudcred-some-cloud_bob_some-credential",
 		DefaultSeries:      jujuversion.DefaultSupportedLTS(),
+		DefaultBase:        jujuversion.DefaultSupportedLTSBase().String(),
 		Life:               life.Dying,
 		Status: params.EntityStatus{
 			Status: status.Destroying,
@@ -247,6 +252,17 @@ func (s *modelInfoSuite) expectedModelInfo(c *gc.C, credentialValidity *bool) pa
 			Id:        "2",
 			WantsVote: true,
 		}},
+		SecretBackends: []params.SecretBackendResult{{
+			Result: params.SecretBackend{
+				Name:        "myvault",
+				BackendType: "vault",
+				Config: map[string]interface{}{
+					"endpoint": "http://vault",
+				},
+			},
+			Status:     "active",
+			NumSecrets: 2,
+		}},
 		SLA: &params.ModelSLAInfo{
 			Level: "essential",
 			Owner: "user",
@@ -261,10 +277,13 @@ func (s *modelInfoSuite) expectedModelInfo(c *gc.C, credentialValidity *bool) pa
 }
 
 func (s *modelInfoSuite) TestModelInfo(c *gc.C) {
+	s.PatchValue(&commonsecrets.GetProvider, func(string) (provider.SecretBackendProvider, error) {
+		return mockSecretProvider{}, nil
+	})
 	info := s.getModelInfo(c, s.st.model.cfg.UUID())
 	_true := true
 	s.assertModelInfo(c, info, s.expectedModelInfo(c, &_true))
-	s.st.CheckCalls(c, []gitjujutesting.StubCall{
+	s.st.CheckCalls(c, []jujutesting.StubCall{
 		{"ControllerTag", nil},
 		{"GetBackend", []interface{}{s.st.model.cfg.UUID()}},
 		{"Model", nil},
@@ -272,6 +291,7 @@ func (s *modelInfoSuite) TestModelInfo(c *gc.C) {
 		{"AllMachines", nil},
 		{"ControllerNodes", nil},
 		{"HAPrimaryMachine", nil},
+		{"ControllerUUID", nil},
 		{"LatestMigration", nil},
 		{"CloudCredential", []interface{}{names.NewCloudCredentialTag("some-cloud/bob/some-credential")}},
 	})
@@ -279,7 +299,7 @@ func (s *modelInfoSuite) TestModelInfo(c *gc.C) {
 
 func (s *modelInfoSuite) assertModelInfo(c *gc.C, got, expected params.ModelInfo) {
 	c.Assert(got, jc.DeepEquals, expected)
-	s.st.model.CheckCalls(c, []gitjujutesting.StubCall{
+	s.st.model.CheckCalls(c, []jujutesting.StubCall{
 		{"Name", nil},
 		{"Type", nil},
 		{"UUID", nil},
@@ -597,7 +617,7 @@ type metricSender interface {
 }
 
 type mockCaasBroker struct {
-	gitjujutesting.Stub
+	jujutesting.Stub
 	caas.Broker
 
 	namespace string
@@ -612,7 +632,7 @@ func (m *mockCaasBroker) Create(context.ProviderCallContext, environs.CreatePara
 }
 
 type mockState struct {
-	gitjujutesting.Stub
+	jujutesting.Stub
 
 	environs.EnvironConfigGetter
 	common.APIHostPortsForAgentsGetter
@@ -667,8 +687,8 @@ func (st *mockState) ControllerModelTag() names.ModelTag {
 	return st.controllerModel.tag
 }
 
-func (st *mockState) Export() (description.Model, error) {
-	st.MethodCall(st, "Export")
+func (st *mockState) Export(leaders map[string]string) (description.Model, error) {
+	st.MethodCall(st, "Export", leaders)
 	return &fakeModelDescription{UUID: st.model.UUID()}, nil
 }
 
@@ -677,7 +697,7 @@ func (st *mockState) ExportPartial(cfg state.ExportConfig) (description.Model, e
 	if !cfg.IgnoreIncompleteModel {
 		return nil, errors.New("expected IgnoreIncompleteModel=true")
 	}
-	return st.Export()
+	return &fakeModelDescription{UUID: st.model.UUID()}, nil
 }
 
 func (st *mockState) AllModelUUIDs() ([]string, error) {
@@ -859,13 +879,13 @@ func (st *mockState) UserAccess(tag names.UserTag, target names.Tag) (permission
 	return permission.UserAccess{}, st.NextErr()
 }
 
-func (st *mockState) ModelSummariesForUser(user names.UserTag, all bool) ([]state.ModelSummary, error) {
-	st.MethodCall(st, "ModelSummariesForUser", user, all)
+func (st *mockState) ModelSummariesForUser(user names.UserTag, isSuperuser bool) ([]state.ModelSummary, error) {
+	st.MethodCall(st, "ModelSummariesForUser", user, isSuperuser)
 	return st.modelDetailsForUser()
 }
 
-func (st *mockState) ModelBasicInfoForUser(user names.UserTag) ([]state.ModelAccessInfo, error) {
-	st.MethodCall(st, "ModelBasicInfoForUser", user)
+func (st *mockState) ModelBasicInfoForUser(user names.UserTag, isSuperuser bool) ([]state.ModelAccessInfo, error) {
+	st.MethodCall(st, "ModelBasicInfoForUser", user, isSuperuser)
 	return []state.ModelAccessInfo{}, st.NextErr()
 }
 
@@ -995,6 +1015,68 @@ func (st *mockState) ConstraintsBySpaceName(spaceName string) ([]*state.Constrai
 	return nil, st.NextErr()
 }
 
+func (st *mockState) ListModelSecrets(all bool) (map[string]set.Strings, error) {
+	return map[string]set.Strings{
+		"backend-id": set.NewStrings("a", "b"),
+	}, nil
+}
+
+func (st *mockState) GetSecretBackendByID(id string) (*secrets.SecretBackend, error) {
+	if id != "backend-id" {
+		return nil, errors.NotFoundf("backend %q", id)
+	}
+	return &secrets.SecretBackend{
+		ID:          "backend-id",
+		Name:        "myvault",
+		BackendType: "vault",
+		Config: map[string]interface{}{
+			"endpoint": "http://vault",
+			"token":    "secret",
+		},
+	}, nil
+}
+
+func (st *mockState) ListSecretBackends() ([]*secrets.SecretBackend, error) {
+	return []*secrets.SecretBackend{{
+		ID:          "backend-id",
+		Name:        "myvault",
+		BackendType: "vault",
+		Config: map[string]interface{}{
+			"endpoint": "http://vault",
+			"token":    "secret",
+		},
+	}}, nil
+}
+
+type mockSecretProvider struct {
+	provider.ProviderConfig
+	provider.SecretBackendProvider
+}
+
+func (mockSecretProvider) Type() string {
+	return "vault"
+}
+
+func (mockSecretProvider) NewBackend(cfg *provider.ModelBackendConfig) (provider.SecretsBackend, error) {
+	return mockSecretBackend{}, nil
+}
+
+func (mockSecretProvider) ConfigSchema() environschema.Fields {
+	return environschema.Fields{
+		"token": {
+			Secret: true,
+		},
+	}
+}
+
+type mockSecretBackend struct {
+	provider.SecretsBackend
+}
+
+func (mockSecretBackend) Ping() error {
+	return nil
+}
+
 type mockBlock struct {
 	state.Block
 	t state.BlockType
@@ -1070,7 +1152,7 @@ func (m *mockMachine) Status() (status.StatusInfo, error) {
 }
 
 type mockModel struct {
-	gitjujutesting.Stub
+	jujutesting.Stub
 	owner               names.UserTag
 	life                state.Life
 	tag                 names.ModelTag
@@ -1231,11 +1313,10 @@ func (m *mockModel) SetCloudCredential(tag names.CloudCredentialTag) (bool, erro
 }
 
 type mockModelUser struct {
-	gitjujutesting.Stub
-	userName       string
-	displayName    string
-	lastConnection time.Time
-	access         permission.Access
+	jujutesting.Stub
+	userName    string
+	displayName string
+	access      permission.Access
 }
 
 type mockMigration struct {

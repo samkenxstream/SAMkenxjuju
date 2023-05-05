@@ -19,8 +19,7 @@ run_simplestream_metadata_prior_stable() {
 	major=$(echo "${previous_version}" | cut -d '.' -f 1)
 	minor=$(echo "${previous_version}" | cut -d '.' -f 2)
 
-	if snap info juju | grep -q "installed"
-	then
+	if snap info juju | grep -q "installed"; then
 		action="refresh"
 	else
 		action="install"
@@ -54,7 +53,7 @@ exec_simplestream_metadata() {
 	add_clean_func "remove_upgrade_metadata"
 
 	add_upgrade_tools "${version}"
-	juju metadata generate-agents \
+	juju metadata generate-agent-binaries \
 		--clean \
 		--prevent-fallback \
 		-d "./tests/suites/upgrade/streams/"
@@ -83,7 +82,7 @@ exec_simplestream_metadata() {
 	echo "${name}" >>"${TEST_DIR}/jujus"
 
 	juju add-model test-upgrade-"${test_name}"
-	juju deploy ./tests/suites/upgrade/charms/ubuntu
+	juju deploy ubuntu
 	wait_for "ubuntu" "$(idle_condition "ubuntu")"
 
 	local CURRENT UPDATED
@@ -125,7 +124,7 @@ exec_simplestream_metadata() {
 		fi
 	done
 
-	juju upgrade-charm ubuntu --path=./tests/suites/upgrade/charms/ubuntu
+	juju refresh ubuntu
 
 	sleep 10
 	wait_for "ubuntu" "$(idle_condition "ubuntu")"

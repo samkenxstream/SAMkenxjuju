@@ -8,14 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jujutesting "github.com/juju/testing"
@@ -30,6 +30,7 @@ import (
 	coremigration "github.com/juju/juju/core/migration"
 	resourcetesting "github.com/juju/juju/core/resources/testing"
 	"github.com/juju/juju/rpc/params"
+	coretesting "github.com/juju/juju/testing"
 	"github.com/juju/juju/tools"
 	jujuversion "github.com/juju/juju/version"
 )
@@ -42,10 +43,10 @@ var _ = gc.Suite(&ClientSuite{})
 
 func (s *ClientSuite) getClientAndStub(c *gc.C) (*migrationtarget.Client, *jujutesting.Stub) {
 	var stub jujutesting.Stub
-	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+	apiCaller := apitesting.BestVersionCaller{APICallerFunc: apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
 		return errors.New("boom")
-	})
+	}), BestVersion: 2}
 	client := migrationtarget.NewClient(apiCaller)
 	return client, &stub
 }
@@ -102,8 +103,26 @@ func (s *ClientSuite) TestActivate(c *gc.C) {
 	client, stub := s.getClientAndStub(c)
 
 	uuid := "fake"
-	err := client.Activate(uuid)
-	s.AssertModelCall(c, stub, names.NewModelTag(uuid), "Activate", err, true)
+	sourceInfo := coremigration.SourceControllerInfo{
+		ControllerTag:   coretesting.ControllerTag,
+		ControllerAlias: "mycontroller",
+		Addrs:           []string{"source-addr"},
+		CACert:          "cacert",
+	}
+	relatedModels := []string{"related-model-uuid"}
+	err := client.Activate(uuid, sourceInfo, relatedModels)
+	expectedArg := params.ActivateModelArgs{
+		ModelTag:        names.NewModelTag(uuid).String(),
+		ControllerTag:   coretesting.ControllerTag.String(),
+		ControllerAlias: "mycontroller",
+		SourceAPIAddrs:  []string{"source-addr"},
+		SourceCACert:    "cacert",
+		CrossModelUUIDs: relatedModels,
+	}
+	stub.CheckCalls(c, []jujutesting.StubCall{
+		{FuncName: "MigrationTarget.Activate", Args: []interface{}{"", expectedArg}},
+	})
+	c.Assert(err, gc.ErrorMatches, "boom")
 }
 
 func (s *ClientSuite) TestOpenLogTransferStream(c *gc.C) {
@@ -177,7 +196,7 @@ func (s *ClientSuite) TestCheckMachines(c *gc.C) {
 
 func (s *ClientSuite) TestUploadCharm(c *gc.C) {
 	const charmBody = "charming"
-	curl := charm.MustParseURL("cs:~user/foo-2")
+	curl := charm.MustParseURL("ch:foo-2")
 	doer := newFakeDoer(c, params.CharmsResponse{
 		CharmURL: curl.String(),
 	})
@@ -189,7 +208,7 @@ func (s *ClientSuite) TestUploadCharm(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(outCurl, gc.DeepEquals, curl)
 	c.Assert(doer.method, gc.Equals, "POST")
-	c.Assert(doer.url, gc.Equals, "/migrate/charms?arch=&name=foo&revision=2&schema=cs&series=&user=user")
+	c.Assert(doer.url, gc.Equals, "/migrate/charms?arch=&name=foo&revision=2&schema=ch&series=")
 	c.Assert(doer.body, gc.Equals, charmBody)
 }
 
@@ -207,7 +226,7 @@ func (s *ClientSuite) TestUploadCharmHubCharm(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(outCurl, gc.DeepEquals, curl)
 	c.Assert(doer.method, gc.Equals, "POST")
-	c.Assert(doer.url, gc.Equals, "/migrate/charms?arch=s390x&name=juju-qa-test&revision=15&schema=ch&series=bionic&user=")
+	c.Assert(doer.url, gc.Equals, "/migrate/charms?arch=s390x&name=juju-qa-test&revision=15&schema=ch&series=bionic")
 	c.Assert(doer.body, gc.Equals, charmBody)
 }
 
@@ -357,7 +376,7 @@ func newFakeDoer(c *gc.C, respBody interface{}) *fakeDoer {
 	c.Assert(err, jc.ErrorIsNil)
 	resp := &http.Response{
 		StatusCode: 200,
-		Body:       ioutil.NopCloser(bytes.NewReader(body)),
+		Body:       io.NopCloser(bytes.NewReader(body)),
 	}
 	resp.Header = make(http.Header)
 	resp.Header.Add("Content-Type", "application/json")
@@ -387,7 +406,7 @@ func (d *fakeDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	// ReadAll the body if it's found.
-	body, err := ioutil.ReadAll(req.Body)
+	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		panic(err)
 	}

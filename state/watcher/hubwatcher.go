@@ -10,9 +10,10 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/featureflag"
-	"github.com/juju/juju/feature"
 	"github.com/juju/worker/v3"
 	"gopkg.in/tomb.v2"
+
+	"github.com/juju/juju/feature"
 )
 
 var (
@@ -86,9 +87,6 @@ type HubWatcher struct {
 
 	// changeCount is the number of change events we've processed
 	changeCount uint64
-
-	// revnoMapBytes tracks how big our revnomap is in approximate bytes
-	revnoMapBytes uintptr
 }
 
 // HubWatcherConfig contains the configuration parameters required

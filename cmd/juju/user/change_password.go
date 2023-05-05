@@ -38,21 +38,14 @@ A controller administrator can also reset the password with a --reset option.
 This will invalidate any passwords that were previously set 
 and registration strings that were previously issued for a user.
 This option will issue a new registration string to be used with
-` + "`juju register`" + `.  
+` + "`juju register`" + `.`
 
-
-Examples:
-
+const userChangePasswordExamples = `
     juju change-user-password
     juju change-user-password bob
     juju change-user-password bob --reset
     juju change-user-password -c another-known-controller
     juju change-user-password bob --controller another-known-controller
-
-See also:
-    add-user
-    register
-
 `
 
 func NewChangePasswordCommand() cmd.Command {
@@ -71,6 +64,8 @@ type changePasswordCommand struct {
 	User  string
 	Reset bool
 
+	noPrompt bool
+
 	// Internally initialised and used during run
 	controllerName string
 	userTag        names.UserTag
@@ -79,15 +74,21 @@ type changePasswordCommand struct {
 
 func (c *changePasswordCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.BoolVar(&c.Reset, "reset", false, "Reset user password")
+	f.BoolVar(&c.noPrompt, "no-prompt", false, "don't prompt for password and just read a line from stdin")
 }
 
 // Info implements Command.Info.
 func (c *changePasswordCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "change-user-password",
-		Args:    "[username]",
-		Purpose: "Changes the password for the current or specified Juju user.",
-		Doc:     userChangePasswordDoc,
+		Name:     "change-user-password",
+		Args:     "[username]",
+		Purpose:  "Changes the password for the current or specified Juju user.",
+		Doc:      userChangePasswordDoc,
+		Examples: userChangePasswordExamples,
+		SeeAlso: []string{
+			"add-user",
+			"register",
+		},
 	})
 }
 
@@ -187,7 +188,7 @@ func (c *changePasswordCommand) resetUserPassword(ctx *cmd.Context) error {
 	}
 	ctx.Infof("Password for %q has been reset.", c.User)
 	base64RegistrationData, err := generateUserControllerAccessToken(
-		c.ControllerCommandBase,
+		&c.ControllerCommandBase,
 		c.userTag.Id(),
 		key,
 	)
@@ -199,9 +200,23 @@ func (c *changePasswordCommand) resetUserPassword(ctx *cmd.Context) error {
 }
 
 func (c *changePasswordCommand) updateUserPassword(ctx *cmd.Context) error {
-	newPassword, err := readAndConfirmPassword(ctx)
-	if err != nil {
-		return errors.Trace(err)
+	var err error
+	var newPassword string
+	if c.noPrompt {
+		fmt.Fprintln(ctx.Stderr, "reading password from stdin...")
+		newPassword, err = readLine(ctx.Stdin)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	} else {
+		newPassword, err = readAndConfirmPassword(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	if newPassword == "" {
+		return errors.Errorf("password cannot be empty")
 	}
 
 	if err := c.api.SetPassword(c.userTag.Id(), newPassword); err != nil {

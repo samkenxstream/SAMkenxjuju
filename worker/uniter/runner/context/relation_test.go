@@ -37,7 +37,7 @@ var _ = gc.Suite(&ContextRelationSuite{})
 
 func (s *ContextRelationSuite) SetUpTest(c *gc.C) {
 	s.JujuConnSuite.SetUpTest(c)
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	password, err := utils.RandomPassword()
 	c.Assert(err, jc.ErrorIsNil)
@@ -141,39 +141,6 @@ func (s *ContextRelationSuite) TestNonMemberCaching(c *gc.C) {
 	m, err = ctx.ReadSettings("u/1")
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m, gc.DeepEquals, expectSettings)
-}
-
-func (s *ContextRelationSuite) TestLocalSettings(c *gc.C) {
-	ctx := context.NewContextRelation(s.relUnit, nil)
-
-	// Change Settings...
-	node, err := ctx.Settings()
-	c.Assert(err, jc.ErrorIsNil)
-	expectSettings := node.Map()
-	expectOldMap := convertSettings(expectSettings)
-	node.Set("change", "exciting")
-
-	// ...and check it's not written to state.
-	settings, err := s.ru.ReadSettings("u/0")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(settings, gc.DeepEquals, expectOldMap)
-
-	// Write settings...
-	err = ctx.WriteSettings()
-	c.Assert(err, jc.ErrorIsNil)
-
-	// ...and check it was written to state.
-	settings, err = s.ru.ReadSettings("u/0")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(settings, gc.DeepEquals, map[string]interface{}{"change": "exciting"})
-}
-
-func convertSettings(settings params.Settings) map[string]interface{} {
-	result := make(map[string]interface{})
-	for k, v := range settings {
-		result[k] = v
-	}
-	return result
 }
 
 func convertMap(settingsMap map[string]interface{}) params.Settings {

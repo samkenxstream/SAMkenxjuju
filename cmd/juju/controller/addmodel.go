@@ -74,13 +74,12 @@ Model names may only contain lowercase letters, digits and hyphens, and
 may not start with a hyphen.
 
 To add a model, Juju requires a credential:
-
-    * if you have a default (or just one) credential defined at client
-     (i.e. in credentials.yaml), then juju will use that;
-    * if you have no default (and multiple) credentials defined at the client,
-     then you must specify one using --credential;
-    * as the admin user you can omit the credential,
-     and the credential used to bootstrap will be used.
+* if you have a default (or just one) credential defined at client
+  (i.e. in credentials.yaml), then juju will use that;
+* if you have no default (and multiple) credentials defined at the client,
+  then you must specify one using --credential;
+* as the admin user you can omit the credential,
+  and the credential used to bootstrap will be used.
 
 To add a credential for add-model, use one of the "juju add-credential" or
 "juju autoload-credentials" commands. These will add credentials
@@ -96,8 +95,12 @@ the same cloud/region as the controller model. If a region is specified
 without a cloud qualifier, then it is assumed to be in the same cloud
 as the controller model.
 
-Examples:
+When adding --config, the default-series key is deprecated in favour of
+default-base, e.g. ubuntu@22.04.
 
+`
+
+const addModelHelpExamples = `
     juju add-model mymodel
     juju add-model mymodel us-east-1
     juju add-model mymodel aws/us-east-1
@@ -107,10 +110,11 @@ Examples:
 
 func (c *addModelCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "add-model",
-		Args:    "<model name> [cloud|region|(cloud/region)]",
-		Purpose: "Adds a workload model.",
-		Doc:     strings.TrimSpace(addModelHelpDoc),
+		Name:     "add-model",
+		Args:     "<model name> [cloud|region|(cloud/region)]",
+		Purpose:  "Adds a workload model.",
+		Doc:      strings.TrimSpace(addModelHelpDoc),
+		Examples: addModelHelpExamples,
 	})
 }
 
@@ -224,7 +228,7 @@ func (c *addModelCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		logger.Errorf("%v", err)
 		ctx.Infof("Use \n* 'juju add-credential -c' to upload a credential to a controller or\n" +
-			"* 'juju autoload-credentials' to add credenitals from local files or\n" +
+			"* 'juju autoload-credentials' to add credentials from local files or\n" +
 			"* 'juju add-model --credential' to use a local credential.\n" +
 			"Use 'juju credentials' to list all available credentials.\n")
 		return cmd.ErrSilent
@@ -248,6 +252,11 @@ func (c *addModelCommand) Run(ctx *cmd.Context) error {
 	addModelClient := c.newAddModelAPI(root)
 	model, err := addModelClient.CreateModel(c.Name, modelOwner, cloudTag.Id(), cloudRegion, credentialTag, attrs)
 	if err != nil {
+		if strings.HasPrefix(errors.Cause(err).Error(), "getting credential") {
+			err = errors.NewNotFound(nil,
+				fmt.Sprintf("%v\nSee `juju add-credential %s --help` for instructions", err, cloudTag.Id()))
+			return errors.Trace(err)
+		}
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "add a model")
 		}
@@ -622,6 +631,11 @@ func (c *addModelCommand) getConfigValues(ctx *cmd.Context) (map[string]interfac
 	if err := common.FinalizeAuthorizedKeys(ctx, attrs); err != nil {
 		if errors.Cause(err) != common.ErrNoAuthorizedKeys {
 			return nil, errors.Trace(err)
+		}
+	}
+	if _, ok := attrs[config.DefaultSeriesKey]; ok {
+		if _, ok := attrs[config.DefaultBaseKey]; ok {
+			return nil, errors.Errorf("cannot specify both default-series and default-base")
 		}
 	}
 	return attrs, nil

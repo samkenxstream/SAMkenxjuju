@@ -38,6 +38,7 @@ func (s *ManifoldsSuite) TestManifoldNames(c *gc.C) {
 		"agent",
 		"api-config-watcher",
 		"api-caller",
+		"s3-caller",
 		"uniter",
 		"log-sender",
 
@@ -63,6 +64,7 @@ func (s *ManifoldsSuite) TestManifoldNames(c *gc.C) {
 
 		"caas-unit-termination-worker",
 		"caas-units-manager",
+		"secret-drain-worker",
 	}
 	keys := make([]string, 0, len(manifolds))
 	for k := range manifolds {
@@ -80,6 +82,9 @@ func (s *ManifoldsSuite) TestManifoldNamesColocatedController(c *gc.C) {
 		"agent",
 		"api-config-watcher",
 		"api-caller",
+		"s3-caller",
+		"caas-prober",
+		"probe-http-server",
 		"uniter",
 		"log-sender",
 
@@ -101,6 +106,7 @@ func (s *ManifoldsSuite) TestManifoldNamesColocatedController(c *gc.C) {
 
 		"caas-unit-termination-worker",
 		"caas-units-manager",
+		"secret-drain-worker",
 	}
 	keys := make([]string, 0, len(manifolds))
 	for k := range manifolds {
@@ -114,6 +120,7 @@ func (*ManifoldsSuite) TestMigrationGuards(c *gc.C) {
 		"agent",
 		"api-config-watcher",
 		"api-caller",
+		"s3-caller",
 		"caas-prober",
 		"probe-http-server",
 		"log-sender",
@@ -167,9 +174,15 @@ var expectedUnitManifoldsWithDependencies = map[string][]string{
 	"agent":              {},
 	"api-config-watcher": {"agent"},
 	"api-caller":         {"agent", "api-config-watcher"},
+	"s3-caller": {
+		"agent",
+		"api-caller",
+		"api-config-watcher",
+	},
 	"uniter": {
 		"agent",
 		"api-caller",
+		"s3-caller",
 		"api-config-watcher",
 		"charm-dir",
 		"hook-retry-strategy",
@@ -249,6 +262,7 @@ var expectedUnitManifoldsWithDependencies = map[string][]string{
 		"migration-fortress",
 		"migration-inactive-flag",
 		"probe-http-server",
+		"s3-caller",
 		"uniter",
 	},
 	"upgrade-steps-flag": {
@@ -277,11 +291,19 @@ var expectedUnitManifoldsWithDependencies = map[string][]string{
 		"leadership-tracker",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"s3-caller",
 		"uniter",
 	},
 	"caas-units-manager": {
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+	},
+	"secret-drain-worker": {
+		"agent",
+		"api-caller",
+		"api-config-watcher",
+		"migration-fortress",
+		"migration-inactive-flag",
 	},
 }

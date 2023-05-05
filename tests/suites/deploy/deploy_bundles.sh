@@ -22,10 +22,55 @@ run_deploy_bundle_overlay() {
 	bundle=./tests/suites/deploy/bundles/overlay_bundle.yaml
 	juju deploy ${bundle}
 
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0 0)"
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0 1)"
+
+	destroy_model "test-bundles-deploy-overlay"
+}
+
+run_deploy_bundle_overlay_with_image_id() {
+	echo
+
+	file="${TEST_DIR}/test-bundles-deploy-overlay-image-id.log"
+
+	ensure "test-bundles-deploy-overlay-image-id" "${file}"
+
+	bundle=./tests/suites/deploy/bundles/overlay_bundle_image_id.yaml
+	juju deploy ${bundle}
+
 	wait_for "ubuntu" "$(idle_condition "ubuntu" 0 0)"
 	wait_for "ubuntu" "$(idle_condition "ubuntu" 0 1)"
 
-	destroy_model "test-bundles-deploy-overlay"
+	destroy_model "test-bundles-deploy-overlay-image-id"
+}
+
+run_deploy_bundle_overlay_with_image_id_on_base_bundle() {
+	echo
+
+	file="${TEST_DIR}/test-bundles-deploy-overlay-image-id-on-base-bundle.log"
+
+	ensure "test-bundles-deploy-overlay-image-id-on-base-bundle" "${file}"
+
+	bundle=./tests/suites/deploy/bundles/overlay_bundle_image_id_on_base_bundle.yaml
+
+	got=$(juju deploy ${bundle} 2>&1 || true)
+	check_contains "${got}" "'image-id' constraint in a base bundle not supported"
+
+	destroy_model "test-bundles-deploy-overlay-image-id-on-base-bundle"
+}
+
+run_deploy_bundle_overlay_with_image_id_no_base() {
+	echo
+
+	file="${TEST_DIR}/test-bundles-deploy-overlay-image-id-no-base.log"
+
+	ensure "test-bundles-deploy-overlay-image-id-no-base" "${file}"
+
+	bundle=./tests/suites/deploy/bundles/overlay_bundle_image_id_no_base.yaml
+	got=$(juju deploy ${bundle} 2>&1 || true)
+	check_contains "${got}" 'base must be explicitly provided for "ubuntu" when image-id constraint is used'
+
+	destroy_model "test-bundles-deploy-overlay-image-id_no_base"
 }
 
 run_deploy_cmr_bundle() {
@@ -35,44 +80,137 @@ run_deploy_cmr_bundle() {
 
 	ensure "test-cmr-bundles-deploy" "${file}"
 
-	# mysql charm does not have stable channel, so we use edge channel
-	juju deploy mysql --channel=edge
-	wait_for "mysql" ".applications | keys[0]"
+	juju deploy easyrsa
+	wait_for "easyrsa" ".applications | keys[0]"
+	wait_for "active" '.applications["easyrsa"] | ."application-status".current'
 
-	juju offer mysql:db
+	juju offer easyrsa:client
 	juju add-model other
 
 	juju switch other
 
 	bundle=./tests/suites/deploy/bundles/cmr_bundles_test_deploy.yaml
 	sed "s/{{BOOTSTRAPPED_JUJU_CTRL_NAME}}/${BOOTSTRAPPED_JUJU_CTRL_NAME}/g" "${bundle}" >"${TEST_DIR}/cmr_bundles_test_deploy.yaml"
-	# TODO - upgrade this bundle to use focal
-	# Must wait until the wordpress charm is updated to support focal/jammy
-	# https://charmhub.io/wordpress
 	juju deploy "${TEST_DIR}/cmr_bundles_test_deploy.yaml"
 
-	wait_for "wordpress" "$(idle_condition "wordpress")"
+	wait_for "active" '.applications["etcd"] | ."application-status".current'
+	wait_for "etcd" "$(idle_condition "etcd")"
+	wait_for "active" "$(workload_status "etcd" 0).current"
 
-	destroy_model "test-cmr-bundles-deploy"
+	# TODO: no need to remove-relation before destroying model once we fixed(lp:1952221).
+	juju remove-relation etcd easyrsa
+
 	destroy_model "other"
+	destroy_model "test-cmr-bundles-deploy"
 }
 
-run_deploy_exported_bundle() {
+# run_deploy_exported_charmhub_bundle_with_fixed_revisions tests how juju deploys
+# a charmhub bundle that specifies revisions for its charms
+run_deploy_exported_charmhub_bundle_with_fixed_revisions() {
 	echo
 
-	file="${TEST_DIR}/test-export-bundles-deploy.log"
+	file="${TEST_DIR}/test-export-bundles-deploy-with-fixed-revisions.log"
 
-	ensure "test-export-bundles-deploy" "${file}"
+	ensure "test-export-bundles-deploy-with-fixed-revisions" "${file}"
 
 	bundle=./tests/suites/deploy/bundles/telegraf_bundle.yaml
 	juju deploy ${bundle}
 
+	echo "Make a copy of reference yaml"
+	cp ${bundle} "${TEST_DIR}/telegraf_bundle.yaml"
+	if [[ -n ${MODEL_ARCH:-} ]]; then
+		yq -i "
+			.machines.\"0\".constraints = \"arch=${MODEL_ARCH}\" |
+			.machines.\"1\".constraints = \"arch=${MODEL_ARCH}\"
+		" "${TEST_DIR}/telegraf_bundle.yaml"
+	else
+		yq -i . "${TEST_DIR}/telegraf_bundle.yaml"
+	fi
 	# no need to wait for the bundle to finish deploying to
 	# check the export.
-	juju export-bundle --filename "${TEST_DIR}/exported-bundle.yaml"
-	diff ${bundle} "${TEST_DIR}/exported-bundle.yaml"
+	echo "Compare export-bundle with telegraf_bundle"
+	juju export-bundle --filename "${TEST_DIR}/exported_bundle.yaml"
+	# Sort keys in both yaml files to get a fair comparison.
+	yq -i 'sort_keys(..)' "${TEST_DIR}/telegraf_bundle.yaml"
+	yq -i 'sort_keys(..)' "${TEST_DIR}/exported_bundle.yaml"
+	diff -u "${TEST_DIR}/telegraf_bundle.yaml" "${TEST_DIR}/exported_bundle.yaml"
 
-	destroy_model "test-export-bundles-deploy"
+	destroy_model "test-export-bundles-deploy-with-fixed-revisions"
+}
+
+# run_deploy_exported_charmhub_bundle_with_float_revisions checks how juju
+# deploys a charmhub bundle when the revisions are not pinned
+run_deploy_exported_charmhub_bundle_with_float_revisions() {
+	echo
+
+	file="${TEST_DIR}/test-export-bundles-deploy-with-float-revisions.log"
+
+	ensure "test-export-bundles-deploy-with-float-revisions" "${file}"
+	bundle=./tests/suites/deploy/bundles/telegraf_bundle_without_revisions.yaml
+	bundle_with_fake_revisions=./tests/suites/deploy/bundles/telegraf_bundle_with_fake_revisions.yaml
+	cp ${bundle} "${TEST_DIR}/telegraf_bundle_without_revisions.yaml"
+	cp ${bundle_with_fake_revisions} "${TEST_DIR}/telegraf_bundle_with_fake_revisions.yaml"
+	if [[ -n ${MODEL_ARCH:-} ]]; then
+		yq -i "
+      .applications.influxdb.constraints = \"arch=${MODEL_ARCH}\" |
+      .applications.juju-qa-test.constraints = \"arch=${MODEL_ARCH}\"
+    " "${TEST_DIR}/telegraf_bundle_without_revisions.yaml"
+		yq -i "
+      .applications.influxdb.constraints = \"arch=${MODEL_ARCH}\" |
+      .applications.juju-qa-test.constraints = \"arch=${MODEL_ARCH}\"
+    " "${TEST_DIR}/telegraf_bundle_with_fake_revisions.yaml"
+	fi
+
+	# Add correct PGP key for influxdb - workaround from
+	# https://bugs.launchpad.net/influxdb-charm/+bug/2004303
+	INFLUXDB_PGP=$(curl -s https://repos.influxdata.com/influxdata-archive_compat.key)
+	yq -i "
+		.applications.influxdb.options.install_keys = \"${INFLUXDB_PGP}\"
+	" "${TEST_DIR}/telegraf_bundle_without_revisions.yaml"
+	yq -i "
+		.applications.influxdb.options.install_keys = \"${INFLUXDB_PGP}\"
+	" "${TEST_DIR}/telegraf_bundle_with_fake_revisions.yaml"
+
+	juju deploy "${TEST_DIR}/telegraf_bundle_without_revisions.yaml"
+
+	echo "Create telegraf_bundle_without_revisions.yaml with known latest revisions from charmhub"
+	if [[ -n ${MODEL_ARCH:-} ]]; then
+		influxdb_rev=$(juju info influxdb --arch="${MODEL_ARCH}" --format json | jq -r '."channels"."latest"."stable"[0].revision')
+		telegraf_rev=$(juju info telegraf --arch="${MODEL_ARCH}" --format json | jq -r '."channels"."latest"."stable"[0].revision')
+		juju_qa_test_rev=$(juju info juju-qa-test --arch="${MODEL_ARCH}" --format json | jq -r '."channels"."latest"."candidate"[0].revision')
+	else
+		influxdb_rev=$(juju info influxdb --format json | jq -r '."channels"."latest"."stable"[0].revision')
+		telegraf_rev=$(juju info telegraf --format json | jq -r '."channels"."latest"."stable"[0].revision')
+		juju_qa_test_rev=$(juju info juju-qa-test --format json | jq -r '."channels"."latest"."candidate"[0].revision')
+	fi
+
+	echo "Make a copy of reference yaml and insert revisions in it"
+	cp "${TEST_DIR}/telegraf_bundle_with_fake_revisions.yaml" "${TEST_DIR}/telegraf_bundle_with_revisions.yaml"
+	yq -i "
+		.applications.influxdb.revision = ${influxdb_rev} |
+		.applications.telegraf.revision = ${telegraf_rev} |
+		.applications.juju-qa-test.revision = ${juju_qa_test_rev}
+	" "${TEST_DIR}/telegraf_bundle_with_revisions.yaml"
+
+	if [[ -n ${MODEL_ARCH:-} ]]; then
+		yq -i "
+			.applications.influxdb.constraints = \"arch=${MODEL_ARCH}\" |
+			.applications.juju-qa-test.constraints = \"arch=${MODEL_ARCH}\" |
+			.machines.\"0\".constraints = \"arch=${MODEL_ARCH}\" |
+			.machines.\"1\".constraints = \"arch=${MODEL_ARCH}\"
+		" "${TEST_DIR}/telegraf_bundle_with_revisions.yaml"
+	fi
+
+	# The model should be updated immediately, so we can export the bundle before
+	# everything is done deploying
+	echo "Compare export-bundle with telegraf_bundle_with_revisions"
+	juju export-bundle --filename "${TEST_DIR}/exported_bundle.yaml"
+	# Sort keys in both yaml files to get a fair comparison.
+	yq -i 'sort_keys(..)' "${TEST_DIR}/telegraf_bundle_with_revisions.yaml"
+	yq -i 'sort_keys(..)' "${TEST_DIR}/exported_bundle.yaml"
+	diff -u "${TEST_DIR}/telegraf_bundle_with_revisions.yaml" "${TEST_DIR}/exported_bundle.yaml"
+
+	destroy_model "test-export-bundles-deploy-with-float-revisions"
 }
 
 run_deploy_trusted_bundle() {
@@ -82,7 +220,6 @@ run_deploy_trusted_bundle() {
 
 	ensure "test-trusted-bundles-deploy" "${file}"
 
-	# TODO - upgrade the charm to support focal
 	bundle=./tests/suites/deploy/bundles/trusted_bundle.yaml
 	OUT=$(juju deploy ${bundle} 2>&1 || true)
 	echo "${OUT}" | check "repeat the deploy command with the --trust argument"
@@ -106,7 +243,7 @@ run_deploy_charmhub_bundle() {
 	juju deploy "${bundle}"
 
 	wait_for "juju-qa-test" "$(charm_channel "juju-qa-test" "2.0/stable")"
-	wait_for "juju-qa-test-focal" "$(charm_channel "juju-qa-test-focal" "candidate")"
+	wait_for "juju-qa-test-focal" "$(charm_channel "juju-qa-test-focal" "latest/candidate")"
 	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test")"
 	wait_for "juju-qa-test-focal" "$(idle_condition "juju-qa-test-focal" 1)"
 	wait_for "ntp" "$(idle_subordinate_condition "ntp" "juju-qa-test")"
@@ -159,7 +296,6 @@ run_deploy_lxd_profile_bundle() {
 	ensure "${model_name}" "${file}"
 
 	bundle=./tests/suites/deploy/bundles/lxd-profile-bundle.yaml
-	# TODO - upgrade the charm to support focal
 	juju deploy "${bundle}"
 
 	# 8 units of lxd-profile
@@ -182,6 +318,30 @@ run_deploy_lxd_profile_bundle() {
 	destroy_model "${model_name}"
 }
 
+# run_deploy_multi_app_single_charm_bundle:
+# LP 1999060 found an issue in async charm download when a bundle
+# uses the same charm for multiple applications. This is common in
+# many Canonical bundles such a full openstack.
+run_deploy_multi_app_single_charm_bundle() {
+	echo
+
+	model_name="test-deploy-multi-app-single-charm-bundle"
+	file="${TEST_DIR}/${model_name}.log"
+
+	ensure "${model_name}" "${file}"
+
+	bundle=./tests/suites/deploy/bundles/multi-app-single-charm.yaml
+	juju deploy "${bundle}"
+
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0)"
+	wait_for "juju-qa-test-dup" "$(idle_condition "juju-qa-test-dup" 1)"
+
+	# ensure juju-qa-test-dup can refresh and us it's resources.
+	juju refresh juju-qa-test-dup
+
+	destroy_model "${model_name}"
+}
+
 test_deploy_bundles() {
 	if [ "$(skip 'test_deploy_bundles')" ]; then
 		echo "==> TEST SKIPPED: deploy bundles"
@@ -195,9 +355,14 @@ test_deploy_bundles() {
 
 		run "run_deploy_bundle"
 		run "run_deploy_bundle_overlay"
-		run "run_deploy_exported_bundle"
+		run "run_deploy_bundle_overlay_with_image_id"
+		run "run_deploy_bundle_overlay_with_image_id_on_base_bundle"
+		run "run_deploy_bundle_overlay_with_image_id_no_base"
+		run "run_deploy_exported_charmhub_bundle_with_fixed_revisions"
+		run "run_deploy_exported_charmhub_bundle_with_float_revisions"
 		run "run_deploy_trusted_bundle"
 		run "run_deploy_charmhub_bundle"
+		run "run_deploy_multi_app_single_charm_bundle"
 
 		case "${BOOTSTRAP_PROVIDER:-}" in
 		"lxd" | "localhost")

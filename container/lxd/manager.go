@@ -20,6 +20,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/lxdprofile"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
@@ -35,7 +36,8 @@ var (
 const lxdDefaultProfileName = "default"
 
 type containerManager struct {
-	server *Server
+	newServer func() (*Server, error)
+	server    *Server
 
 	modelUUID        string
 	namespace        instance.Namespace
@@ -45,7 +47,8 @@ type containerManager struct {
 	imageStream      string
 	imageMutex       sync.Mutex
 
-	profileMutex sync.Mutex
+	serverInitMutex sync.Mutex
+	profileMutex    sync.Mutex
 }
 
 // containerManager implements container.Manager.
@@ -53,9 +56,7 @@ var _ container.Manager = (*containerManager)(nil)
 
 // NewContainerManager creates the entity that knows how to create and manage
 // LXD containers.
-// TODO(jam): This needs to grow support for things like LXC's ImageURLGetter
-// functionality.
-func NewContainerManager(cfg container.ManagerConfig, svr *Server) (container.Manager, error) {
+func NewContainerManager(cfg container.ManagerConfig, newServer func() (*Server, error)) (container.Manager, error) {
 	modelUUID := cfg.PopValue(container.ConfigModelUUID)
 	if modelUUID == "" {
 		return nil, errors.Errorf("model UUID is required")
@@ -80,7 +81,7 @@ func NewContainerManager(cfg container.ManagerConfig, svr *Server) (container.Ma
 
 	cfg.WarnAboutUnused()
 	return &containerManager{
-		server:           svr,
+		newServer:        newServer,
 		modelUUID:        modelUUID,
 		namespace:        namespace,
 		availabilityZone: availabilityZone,
@@ -96,6 +97,10 @@ func (m *containerManager) Namespace() instance.Namespace {
 
 // DestroyContainer implements container.Manager.
 func (m *containerManager) DestroyContainer(id instance.Id) error {
+	if err := m.ensureInitialized(); err != nil {
+		return errors.Trace(err)
+	}
+
 	return errors.Trace(m.server.RemoveContainer(string(id)))
 }
 
@@ -103,13 +108,17 @@ func (m *containerManager) DestroyContainer(id instance.Id) error {
 func (m *containerManager) CreateContainer(
 	instanceConfig *instancecfg.InstanceConfig,
 	cons constraints.Value,
-	series string,
+	base series.Base,
 	networkConfig *container.NetworkConfig,
 	_ *container.StorageConfig,
 	callback environs.StatusCallbackFunc,
 ) (instances.Instance, *instance.HardwareCharacteristics, error) {
+	if err := m.ensureInitialized(); err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
 	_ = callback(status.Provisioning, "Creating container spec", nil)
-	spec, err := m.getContainerSpec(instanceConfig, cons, series, networkConfig, callback)
+	spec, err := m.getContainerSpec(instanceConfig, cons, base, networkConfig, callback)
 	if err != nil {
 		_ = callback(status.ProvisioningError, fmt.Sprintf("Creating container spec: %v", err), nil)
 		return nil, nil, errors.Trace(err)
@@ -123,12 +132,24 @@ func (m *containerManager) CreateContainer(
 	}
 	_ = callback(status.Running, "Container started", nil)
 
-	return &lxdInstance{c.Name, m.server.ContainerServer},
-		&instance.HardwareCharacteristics{AvailabilityZone: &m.availabilityZone}, nil
+	virtType := string(spec.VirtType)
+	hardware := &instance.HardwareCharacteristics{
+		AvailabilityZone: &m.availabilityZone,
+		VirtType:         &virtType,
+	}
+
+	return &lxdInstance{
+		id:     c.Name,
+		server: m.server.InstanceServer,
+	}, hardware, nil
 }
 
 // ListContainers implements container.Manager.
 func (m *containerManager) ListContainers() ([]instances.Instance, error) {
+	if err := m.ensureInitialized(); err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	containers, err := m.server.FilterContainers(m.namespace.Prefix())
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -136,14 +157,33 @@ func (m *containerManager) ListContainers() ([]instances.Instance, error) {
 
 	var result []instances.Instance
 	for _, i := range containers {
-		result = append(result, &lxdInstance{i.Name, m.server.ContainerServer})
+		result = append(result, &lxdInstance{i.Name, m.server.InstanceServer})
 	}
 	return result, nil
 }
 
+// ensureInitialized checks to see if we have already established
+// the local LXD server. This is done lazily so that LXD daemons are
+// not active until we need to provision containers.
+// NOTE: It must be called at the top of public methods that connect
+// to the server.
+func (m *containerManager) ensureInitialized() error {
+	m.serverInitMutex.Lock()
+	defer m.serverInitMutex.Unlock()
+
+	if m.server != nil {
+		return nil
+	}
+
+	var err error
+	m.server, err = m.newServer()
+	return errors.Annotate(err, "initializing local LXD server")
+}
+
 // IsInitialized implements container.Manager.
+// It returns true if we can find a LXD socket on this host.
 func (m *containerManager) IsInitialized() bool {
-	return m.server != nil
+	return SocketPath(IsUnixSocket) != ""
 }
 
 // getContainerSpec generates a spec for creating a new container.
@@ -152,7 +192,7 @@ func (m *containerManager) IsInitialized() bool {
 func (m *containerManager) getContainerSpec(
 	instanceConfig *instancecfg.InstanceConfig,
 	cons constraints.Value,
-	series string,
+	base series.Base,
 	networkConfig *container.NetworkConfig,
 	callback environs.StatusCallbackFunc,
 ) (ContainerSpec, error) {
@@ -161,12 +201,21 @@ func (m *containerManager) getContainerSpec(
 		return ContainerSpec{}, errors.Trace(err)
 	}
 
+	virtType := api.InstanceTypeContainer
+	if cons.HasVirtType() {
+		v, err := instance.ParseVirtType(*cons.VirtType)
+		if err != nil {
+			return ContainerSpec{}, errors.Trace(err)
+		}
+		virtType = v
+	}
+
 	// Lock around finding an image.
 	// The provisioner works concurrently to create containers.
 	// If an image needs to be copied from a remote, we don't want many
 	// goroutines attempting to do it at once.
 	m.imageMutex.Lock()
-	found, err := m.server.FindImage(series, jujuarch.HostArch(), imageSources, true, callback)
+	found, err := m.server.FindImage(base, jujuarch.HostArch(), virtType, imageSources, true, callback)
 	m.imageMutex.Unlock()
 	if err != nil {
 		return ContainerSpec{}, errors.Annotatef(err, "acquiring LXD image")
@@ -213,9 +262,14 @@ func (m *containerManager) getContainerSpec(
 		networkConfig.Interfaces = interfaces
 	}
 
+	cloudConfig, err := cloudinit.New(instanceConfig.Base.OS, cloudinit.WithDisableNetplanMACMatch)
+	if err != nil {
+		return ContainerSpec{}, errors.Trace(err)
+	}
+
 	// CloudInitUserData creates our own ENI/netplan.
 	// We need to disable cloud-init networking to make it work.
-	userData, err := containerinit.CloudInitUserData(instanceConfig, networkConfig)
+	userData, err := containerinit.CloudInitUserData(cloudConfig, instanceConfig, networkConfig)
 	if err != nil {
 		return ContainerSpec{}, errors.Trace(err)
 	}
@@ -300,6 +354,10 @@ func (m *containerManager) networkDevicesFromConfig(netConfig *container.Network
 // When provisioner_task processProfileChanges() is removed,
 // maybe change to take an lxdprofile.ProfilePost as an arg.
 func (m *containerManager) MaybeWriteLXDProfile(pName string, put lxdprofile.Profile) error {
+	if err := m.ensureInitialized(); err != nil {
+		return errors.Trace(err)
+	}
+
 	m.profileMutex.Lock()
 	defer m.profileMutex.Unlock()
 	hasProfile, err := m.server.HasProfile(pName)
@@ -346,11 +404,21 @@ func (m *containerManager) verifyProfile(pName string) error {
 
 // LXDProfileNames implements container.LXDProfileManager
 func (m *containerManager) LXDProfileNames(containerName string) ([]string, error) {
+	if err := m.ensureInitialized(); err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	return m.server.GetContainerProfiles(containerName)
 }
 
 // AssignLXDProfiles implements environs.LXDProfiler.
-func (m *containerManager) AssignLXDProfiles(instID string, profilesNames []string, profilePosts []lxdprofile.ProfilePost) (current []string, err error) {
+func (m *containerManager) AssignLXDProfiles(
+	instID string, profilesNames []string, profilePosts []lxdprofile.ProfilePost,
+) (current []string, err error) {
+	if err := m.ensureInitialized(); err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	report := func(err error) ([]string, error) {
 		// Always return the current profiles assigned to the instance.
 		currentProfiles, err2 := m.LXDProfileNames(instID)

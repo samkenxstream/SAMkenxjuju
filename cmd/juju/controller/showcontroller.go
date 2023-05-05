@@ -32,12 +32,12 @@ var usageShowControllerDetails = `
 Shows extended information about a controller(s) as well as related models
 and user login details.
 
-Examples:
+`[1:]
+
+const usageShowControllerExamples = `
     juju show-controller
     juju show-controller aws google
-    
-See also: 
-    controllers`[1:]
+`
 
 type showControllerCommand struct {
 	modelcmd.CommandBase
@@ -68,10 +68,14 @@ func (c *showControllerCommand) Init(args []string) (err error) {
 // Info implements Command.Info
 func (c *showControllerCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "show-controller",
-		Args:    "[<controller name> ...]",
-		Purpose: usageShowControllerSummary,
-		Doc:     usageShowControllerDetails,
+		Name:     "show-controller",
+		Args:     "[<controller name> ...]",
+		Purpose:  usageShowControllerSummary,
+		Doc:      usageShowControllerDetails,
+		Examples: usageShowControllerExamples,
+		SeeAlso: []string{
+			"controllers",
+		},
 	})
 }
 
@@ -316,8 +320,8 @@ type ControllerDetails struct {
 
 	// AgentVersion is the version of the agent running on this controller.
 	// AgentVersion need not always exist so we omitempty here. This struct is
-	// used in both list-controller and show-controller. show-controller
-	// displays the agent version where list-controller does not.
+	// used in both controllers and show-controller. show-controller
+	// displays the agent version where controllers does not.
 	AgentVersion string `yaml:"agent-version,omitempty" json:"agent-version,omitempty"`
 
 	// AgentGitCommit is the git commit hash used to build the controller binary.

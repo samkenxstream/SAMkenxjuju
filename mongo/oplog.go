@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
 	"gopkg.in/tomb.v2"
 )
 
@@ -102,11 +102,11 @@ type oplogSession struct {
 // NewOplogSession defines a new OplogSession.
 //
 // Arguments:
-// - "collection" is the collection to use for the oplog. Typically this
-//   would be the result of GetOpLog.
-// - "query" can be used to limit the returned oplog entries. A
-//    typical filter would limit based on ns ("<database>.<collection>")
-//    and o (object).
+//   - "collection" is the collection to use for the oplog. Typically this
+//     would be the result of GetOpLog.
+//   - "query" can be used to limit the returned oplog entries. A
+//     typical filter would limit based on ns ("<database>.<collection>")
+//     and o (object).
 //
 // The returned session should be `Close`d when it's no longer needed.
 func NewOplogSession(collection *mgo.Collection, query bson.D) *oplogSession {
@@ -149,11 +149,11 @@ func (s *oplogSession) Close() {
 // NewOplogTailer returns a new OplogTailer.
 //
 // Arguments:
-// - "session" determines the collection and filtering on records that
-//    should be returned.
-// - "initialTs" sets the operation timestamp to start returning
-//    results from. This can be used to avoid an expensive initial search
-//    through the oplog when the tailer first starts.
+//   - "session" determines the collection and filtering on records that
+//     should be returned.
+//   - "initialTs" sets the operation timestamp to start returning
+//     results from. This can be used to avoid an expensive initial search
+//     through the oplog when the tailer first starts.
 //
 // Remember to call Stop on the returned OplogTailer when it is no
 // longer needed.

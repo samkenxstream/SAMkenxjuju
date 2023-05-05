@@ -33,7 +33,6 @@ type pebblePoller struct {
 	tomb            tomb.Tomb
 	newPebbleClient NewPebbleClientFunc
 
-	containerNames    []string
 	workloadEventChan chan string
 	workloadEvents    container.WorkloadEvents
 
@@ -123,9 +122,12 @@ func (p *pebblePoller) poll(containerName string) error {
 	lastBootID, _ := p.pebbleBootIDs[containerName]
 	p.mut.Unlock()
 	if lastBootID == info.BootID {
+		// Boot ID is the same as last time, so it's normal poll and no
+		// pebble-ready event is needed.
 		return nil
 	}
 
+	// We've just started up, so send a pebble-ready event.
 	errChan := make(chan error, 1)
 	eid := p.workloadEvents.AddWorkloadEvent(container.WorkloadEvent{
 		Type:         container.ReadyEvent,
@@ -144,7 +146,7 @@ func (p *pebblePoller) poll(containerName string) error {
 	select {
 	case err := <-errChan:
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Annotate(err, "failed to send pebble-ready event")
 		}
 	case <-p.tomb.Dying():
 		return tomb.ErrDying

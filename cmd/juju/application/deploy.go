@@ -7,14 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/names/v4"
 	"github.com/juju/version/v2"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
@@ -27,7 +26,6 @@ import (
 	"github.com/juju/juju/api/client/modelconfig"
 	"github.com/juju/juju/api/client/spaces"
 	commoncharm "github.com/juju/juju/api/common/charm"
-	"github.com/juju/juju/api/controller/controller"
 	"github.com/juju/juju/charmhub"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/application/deployer"
@@ -48,8 +46,6 @@ import (
 type SpacesAPI interface {
 	ListSpaces() ([]apiparams.Space, error)
 }
-
-var supportedJujuSeries = series.WorkloadSeries
 
 type CharmsAPI interface {
 	store.CharmsAPI
@@ -87,14 +83,6 @@ type annotationsClient struct {
 	*annotations.Client
 }
 
-type plansClient struct {
-	planURL string
-}
-
-func (c *plansClient) PlanURL() string {
-	return c.planURL
-}
-
 type offerClient struct {
 	*applicationoffers.Client
 }
@@ -109,7 +97,6 @@ type deployAPIAdapter struct {
 	*applicationClient
 	*modelConfigClient
 	*annotationsClient
-	*plansClient
 	*offerClient
 	*spacesClient
 	*machineManagerClient
@@ -150,10 +137,6 @@ func (a *deployAPIAdapter) GetModelConstraints() (constraints.Value, error) {
 
 func (a *deployAPIAdapter) AddCharm(curl *charm.URL, origin commoncharm.Origin, force bool) (commoncharm.Origin, error) {
 	return a.charmsClient.AddCharm(curl, origin, force)
-}
-
-func (a *deployAPIAdapter) AddCharmWithAuthorization(curl *charm.URL, origin commoncharm.Origin, mac *macaroon.Macaroon, force bool) (commoncharm.Origin, error) {
-	return a.charmsClient.AddCharmWithAuthorization(curl, origin, mac, force)
 }
 
 type modelGetter interface {
@@ -197,21 +180,6 @@ func newDeployCommand() *DeployCommand {
 	deployCmd := &DeployCommand{
 		Steps: deployer.Steps(),
 	}
-	deployCmd.NewCharmRepo = func() (*store.CharmStoreAdaptor, error) {
-		controllerAPIRoot, err := deployCmd.newControllerAPIRoot()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		url, err := getCharmStoreAPIURL(controllerAPIRoot)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		bakeryClient, err := deployCmd.BakeryClient()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		return store.NewCharmStoreAdaptor(bakeryClient, url), nil
-	}
 	deployCmd.NewModelConfigAPI = func(api base.APICallCloser) ModelConfigGetter {
 		return modelconfig.NewClient(api)
 	}
@@ -243,10 +211,6 @@ func newDeployCommand() *DeployCommand {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		mURL, err := deployCmd.getMeteringAPIURL(controllerAPIRoot)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
 		return &deployAPIAdapter{
 			Connection:           apiRoot,
 			legacyClient:         &apiClient{Client: apiclient.NewClient(apiRoot)},
@@ -255,7 +219,6 @@ func newDeployCommand() *DeployCommand {
 			machineManagerClient: &machineManagerClient{Client: machinemanager.NewClient(apiRoot)},
 			modelConfigClient:    &modelConfigClient{Client: modelconfig.NewClient(apiRoot)},
 			annotationsClient:    &annotationsClient{Client: annotations.NewClient(apiRoot)},
-			plansClient:          &plansClient{planURL: mURL},
 			offerClient:          &offerClient{Client: applicationoffers.NewClient(controllerAPIRoot)},
 			spacesClient:         &spacesClient{API: spaces.NewAPI(apiRoot)},
 		}, nil
@@ -268,8 +231,8 @@ func newDeployCommand() *DeployCommand {
 		return applicationoffers.NewClient(root), nil
 	}
 	deployCmd.NewDeployerFactory = deployer.NewDeployerFactory
-	deployCmd.NewResolver = func(charmsAPI store.CharmsAPI, charmRepoFn store.CharmStoreRepoFunc, downloadClientFn store.DownloadBundleClientFunc) deployer.Resolver {
-		return store.NewCharmAdaptor(charmsAPI, charmRepoFn, downloadClientFn)
+	deployCmd.NewResolver = func(charmsAPI store.CharmsAPI, downloadClientFn store.DownloadBundleClientFunc) deployer.Resolver {
+		return store.NewCharmAdaptor(charmsAPI, downloadClientFn)
 	}
 	return deployCmd
 }
@@ -317,7 +280,11 @@ type DeployCommand struct {
 	Revision int
 
 	// Series is the series of the charm to deploy.
+	// DEPRECATED: Use --base instead.
 	Series string
+
+	// Base is the base of the charm to deploy.
+	Base string
 
 	// Force is used to allow a charm/bundle to be deployed onto a machine
 	// running an unsupported series.
@@ -369,9 +336,6 @@ type DeployCommand struct {
 	// NewDeployAPI stores a function which returns a new deploy client.
 	NewDeployAPI func() (deployer.DeployerAPI, error)
 
-	// NewCharmRepo stores a function which returns a charm store client.
-	NewCharmRepo func() (*store.CharmStoreAdaptor, error)
-
 	// NewDownloadClient stores a function for getting a charm/bundle.
 	NewDownloadClient func() (store.DownloadBundleClient, error)
 
@@ -383,7 +347,7 @@ type DeployCommand struct {
 	NewCharmsAPI func(caller base.APICallCloser) CharmsAPI
 
 	// NewResolver stores a function which returns a charm adaptor.
-	NewResolver func(store.CharmsAPI, store.CharmStoreRepoFunc, store.DownloadBundleClientFunc) deployer.Resolver
+	NewResolver func(store.CharmsAPI, store.DownloadBundleClientFunc) deployer.Resolver
 
 	// NewDeployerFactory stores a function which returns a deployer factory.
 	NewDeployerFactory func(dep deployer.DeployerDependencies) deployer.DeployerFactory
@@ -412,31 +376,31 @@ type DeployCommand struct {
 }
 
 const deployDoc = `
-A charm or bundle can be referred to by its simple name and a series, revision,
+A charm or bundle can be referred to by its simple name and a base, revision,
 or channel can optionally be specified:
 
   juju deploy postgresql
-  juju deploy ch:postgresql --series bionic
+  juju deploy ch:postgresql --base ubuntu@22.04
   juju deploy ch:postgresql --channel edge
   juju deploy ch:ubuntu --revision 17 --channel edge
 
-All the above deployments use remote charms found in Charm Hub, denoted by the
-'ch:' prefix.  Remote charms with no prefix will be deployed from Charm Hub.
+All the above deployments use remote charms found in Charmhub, denoted by the
+'ch:' prefix.  Remote charms with no prefix will be deployed from Charmhub.
 
 If a channel is specified, it will be used as the source for looking up the
-charm or bundle from Charm Hub. When used in a bundle deployment context,
+charm or bundle from Charmhub. When used in a bundle deployment context,
 the specified channel is only used for retrieving the bundle and is ignored when
 looking up the charms referenced by the bundle. However, each charm within a
 bundle is allowed to explicitly specify the channel used to look it up.
 
-If a revision is specified, a channel must also be specified for Charm Hub charms
+If a revision is specified, a channel must also be specified for Charmhub charms
 and bundles.  The charm will be deployed with revision.  The channel will be used
 when refreshing the application in the future.
 
 A local charm may be deployed by giving the path to its directory:
 
   juju deploy /path/to/charm
-  juju deploy /path/to/charm --series bionic
+  juju deploy /path/to/charm ---base ubuntu@22.04
 
 You will need to be explicit if there is an ambiguity between a local and a
 remote charm:
@@ -444,31 +408,24 @@ remote charm:
   juju deploy ./pig
   juju deploy ch:pig
 
-An error is emitted if the determined series is not supported by the charm. Use
-the '--force' option to override this check:
-
-  juju deploy charm --series bionic --force
-
 A bundle can be expressed similarly to a charm:
 
   juju deploy mediawiki-single
-  juju deploy mediawiki-single --series focal
+  juju deploy mediawiki-single --base ubuntu@22.04
   juju deploy ch:mediawiki-single
 
 A local bundle may be deployed by specifying the path to its YAML file:
 
   juju deploy /path/to/bundle.yaml
 
-The final charm/machine series is determined using an order of precedence (most
+The final charm/machine base is determined using an order of precedence (most
 preferred to least):
 
- - the '--series' command option
- - the series stated in the charm URL
+ - the '--base' command option
  - for a bundle, the series stated in each charm URL (in the bundle file)
  - for a bundle, the series given at the top level (in the bundle file)
- - the 'default-series' model key
- - the top-most series specified in the charm's metadata file
-   (this sets the charm's 'preferred series' in the Charm Store)
+ - the 'default-base' model key
+ - the first base specified in the charm's manifest file
 
 An 'application name' provides an alternate name for the application. It works
 only for charms; it is silently ignored for bundles (although the same can be
@@ -587,9 +544,9 @@ the '--force' option to bypass this check. Doing so is not recommended as it
 can lead to unexpected behaviour.
 
 Further reading: https://juju.is/docs/olm/manage-applications
+`
 
-Examples:
-
+const deployExamples = `
 Deploy to a new machine:
 
     juju deploy apache2
@@ -644,24 +601,25 @@ attribute of 'gpu=nvidia-tesla-p100':
 
     juju deploy mycharm --device \
        twingpu=2,nvidia.com/gpu,gpu=nvidia-tesla-p100
-
-See also:
-    add-relation
-    add-unit
-    config
-    expose
-    get-constraints
-    refresh
-    set-constraints
-    spaces
 `
 
 func (c *DeployCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "deploy",
-		Args:    "<charm or bundle> [<application name>]",
-		Purpose: "Deploys a new application or bundle.",
-		Doc:     deployDoc,
+		Name:     "deploy",
+		Args:     "<charm or bundle> [<application name>]",
+		Purpose:  "Deploys a new application or bundle.",
+		Doc:      deployDoc,
+		Examples: deployExamples,
+		SeeAlso: []string{
+			"integrate",
+			"add-unit",
+			"config",
+			"expose",
+			"constraints",
+			"refresh",
+			"set-constraints",
+			"spaces",
+		},
 	})
 }
 
@@ -671,17 +629,18 @@ func (c *DeployCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.UnitCommandBase.SetFlags(f)
 	c.ModelCommandBase.SetFlags(f)
 	f.IntVar(&c.NumUnits, "n", 1, "Number of application units to deploy for principal charms")
-	f.StringVar(&c.channelStr, "channel", "", "Channel to use when deploying a charm or bundle from the charm store, or charm hub")
+	f.StringVar(&c.channelStr, "channel", "", "Channel to use when deploying a charm or bundle from Charmhub")
 	f.Var(&c.ConfigOptions, "config", "Either a path to yaml-formatted application config file or a key=value pair ")
 
 	f.BoolVar(&c.Trust, "trust", false, "Allows charm to run hooks that require access credentials")
 
 	f.Var(cmd.NewAppendStringsValue(&c.BundleOverlayFile), "overlay", "Bundles to overlay on the primary bundle, applied in order")
 	f.StringVar(&c.ConstraintsStr, "constraints", "", "Set application constraints")
-	f.StringVar(&c.Series, "series", "", "The series on which to deploy")
+	f.StringVar(&c.Series, "series", "", "The series on which to deploy. DEPRECATED: use --base")
+	f.StringVar(&c.Base, "base", "", "The base on which to deploy")
 	f.IntVar(&c.Revision, "revision", -1, "The revision to deploy")
 	f.BoolVar(&c.DryRun, "dry-run", false, "Just show what the deploy would do")
-	f.BoolVar(&c.Force, "force", false, "Allow a charm/bundle to be deployed which bypasses checks such as supported series or LXD profile allow list")
+	f.BoolVar(&c.Force, "force", false, "Allow a charm/bundle to be deployed which bypasses checks such as supported base or LXD profile allow list")
 	f.Var(storageFlag{&c.Storage, &c.BundleStorage}, "storage", "Charm storage constraints")
 	f.Var(devicesFlag{&c.Devices, &c.BundleDevices}, "device", "Charm device constraints")
 	f.Var(stringMap{&c.Resources}, "resource", "Resource to be uploaded to the controller")
@@ -696,6 +655,9 @@ func (c *DeployCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Init validates the flags.
 func (c *DeployCommand) Init(args []string) error {
+	if c.Base != "" && c.Series != "" {
+		return errors.New("--series and --base cannot be specified together")
+	}
 	// NOTE: For deploying a charm with the revision flag, a channel is
 	// also required. It's required to ensure that juju knows which channel
 	// should be used for refreshing/upgrading the charm in the future.However
@@ -703,7 +665,7 @@ func (c *DeployCommand) Init(args []string) error {
 	// a bundle, only the components. These flags will be verified in the
 	// GetDeployer instead.
 	if err := c.validateStorageByModelType(); err != nil {
-		if !errors.IsNotFound(err) {
+		if !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 		// It is possible that we will not be able to get model type to validate with.
@@ -820,6 +782,31 @@ func parseMachineMap(value string) (bool, map[string]string, error) {
 
 // Run executes a deploy command with a given context.
 func (c *DeployCommand) Run(ctx *cmd.Context) error {
+	var (
+		base series.Base
+		err  error
+	)
+	// Note: we validated that both series and base cannot be specified in
+	// Init(), so it's safe to assume that only one of them is set here.
+	if c.Series != "" {
+		if c.Series == "kubernetes" {
+			ctx.Warningf("using kubernetes as a series flag is deprecated, use --base instead")
+			base = series.LegacyKubernetesBase()
+		} else {
+			ctx.Warningf("series flag is deprecated, use --base instead")
+			if base, err = series.GetBaseFromSeries(c.Series); err != nil {
+				return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
+			}
+		}
+		c.Base = base.String()
+		c.Series = ""
+	}
+	if c.Base != "" {
+		if base, err = series.ParseBaseFromString(c.Base); err != nil {
+			return errors.Trace(err)
+		}
+	}
+
 	if c.unknownModel {
 		if err := c.validateStorageByModelType(); err != nil {
 			return errors.Trace(err)
@@ -828,14 +815,10 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 			return errors.Trace(err)
 		}
 	}
-	var err error
 	if c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr); err != nil {
 		return errors.Trace(err)
 	}
-	cstoreAPI, err := c.NewCharmRepo()
-	if err != nil {
-		return errors.Trace(err)
-	}
+
 	deployAPI, err := c.NewDeployAPI()
 	if err != nil {
 		return errors.Trace(err)
@@ -857,27 +840,20 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	for _, step := range c.Steps {
-		step.SetPlanURL(deployAPI.PlanURL())
-	}
-
-	csRepoFn := func() (store.CharmrepoForDeploy, error) {
-		return cstoreAPI, nil
-	}
 	downloadClientFn := func() (store.DownloadBundleClient, error) {
 		return c.NewDownloadClient()
 	}
 
 	charmAPIClient := c.NewCharmsAPI(c.apiRoot)
-	charmAdapter := c.NewResolver(charmAPIClient, csRepoFn, downloadClientFn)
+	charmAdapter := c.NewResolver(charmAPIClient, downloadClientFn)
 
-	factory, cfg := c.getDeployerFactory(charm.CharmHub)
+	factory, cfg := c.getDeployerFactory(base, charm.CharmHub)
 	deploy, err := factory.GetDeployer(cfg, deployAPI, charmAdapter)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	return block.ProcessBlockedError(deploy.PrepareAndDeploy(ctx, deployAPI, charmAdapter, cstoreAPI.MacaroonGetter), block.BlockChange)
+	return block.ProcessBlockedError(deploy.PrepareAndDeploy(ctx, deployAPI, charmAdapter), block.BlockChange)
 }
 
 func (c *DeployCommand) parseBindFlag(api SpacesAPI) error {
@@ -906,16 +882,7 @@ func (c *DeployCommand) parseBindFlag(api SpacesAPI) error {
 	return nil
 }
 
-func (c *DeployCommand) getMeteringAPIURL(controllerAPIRoot api.Connection) (string, error) {
-	controllerAPI := controller.NewClient(controllerAPIRoot)
-	controllerCfg, err := controllerAPI.ControllerConfig()
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	return controllerCfg.MeteringURL(), nil
-}
-
-func (c *DeployCommand) getDeployerFactory(defaultCharmSchema charm.Schema) (deployer.DeployerFactory, deployer.DeployerConfig) {
+func (c *DeployCommand) getDeployerFactory(base series.Base, defaultCharmSchema charm.Schema) (deployer.DeployerFactory, deployer.DeployerConfig) {
 	dep := deployer.DeployerDependencies{
 		Model:                c,
 		FileSystem:           c.ModelCommandBase.Filesystem(),
@@ -946,7 +913,7 @@ func (c *DeployCommand) getDeployerFactory(defaultCharmSchema charm.Schema) (dep
 		Placement:          c.Placement,
 		Resources:          c.Resources,
 		Revision:           c.Revision,
-		Series:             c.Series,
+		Base:               base,
 		Storage:            c.Storage,
 		Trust:              c.Trust,
 		UseExisting:        c.UseExisting,

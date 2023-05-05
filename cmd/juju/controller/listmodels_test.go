@@ -78,17 +78,14 @@ func (f *fakeModelMgrAPIClient) ListModelSummaries(user string, all bool) ([]bas
 		cloud, err := names.ParseCloudTag(info.Result.CloudTag)
 		if err != nil {
 			cloud = names.NewCloudTag("aws")
-
 		}
 		cred, err := names.ParseCloudCredentialTag(info.Result.CloudCredentialTag)
 		if err != nil {
 			cred = names.NewCloudCredentialTag("foo/bob/one")
-
 		}
 		owner, err := names.ParseUserTag(info.Result.OwnerTag)
 		if err != nil {
 			owner = names.NewUserTag("admin")
-
 		}
 		results[i] = base.UserModelSummary{
 			Name:            info.Result.Name,
@@ -231,7 +228,7 @@ func (s *ModelsSuite) SetUpTest(c *gc.C) {
 		LastConnection: &last1,
 		Access:         params.ModelReadAccess,
 	}}
-	//2nd model
+	// 2nd model
 	secondModel := s.api.infos[1].Result
 	last2 := time.Date(2015, 3, 1, 0, 0, 0, 0, time.UTC)
 	secondModel.Users = []params.ModelUserInfo{{
@@ -252,8 +249,7 @@ func (s *ModelsSuite) TestModelsOwner(c *gc.C) {
 		"Model                        Cloud/Region  Type   Status      Access  Last connection\n"+
 		"test-model1*                 dummy         local  active      read    2015-03-20\n"+
 		"carlotta/test-model2         dummy         local  active      write   2015-03-01\n"+
-		"daiwik@external/test-model3  dummy         local  destroying  -       never connected\n"+
-		"\n")
+		"daiwik@external/test-model3  dummy         local  destroying  -       never connected\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
@@ -295,8 +291,7 @@ func (s *ModelsSuite) TestModelsNonOwner(c *gc.C) {
 		"Model                        Cloud/Region  Type   Status      Access  Last connection\n"+
 		"admin/test-model1*           dummy         local  active      read    2015-03-20\n"+
 		"carlotta/test-model2         dummy         local  active      write   2015-03-01\n"+
-		"daiwik@external/test-model3  dummy         local  destroying  -       never connected\n"+
-		"\n")
+		"daiwik@external/test-model3  dummy         local  destroying  -       never connected\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
@@ -311,8 +306,7 @@ func (s *ModelsSuite) TestModelsNoneCurrent(c *gc.C) {
 		"Model                        Cloud/Region  Type   Status      Access  Last connection\n"+
 		"test-model1                  dummy         local  active      read    2015-03-20\n"+
 		"carlotta/test-model2         dummy         local  active      write   2015-03-01\n"+
-		"daiwik@external/test-model3  dummy         local  destroying  -       never connected\n"+
-		"\n")
+		"daiwik@external/test-model3  dummy         local  destroying  -       never connected\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
@@ -331,8 +325,7 @@ func (s *ModelsSuite) TestModelsUUID(c *gc.C) {
 		"Model                        UUID              Cloud/Region  Type   Status      Machines  Cores  Access  Last connection\n"+
 		"test-model1*                 test-model1-UUID  dummy         local  active             2      1  read    2015-03-20\n"+
 		"carlotta/test-model2         test-model2-UUID  dummy         local  active             0      -  write   2015-03-01\n"+
-		"daiwik@external/test-model3  test-model3-UUID  dummy         local  destroying         0      -  -       never connected\n"+
-		"\n")
+		"daiwik@external/test-model3  test-model3-UUID  dummy         local  destroying         0      -  -       never connected\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
@@ -351,8 +344,7 @@ func (s *ModelsSuite) TestModelsMachineInfo(c *gc.C) {
 		"Model                        Cloud/Region  Type   Status      Machines  Cores  Access  Last connection\n"+
 		"test-model1*                 dummy         local  active             2      1  read    2015-03-20\n"+
 		"carlotta/test-model2         dummy         local  active             0      -  write   2015-03-01\n"+
-		"daiwik@external/test-model3  dummy         local  destroying         0      -  -       never connected\n"+
-		"\n")
+		"daiwik@external/test-model3  dummy         local  destroying         0      -  -       never connected\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
@@ -366,19 +358,15 @@ func (s *ModelsSuite) TestUnrecognizedArg(c *gc.C) {
 }
 
 func (s *ModelsSuite) TestInvalidUser(c *gc.C) {
-	context, err := cmdtesting.RunCommand(c, s.newCommand(), "--user", "+bob")
+	_, err := cmdtesting.RunCommand(c, s.newCommand(), "--user", "+bob")
 	c.Assert(err, gc.ErrorMatches, regexp.QuoteMeta(`user "+bob" not valid`))
-	c.Assert(cmdtesting.Stdout(context), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(context), gc.Equals, "user \"+bob\" not valid\n")
 	s.api.CheckNoCalls(c)
 }
 
 func (s *ModelsSuite) TestModelsError(c *gc.C) {
 	s.api.err = apiservererrors.ErrPerm
-	context, err := cmdtesting.RunCommand(c, s.newCommand())
+	_, err := cmdtesting.RunCommand(c, s.newCommand())
 	c.Assert(err, gc.ErrorMatches, "permission denied")
-	c.Assert(cmdtesting.Stdout(context), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(context), gc.Equals, "permission denied\n")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
 
@@ -417,7 +405,6 @@ owner/basic-model  altostratus/mid-level  local  -              0  -       never
 owner/basic-model  altostratus/mid-level  local  busy           0  -       never connected
 owner/basic-model  altostratus/mid-level  local  -              0  admin   never connected
 owner/basic-model  altostratus/mid-level  local  -              2  -       never connected
-
 `[1:])
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
@@ -442,7 +429,6 @@ func (s *ModelsSuite) TestNoModelsMessage(c *gc.C) {
 Controller: fake
 
 Model  Cloud/Region  Type  Status  Access  Last connection
-
 `[1:])
 		c.Assert(cmdtesting.Stderr(context), gc.Equals, controller.NoModelsMessage+"\n")
 		s.checkAPICalls(c, "ListModelSummaries", "Close")
@@ -527,8 +513,7 @@ func (s *ModelsSuite) TestModelWithUnits(c *gc.C) {
 		"Model                        Cloud/Region  Type   Status      Units  Access  Last connection\n"+
 		"test-model1*                 dummy         local  active      -        read  2015-03-20\n"+
 		"carlotta/test-model2         dummy         local  active      3       write  2015-03-01\n"+
-		"daiwik@external/test-model3  dummy         local  destroying  -           -  never connected\n"+
-		"\n")
+		"daiwik@external/test-model3  dummy         local  destroying  -           -  never connected\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "")
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
@@ -626,8 +611,7 @@ func (s *ModelsSuite) TestModelsWithOneModelInError(c *gc.C) {
 		"\n"+
 		"Model                 Cloud/Region  Type   Status  Access  Last connection\n"+
 		"test-model1*          dummy         local  active  read    2015-03-20\n"+
-		"carlotta/test-model2  dummy         local  active  write   2015-03-01\n"+
-		"\n")
+		"carlotta/test-model2  dummy         local  active  write   2015-03-01\n")
 	c.Assert(cmdtesting.Stderr(context), gc.Equals, "some model error\n")
 	c.Assert(s.store.Models["fake"].Models, gc.DeepEquals, map[string]jujuclient.ModelDetails{
 		"admin/test-model1":    {ModelUUID: "test-model1-UUID", ModelType: model.IAAS},

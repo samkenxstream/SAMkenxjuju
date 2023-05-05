@@ -4,9 +4,11 @@
 package charm
 
 import (
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
+	"github.com/juju/errors"
 
 	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -20,8 +22,6 @@ func (c OriginSource) String() string {
 const (
 	// OriginLocal represents a local charm.
 	OriginLocal OriginSource = "local"
-	// OriginCharmStore represents a charm from the now old charm-store.
-	OriginCharmStore OriginSource = "charm-store"
 	// OriginCharmHub represents a charm from the new charm-hub.
 	OriginCharmHub OriginSource = "charm-hub"
 )
@@ -46,10 +46,8 @@ type Origin struct {
 	Branch *string
 	// Architecture describes the architecture intended to be used by the charm.
 	Architecture string
-	// OS describes the OS intended to be used by the charm.
-	OS string
-	// Series describes the series of the OS intended to be used by the charm.
-	Series string
+	// Base describes the OS base intended to be used by the charm.
+	Base series.Base
 
 	// InstanceKey is a unique string associated with the application. To
 	// assist with keeping KPI data in charmhub, it must be the same for every
@@ -58,14 +56,17 @@ type Origin struct {
 	InstanceKey string
 }
 
-// WithSeries allows to update the series of an origin.
-func (o Origin) WithSeries(series string) Origin {
+// WithBase allows to update the base of an origin.
+func (o Origin) WithBase(b *series.Base) Origin {
 	other := o
-	other.Series = series
+	other.Base = series.Base{}
+	if b != nil {
+		other.Base = *b
+	}
 	return other
 }
 
-// CharmChannel returns the the channel indicated by this origin.
+// CharmChannel returns the channel indicated by this origin.
 func (o Origin) CharmChannel() charm.Channel {
 	var track string
 	if o.Track != nil {
@@ -95,8 +96,7 @@ func (o Origin) ParamsCharmOrigin() params.CharmOrigin {
 		Track:        o.Track,
 		Branch:       o.Branch,
 		Architecture: o.Architecture,
-		OS:           o.OS,
-		Series:       o.Series,
+		Base:         params.Base{Name: o.Base.OS, Channel: o.Base.Channel.String()},
 		InstanceKey:  o.InstanceKey,
 	}
 }
@@ -128,8 +128,8 @@ func (o Origin) CoreCharmOrigin() corecharm.Origin {
 		Channel:  channel,
 		Platform: corecharm.Platform{
 			Architecture: o.Architecture,
-			OS:           o.OS,
-			Series:       o.Series,
+			OS:           o.Base.OS,
+			Channel:      o.Base.Channel.Track,
 		},
 		InstanceKey: o.InstanceKey,
 	}
@@ -137,7 +137,11 @@ func (o Origin) CoreCharmOrigin() corecharm.Origin {
 
 // APICharmOrigin is a helper function to convert params.CharmOrigin
 // to an Origin.
-func APICharmOrigin(origin params.CharmOrigin) Origin {
+func APICharmOrigin(origin params.CharmOrigin) (Origin, error) {
+	base, err := series.ParseBase(origin.Base.Name, origin.Base.Channel)
+	if err != nil {
+		return Origin{}, errors.Trace(err)
+	}
 	return Origin{
 		Source:       OriginSource(origin.Source),
 		Type:         origin.Type,
@@ -148,15 +152,14 @@ func APICharmOrigin(origin params.CharmOrigin) Origin {
 		Track:        origin.Track,
 		Branch:       origin.Branch,
 		Architecture: origin.Architecture,
-		OS:           origin.OS,
-		Series:       origin.Series,
+		Base:         base,
 		InstanceKey:  origin.InstanceKey,
-	}
+	}, nil
 }
 
 // CoreCharmOrigin is a helper function to convert params.CharmOrigin
 // to an Origin.
-func CoreCharmOrigin(origin corecharm.Origin) Origin {
+func CoreCharmOrigin(origin corecharm.Origin) (Origin, error) {
 	var ch charm.Channel
 	if origin.Channel != nil {
 		ch = *origin.Channel
@@ -169,6 +172,10 @@ func CoreCharmOrigin(origin corecharm.Origin) Origin {
 	if ch.Branch != "" {
 		branch = &ch.Branch
 	}
+	chBase, err := series.ParseBase(origin.Platform.OS, origin.Platform.Channel)
+	if err != nil {
+		return Origin{}, errors.Trace(err)
+	}
 	return Origin{
 		Source:       OriginSource(origin.Source),
 		Type:         origin.Type,
@@ -179,8 +186,7 @@ func CoreCharmOrigin(origin corecharm.Origin) Origin {
 		Track:        track,
 		Branch:       branch,
 		Architecture: origin.Platform.Architecture,
-		OS:           origin.Platform.OS,
-		Series:       origin.Platform.Series,
+		Base:         chBase,
 		InstanceKey:  origin.InstanceKey,
-	}
+	}, nil
 }

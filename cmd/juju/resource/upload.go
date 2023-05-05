@@ -6,7 +6,7 @@ package resource
 import (
 	"io"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
@@ -21,7 +21,7 @@ import (
 // UploadClient has the API client methods needed by UploadCommand.
 type UploadClient interface {
 	// Upload sends the resource to Juju.
-	Upload(application, name, filename string, resource io.ReadSeeker) error
+	Upload(application, name, filename, pendingID string, resource io.ReadSeeker) error
 
 	// ListResources returns info about resources for applications in the model.
 	ListResources(applications []string) ([]coreresources.ApplicationResources, error)
@@ -74,7 +74,6 @@ func (c *UploadCommand) Info() *cmd.Info {
 		Args:    "application name=file|OCI image",
 		Purpose: "Update a resource for an application.",
 		Doc:     attachDoc,
-		Aliases: []string{"attach"},
 	})
 }
 
@@ -150,7 +149,7 @@ func (c *UploadCommand) upload(rf resourceValue, client UploadClient) error {
 		return errors.Trace(err)
 	}
 	defer f.Close()
-	err = client.Upload(rf.application, rf.name, rf.value, f)
+	err = client.Upload(rf.application, rf.name, rf.value, "", f)
 	if err := block.ProcessBlockedError(err, block.BlockChange); err != nil {
 		return errors.Trace(err)
 	}

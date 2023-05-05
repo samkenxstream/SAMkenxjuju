@@ -12,6 +12,7 @@ import (
 	lxd "github.com/lxc/lxd/client"
 	"github.com/lxc/lxd/shared/api"
 
+	"github.com/juju/juju/core/instance"
 	jujuos "github.com/juju/juju/core/os"
 	jujuseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
@@ -28,7 +29,7 @@ type SourcedImage struct {
 }
 
 // FindImage searches the input sources in supplied order, looking for an OS
-// image matching the supplied series and architecture.
+// image matching the supplied base and architecture.
 // If found, the image and the server from which it was acquired are returned.
 // If the server is remote the image will be cached by LXD when used to create
 // a container.
@@ -36,7 +37,9 @@ type SourcedImage struct {
 // Copied images will have the juju/series/arch alias added to them.
 // The callback argument is used to report copy progress.
 func (s *Server) FindImage(
-	series, arch string,
+	base jujuseries.Base,
+	arch string,
+	virtType instance.VirtType,
 	sources []ServerSpec,
 	copyLocal bool,
 	callback environs.StatusCallbackFunc,
@@ -46,7 +49,7 @@ func (s *Server) FindImage(
 	}
 
 	// First we check if we have the image locally.
-	localAlias := seriesLocalAlias(series, arch)
+	localAlias := baseLocalAlias(base.DisplayString(), arch, virtType)
 	var target string
 	entry, _, err := s.GetImageAlias(localAlias)
 	if err != nil && !IsLXDNotFound(err) {
@@ -57,11 +60,11 @@ func (s *Server) FindImage(
 		// We already have an image with the given alias, so just use that.
 		target = entry.Target
 		image, _, err := s.GetImage(target)
-		if err == nil {
+		if isCompatibleVirtType(virtType, image.Type) && err == nil {
 			logger.Debugf("Found image locally - %q %q", image.Filename, target)
 			return SourcedImage{
 				Image:     image,
-				LXDServer: s.ContainerServer,
+				LXDServer: s.InstanceServer,
 			}, nil
 		}
 	}
@@ -72,7 +75,7 @@ func (s *Server) FindImage(
 	// We don't have an image locally with the juju-specific alias,
 	// so look in each of the provided remote sources for any of the aliases
 	// that might identify the image we want.
-	aliases, err := seriesRemoteAliases(series, arch)
+	aliases, err := baseRemoteAliases(base, arch)
 	if err != nil {
 		return sourced, errors.Trace(err)
 	}
@@ -84,7 +87,7 @@ func (s *Server) FindImage(
 			continue
 		}
 		for _, alias := range aliases {
-			if res, _, err := source.GetImageAliasType("container", alias); err == nil && res != nil && res.Target != "" {
+			if res, _, err := source.GetImageAliasType(string(virtType), alias); err == nil && res != nil && res.Target != "" {
 				target = res.Target
 				break
 			}
@@ -114,7 +117,7 @@ func (s *Server) FindImage(
 
 		// Now that we have the image cached locally, we indicate in the return
 		// that the source is local instead of the remote where we found it.
-		sourced.LXDServer = s.ContainerServer
+		sourced.LXDServer = s.InstanceServer
 	}
 
 	return sourced, nil
@@ -170,39 +173,58 @@ func (s *Server) CopyRemoteImage(
 	return nil
 }
 
-// seriesLocalAlias returns the alias to assign to images for the
+// baseLocalAlias returns the alias to assign to images for the
 // specified series. The alias is juju-specific, to support the
 // user supplying a customised image (e.g. CentOS with cloud-init).
-func seriesLocalAlias(series, arch string) string {
-	return fmt.Sprintf("juju/%s/%s", series, arch)
+func baseLocalAlias(base, arch string, virtType instance.VirtType) string {
+	// We use a different alias for VMs, so that we can distinguish between
+	// a VM image and a container image. We don't add anything to the alias
+	// for containers to keep backwards compatibility with older versions
+	// of the image aliases.
+	switch virtType {
+	case api.InstanceTypeVM:
+		return fmt.Sprintf("juju/%s/%s/vm", base, arch)
+	default:
+		return fmt.Sprintf("juju/%s/%s", base, arch)
+	}
 }
 
-// seriesRemoteAliases returns the aliases to look for in remotes.
-func seriesRemoteAliases(series, arch string) ([]string, error) {
-	seriesOS, err := jujuseries.GetOSFromSeries(series)
+// baseRemoteAliases returns the aliases to look for in remotes.
+func baseRemoteAliases(base jujuseries.Base, arch string) ([]string, error) {
+	alias, err := constructBaseRemoteAlias(base, arch)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	return []string{
+		alias,
+	}, nil
+}
+
+func isCompatibleVirtType(virtType instance.VirtType, instanceType string) bool {
+	if instanceType == "" && (virtType == api.InstanceTypeAny || virtType == api.InstanceTypeContainer) {
+		return true
+	}
+	return string(virtType) == instanceType
+}
+
+func constructBaseRemoteAlias(base jujuseries.Base, arch string) (string, error) {
+	seriesOS := jujuos.OSTypeForName(base.OS)
 	switch seriesOS {
 	case jujuos.Ubuntu:
-		return []string{path.Join(series, arch)}, nil
+		return path.Join(base.Channel.Track, arch), nil
 	case jujuos.CentOS:
 		if arch == jujuarch.AMD64 {
-			switch series {
-			case "centos7":
-				return []string{"centos/7/cloud/amd64"}, nil
-			case "centos8":
-				return []string{"centos/8/cloud/amd64"}, nil
-			case "centos9":
-				return []string{"centos/9-Stream/cloud/amd64"}, nil
-			default:
-				return nil, errors.NotSupportedf("series %q", series)
+			switch base.Channel.Track {
+			case "7", "8":
+				return fmt.Sprintf("centos/%s/cloud/amd64", base.Channel.Track), nil
+			case "9":
+				return "centos/9-Stream/cloud/amd64", nil
 			}
 		}
 	case jujuos.OpenSUSE:
-		if series == "opensuseleap" && arch == jujuarch.AMD64 {
-			return []string{"opensuse/42.2/amd64"}, nil
+		if base.Channel.Track == "opensuse42" && arch == jujuarch.AMD64 {
+			return "opensuse/42.2/amd64", nil
 		}
 	}
-	return nil, errors.NotSupportedf("series %q", series)
+	return "", errors.NotSupportedf("base %q", base.DisplayString())
 }

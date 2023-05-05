@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/juju/clock"
-	"github.com/juju/clock/testclock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	jujuhttp "github.com/juju/http/v2"
@@ -40,8 +38,8 @@ import (
 	"github.com/juju/juju/core/auditlog"
 	"github.com/juju/juju/core/cache"
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/core/raft/queue"
 	"github.com/juju/juju/jujuclient"
 	psapiserver "github.com/juju/juju/pubsub/apiserver"
 	"github.com/juju/juju/pubsub/centralhub"
@@ -181,8 +179,11 @@ func (s *apiserverConfigFixture) SetUpTest(c *gc.C) {
 			}
 			return 0
 		},
-		SysLogger:   noopSysLogger{},
-		RaftOpQueue: queue.NewOpQueue(testclock.NewClock(time.Now())),
+		EntityHasPermissionFunc: func(user names.Tag, operation permission.Access, target names.Tag) (bool, error) {
+			return apiserver.CheckHasPermission(s.State, user, operation, target)
+		},
+		SysLogger: noopSysLogger{},
+		DBGetter:  apiserver.StubDBGetter{},
 	}
 }
 
@@ -296,6 +297,21 @@ func (s *apiserverBaseSuite) openAPIAs(c *gc.C, srv *apiserver.Server, tag names
 	return conn
 }
 
+func (s *apiserverBaseSuite) openAPINoLogin(c *gc.C, srv *apiserver.Server, controllerOnly bool) api.Connection {
+	apiInfo := s.APIInfo(srv)
+	apiInfo.SkipLogin = true
+	if !controllerOnly {
+		apiInfo.ModelTag = s.Model.ModelTag()
+	}
+	conn, err := api.Open(apiInfo, api.DialOpts{})
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(conn, gc.NotNil)
+	s.AddCleanup(func(c *gc.C) {
+		conn.Close()
+	})
+	return conn
+}
+
 // OpenAPIAsNewMachine creates a new client connection logging in as the
 // controller owner. The returned api.Connection should not be closed by the
 // caller as a cleanup function has been registered to do that.
@@ -311,7 +327,7 @@ func (s *apiserverBaseSuite) OpenAPIAsNewMachine(c *gc.C, srv *apiserver.Server,
 	if len(jobs) == 0 {
 		jobs = []state.MachineJob{state.JobHostUnits}
 	}
-	machine, err := s.State.AddMachine("quantal", jobs...)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), jobs...)
 	c.Assert(err, jc.ErrorIsNil)
 	password, err := utils.RandomPassword()
 	c.Assert(err, jc.ErrorIsNil)
@@ -363,7 +379,7 @@ func (s *apiserverSuite) TestRestartMessage(c *gc.C) {
 func (s *apiserverSuite) getHealth(c *gc.C) (string, int) {
 	uri := s.server.URL + "/health"
 	resp := apitesting.SendHTTPRequest(c, apitesting.HTTPRequestParams{Method: "GET", URL: uri})
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	result := string(body)
 	// Ensure that the last value is a carriage return.

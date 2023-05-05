@@ -4,79 +4,66 @@
 package utils_test
 
 import (
-	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/cmd/juju/application/utils"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/series"
 )
 
 type originSuite struct{}
 
 var _ = gc.Suite(&originSuite{})
 
-func (*originSuite) TestDeducePlatform(c *gc.C) {
+func (*originSuite) TestMakePlatform(c *gc.C) {
 	arch := constraints.MustParse("arch=amd64")
 	fallback := constraints.MustParse("arch=amd64")
-	series := "focal"
+	base := series.MustParseBaseFromString("ubuntu@20.04")
 
-	platform, err := utils.DeducePlatform(arch, series, fallback)
-	c.Assert(err, jc.ErrorIsNil)
+	platform := utils.MakePlatform(arch, base, fallback)
 	c.Assert(platform, gc.DeepEquals, corecharm.Platform{
 		Architecture: "amd64",
 		OS:           "ubuntu",
-		Series:       "focal",
+		Channel:      "20.04",
 	})
 }
 
-func (*originSuite) TestDeducePlatformWithFallbackArch(c *gc.C) {
+func (*originSuite) TestMakePlatformWithFallbackArch(c *gc.C) {
 	arch := constraints.MustParse("mem=100G")
 	fallback := constraints.MustParse("arch=s390x")
-	series := "focal"
+	base := series.MustParseBaseFromString("ubuntu@20.04")
 
-	platform, err := utils.DeducePlatform(arch, series, fallback)
-	c.Assert(err, jc.ErrorIsNil)
+	platform := utils.MakePlatform(arch, base, fallback)
 	c.Assert(platform, gc.DeepEquals, corecharm.Platform{
 		Architecture: "s390x",
 		OS:           "ubuntu",
-		Series:       "focal",
+		Channel:      "20.04",
 	})
 }
 
-func (*originSuite) TestDeducePlatformWithNoArch(c *gc.C) {
+func (*originSuite) TestMakePlatformWithNoArch(c *gc.C) {
 	arch := constraints.MustParse("mem=100G")
 	fallback := constraints.MustParse("cores=1")
-	series := "focal"
+	base := series.MustParseBaseFromString("ubuntu@20.04")
 
-	platform, err := utils.DeducePlatform(arch, series, fallback)
-	c.Assert(err, jc.ErrorIsNil)
+	platform := utils.MakePlatform(arch, base, fallback)
 	c.Assert(platform, gc.DeepEquals, corecharm.Platform{
 		Architecture: "amd64",
 		OS:           "ubuntu",
-		Series:       "focal",
+		Channel:      "20.04",
 	})
 }
 
-func (*originSuite) TestDeducePlatformWithInvalidSeries(c *gc.C) {
+func (*originSuite) TestMakePlatformWithEmptyBase(c *gc.C) {
 	arch := constraints.MustParse("mem=100G")
-	fallback := constraints.MustParse("arch=amd64")
-	series := "bad"
+	fallback := constraints.MustParse("cores=1")
+	base := series.Base{}
 
-	_, err := utils.DeducePlatform(arch, series, fallback)
-	c.Assert(err, gc.ErrorMatches, `unknown OS for series: "bad"`)
-}
-
-func (*originSuite) TestDeducePlatformWithNonUbuntuSeries(c *gc.C) {
-	arch := constraints.MustParse("arch=amd64")
-	fallback := constraints.MustParse("arch=amd64")
-	series := "win10"
-
-	platform, err := utils.DeducePlatform(arch, series, fallback)
-	c.Assert(err, jc.ErrorIsNil)
+	platform := utils.MakePlatform(arch, base, fallback)
 	c.Assert(platform, gc.DeepEquals, corecharm.Platform{
 		Architecture: "amd64",
-		OS:           "windows",
-		Series:       "win10",
+		OS:           "",
+		Channel:      "",
 	})
 }

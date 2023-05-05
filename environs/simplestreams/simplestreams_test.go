@@ -32,7 +32,7 @@ func registerSimpleStreamsTests() {
 					Region:   "us-east-1",
 					Endpoint: "https://ec2.us-east-1.amazonaws.com",
 				},
-				Releases: []string{"precise"},
+				Releases: []string{"12.04"},
 				Arches:   []string{"amd64", "arm"},
 			}),
 		},
@@ -334,7 +334,7 @@ func (s *simplestreamsSuite) TestGetMetadataNoMatching(c *gc.C) {
 			Region:   "us-east-1",
 			Endpoint: "https://ec2.us-east-1.amazonaws.com",
 		},
-		Releases: []string{"precise"},
+		Releases: []string{"12.04"},
 		Arches:   []string{"not-a-real-arch"}, // never matches
 	})
 	params := simplestreams.GetMetadataParams{
@@ -365,8 +365,8 @@ func (s *simplestreamsSuite) TestMetadataCatalog(c *gc.C) {
 	c.Check(len(metadata.Aliases), gc.Equals, 1)
 	metadataCatalog := metadata.Products["com.ubuntu.cloud:server:12.04:amd64"]
 	c.Check(len(metadataCatalog.Items), gc.Equals, 2)
-	c.Check(metadataCatalog.Series, gc.Equals, "precise")
 	c.Check(metadataCatalog.Version, gc.Equals, "12.04")
+	c.Check(metadataCatalog.Release, gc.Equals, "precise")
 	c.Check(metadataCatalog.Arch, gc.Equals, "amd64")
 	c.Check(metadataCatalog.RegionName, gc.Equals, "au-east-1")
 	c.Check(metadataCatalog.Endpoint, gc.Equals, "https://somewhere")

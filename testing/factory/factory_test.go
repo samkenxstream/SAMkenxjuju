@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
@@ -215,9 +215,9 @@ func (s *factorySuite) TestMakeMachineNil(c *gc.C) {
 	saved, err := s.State.Machine(machine.Id())
 	c.Assert(err, jc.ErrorIsNil)
 
-	c.Assert(saved.Series(), gc.Equals, machine.Series())
+	c.Assert(saved.Base().String(), gc.Equals, machine.Base().String())
 	c.Assert(saved.Id(), gc.Equals, machine.Id())
-	c.Assert(saved.Series(), gc.Equals, machine.Series())
+	c.Assert(saved.Base().String(), gc.Equals, machine.Base().String())
 	c.Assert(saved.Tag(), gc.Equals, machine.Tag())
 	c.Assert(saved.Life(), gc.Equals, machine.Life())
 	c.Assert(saved.Jobs(), gc.DeepEquals, machine.Jobs())
@@ -231,7 +231,7 @@ func (s *factorySuite) TestMakeMachineNil(c *gc.C) {
 }
 
 func (s *factorySuite) TestMakeMachine(c *gc.C) {
-	series := "quantal"
+	base := state.UbuntuBase("12.10")
 	jobs := []state.MachineJob{state.JobManageModel}
 	password, err := utils.RandomPassword()
 	c.Assert(err, jc.ErrorIsNil)
@@ -243,7 +243,7 @@ func (s *factorySuite) TestMakeMachine(c *gc.C) {
 	}}
 
 	machine, pwd := s.Factory.MakeMachineReturningPassword(c, &factory.MachineParams{
-		Series:      series,
+		Base:        base,
 		Jobs:        jobs,
 		Password:    password,
 		Nonce:       nonce,
@@ -254,7 +254,7 @@ func (s *factorySuite) TestMakeMachine(c *gc.C) {
 	c.Assert(machine, gc.NotNil)
 	c.Assert(pwd, gc.Equals, password)
 
-	c.Assert(machine.Series(), gc.Equals, series)
+	c.Assert(machine.Base().String(), gc.Equals, base.String())
 	c.Assert(machine.Jobs(), gc.DeepEquals, jobs)
 	machineInstanceId, err := machine.InstanceId()
 	c.Assert(err, jc.ErrorIsNil)
@@ -292,7 +292,7 @@ func (s *factorySuite) TestMakeMachine(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	c.Assert(saved.Id(), gc.Equals, machine.Id())
-	c.Assert(saved.Series(), gc.Equals, machine.Series())
+	c.Assert(saved.Base().String(), gc.Equals, machine.Base().String())
 	c.Assert(saved.Tag(), gc.Equals, machine.Tag())
 	c.Assert(saved.Life(), gc.Equals, machine.Life())
 	c.Assert(saved.Jobs(), gc.DeepEquals, machine.Jobs())
@@ -319,7 +319,7 @@ func (s *factorySuite) TestMakeCharm(c *gc.C) {
 	series := "quantal"
 	name := "wordpress"
 	revision := 13
-	url := fmt.Sprintf("cs:%s/%s-%d", series, name, revision)
+	url := fmt.Sprintf("ch:%s/%s-%d", series, name, revision)
 	ch := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: name,
 		URL:  url,
@@ -378,7 +378,7 @@ func (s *factorySuite) TestMakeUnitNil(c *gc.C) {
 
 	c.Assert(saved.Name(), gc.Equals, unit.Name())
 	c.Assert(saved.ApplicationName(), gc.Equals, unit.ApplicationName())
-	c.Assert(saved.Series(), gc.Equals, unit.Series())
+	c.Assert(saved.Base(), jc.DeepEquals, unit.Base())
 	c.Assert(saved.Life(), gc.Equals, unit.Life())
 }
 
@@ -397,7 +397,7 @@ func (s *factorySuite) TestMakeUnit(c *gc.C) {
 
 	c.Assert(saved.Name(), gc.Equals, unit.Name())
 	c.Assert(saved.ApplicationName(), gc.Equals, unit.ApplicationName())
-	c.Assert(saved.Series(), gc.Equals, unit.Series())
+	c.Assert(saved.Base(), jc.DeepEquals, unit.Base())
 	c.Assert(saved.Life(), gc.Equals, unit.Life())
 
 	applicationCharmURL, _ := application.CharmURL()
@@ -473,7 +473,7 @@ func (s *factorySuite) TestMakeMetricNil(c *gc.C) {
 
 func (s *factorySuite) TestMakeMetric(c *gc.C) {
 	now := time.Now().Round(time.Second).UTC()
-	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered"})
+	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:quantal/metered"})
 	meteredApplication := s.Factory.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 	unit := s.Factory.MakeUnit(c, &factory.UnitParams{Application: meteredApplication, SetCharmURL: true})
 	metric := s.Factory.MakeMetric(c, &factory.MetricParams{
@@ -516,7 +516,8 @@ func (s *factorySuite) TestMakeModelNil(c *gc.C) {
 
 	cfg, err := m.ModelConfig()
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.AllAttrs()["default-series"], gc.Equals, "jammy")
+	c.Assert(cfg.AllAttrs()["default-base"], gc.Equals, "")
+	c.Assert(cfg.AllAttrs()["default-series"], gc.IsNil)
 }
 
 func (s *factorySuite) TestMakeModel(c *gc.C) {
@@ -526,7 +527,7 @@ func (s *factorySuite) TestMakeModel(c *gc.C) {
 	params := &factory.ModelParams{
 		Name:        "foo",
 		Owner:       owner.UserTag(),
-		ConfigAttrs: testing.Attrs{"default-series": "precise"},
+		ConfigAttrs: testing.Attrs{"default-base": "ubuntu@22.04"},
 	}
 
 	st := s.Factory.MakeModel(c, params)
@@ -542,5 +543,32 @@ func (s *factorySuite) TestMakeModel(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	cfg, err := m.ModelConfig()
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.AllAttrs()["default-series"], gc.Equals, "precise")
+	c.Assert(cfg.AllAttrs()["default-base"], gc.Equals, "ubuntu@22.04")
+}
+
+// TODO(stickupkid): We can remove this once we remove series.
+func (s *factorySuite) TestMakeModelWithSeries(c *gc.C) {
+	owner := s.Factory.MakeUser(c, &factory.UserParams{
+		Name: "owner",
+	})
+	params := &factory.ModelParams{
+		Name:        "foo",
+		Owner:       owner.UserTag(),
+		ConfigAttrs: testing.Attrs{"default-series": "jammy"},
+	}
+
+	st := s.Factory.MakeModel(c, params)
+	defer st.Close()
+
+	env, err := st.Model()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(env.Name(), gc.Equals, "foo")
+	c.Assert(env.UUID() == s.State.ModelUUID(), jc.IsFalse)
+	c.Assert(env.Owner(), gc.Equals, owner.UserTag())
+
+	m, err := st.Model()
+	c.Assert(err, jc.ErrorIsNil)
+	cfg, err := m.ModelConfig()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(cfg.AllAttrs()["default-series"], gc.Equals, "jammy")
 }

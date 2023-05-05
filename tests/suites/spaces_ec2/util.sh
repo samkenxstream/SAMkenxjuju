@@ -2,14 +2,13 @@
 #
 # Create a new machine, wait for it to boot and hotplug a pre-allocated
 # network interface which has been tagged: "nic-type: hotpluggable".
-#
-# Then, patch the netplan settings for the new interface, apply the new plan,
-# restart the machine agent and wait for juju to detect the new interface
-# before returning.
 add_multi_nic_machine() {
+	local hotplug_nic_id
 	hotplug_nic_id=$1
 
-	juju add-machine
+	# Ensure machine is deployed to the same az as our nic
+	az=$(aws ec2 describe-network-interfaces --filters Name=network-interface-id,Values="$hotplug_nic_id" | jq -r ".NetworkInterfaces[0].AvailabilityZone")
+	juju add-machine --constraints zones="${az}"
 	juju_machine_id=$(juju show-machine --format json | jq -r '.["machines"] | keys[0]')
 	echo "[+] waiting for machine ${juju_machine_id} to start..."
 
@@ -21,15 +20,33 @@ add_multi_nic_machine() {
 	aws ec2 attach-network-interface --device-index 1 \
 		--network-interface-id ${hotplug_nic_id} \
 		--instance-id $(juju show-machine --format json | jq -r ".[\"machines\"] | .[\"${juju_machine_id}\"] | .[\"instance-id\"]")
+}
+
+# configure_multi_mic_netplan()
+#
+# Patch the netplan settings for the new interface, apply the new plan,
+# restart the machine agent and wait for juju to detect the new interface
+# before returning.
+configure_multi_nic_netplan() {
+	local juju_machine_id hotplug_iface
+	juju_machine_id=$1
+	hotplug_iface=$2
 
 	# Add an entry to netplan and apply it so the second interface comes online
 	echo "[+] updating netplan and restarting machine agent"
 	# shellcheck disable=SC2086,SC2016
 	juju ssh ${juju_machine_id} 'sudo sh -c "sed -i \"/version:/d\" /etc/netplan/50-cloud-init.yaml"'
 	# shellcheck disable=SC2086,SC2016
-	juju ssh ${juju_machine_id} 'sudo sh -c "echo \"            gateway4: `ip route | grep default | cut -d\" \" -f3`\n        ens6:\n            dhcp4: true\n    version: 2\n\" >> /etc/netplan/50-cloud-init.yaml"'
+	default_route=$(juju ssh ${juju_machine_id} 'ip route | grep default | cut -d " " -f3')
+	# shellcheck disable=SC2086,SC2016
+	juju ssh ${juju_machine_id} "sudo sh -c 'echo \"            routes:\n                - to: default\n                  via: ${default_route}\n        ${hotplug_iface}:\n            dhcp4: true\n    version: 2\n\" >> /etc/netplan/50-cloud-init.yaml'"
+
+	# shellcheck disable=SC2086,SC2016
+	echo "[+] Reconfiguring netplan:"
+	juju ssh ${juju_machine_id} 'sudo cat /etc/netplan/50-cloud-init.yaml'
 	# shellcheck disable=SC2086,SC2016
 	juju ssh ${juju_machine_id} 'sudo netplan apply'
+	echo "[+] Applied"
 	# shellcheck disable=SC2086,SC2016
 	juju ssh ${juju_machine_id} 'sudo systemctl restart jujud-machine-*'
 
@@ -73,9 +90,32 @@ assert_endpoint_binding_matches() {
 	got=$(juju show-application ${app_name} --format json | jq -r ".[\"${app_name}\"] | .[\"endpoint-bindings\"] | .[\"${endpoint_name}\"]")
 	if [ "$got" != "$exp_space_name" ]; then
 		# shellcheck disable=SC2086,SC2016,SC2046
-		echo $(red "Expected endpoint \"${endpoint_name}\" in juju show-application ${app_name} to be ${exp_space_name}; got ${got}")
+		echo $(red "Expected endpoint ${endpoint_name} in juju show-application ${app_name} to be ${exp_space_name}; got ${got}")
 		exit 1
 	fi
+}
+
+assert_machine_ip_is_in_cidrs() {
+	local machine_index cidrs
+
+	machine_index=${1}
+	cidrs=${2}
+
+	if ! which "grepcidr" >/dev/null 2>&1; then
+		sudo apt install grepcidr -y
+	fi
+
+	for cidr in $cidrs; do
+		machine_ip_in_cidr=$(juju machines --format json | jq -r ".machines[\"${machine_index}\"][\"ip-addresses\"][]" | grepcidr "${cidr}" || echo "")
+		if [ -n "${machine_ip_in_cidr}" ]; then
+			echo "${machine_ip_in_cidr}"
+			return
+		fi
+	done
+
+	# shellcheck disable=SC2086,SC2016,SC2046
+	echo $(red "machine ${machine_index} has no ips in subnet ${cidrs}") 1>&2
+	exit 1
 }
 
 # get_unit_index(app_name)

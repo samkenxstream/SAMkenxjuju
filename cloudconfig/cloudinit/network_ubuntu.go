@@ -138,9 +138,11 @@ func GenerateENITemplate(interfaces corenetwork.InterfaceInfos) (string, error) 
 	return generatedConfig, nil
 }
 
-// GenerateNetplan renders a netplan file for one or more network
-// interfaces, using the given non-empty list of interfaces.
-func GenerateNetplan(interfaces corenetwork.InterfaceInfos) (string, error) {
+// GenerateNetplan renders a netplan file for the input non-empty collection
+// of interfaces.
+// The matchHWAddr argument indicates whether to add a match stanza for the
+// MAC address to each device.
+func GenerateNetplan(interfaces corenetwork.InterfaceInfos, matchHWAddr bool) (string, error) {
 	if len(interfaces) == 0 {
 		return "", errors.Errorf("missing container network config")
 	}
@@ -183,11 +185,11 @@ func GenerateNetplan(interfaces corenetwork.InterfaceInfos) (string, error) {
 		if info.MTU != 0 && info.MTU != 1500 {
 			iface.MTU = info.MTU
 		}
-		if info.MACAddress != "" {
+
+		if matchHWAddr && info.MACAddress != "" {
 			iface.Match = map[string]string{"macaddress": info.MACAddress}
-		} else {
-			iface.Match = map[string]string{"name": info.InterfaceName}
 		}
+
 		for _, route := range info.Routes {
 			route := netplan.Route{
 				To:     route.DestinationCIDR,
@@ -310,7 +312,7 @@ func PrepareNetworkConfigFromInterfaces(interfaces corenetwork.InterfaceInfos) (
 }
 
 // AddNetworkConfig adds configuration scripts for specified interfaces
-// to cloudconfig - using boot textfiles and boot commands. It currently
+// to cloudconfig - using boot text files and boot commands. It currently
 // supports e/n/i and netplan.
 func (cfg *ubuntuCloudConfig) AddNetworkConfig(interfaces corenetwork.InterfaceInfos) error {
 	if len(interfaces) != 0 {
@@ -318,7 +320,7 @@ func (cfg *ubuntuCloudConfig) AddNetworkConfig(interfaces corenetwork.InterfaceI
 		if err != nil {
 			return errors.Trace(err)
 		}
-		netPlan, err := GenerateNetplan(interfaces)
+		netPlan, err := GenerateNetplan(interfaces, !cfg.omitNetplanHWAddrMatch)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -386,7 +388,7 @@ def ip_parse(ip_output):
     """parses the output of the ip command
     and returns a hwaddr->nic-name dict"""
     devices = dict()
-    print("Parsing ip command output %s" % ip_output)
+    print("Parsing ip command output {}".format(ip_output))
     for ip_line in ip_output:
         ip_line_str = strdecode(ip_line, "utf-8")
         match = IP_LINE.match(ip_line_str)
@@ -398,7 +400,7 @@ def ip_parse(ip_output):
             continue
         nic_hwaddr = match.group(1)
         devices[nic_hwaddr] = nic_name
-    print("Found the following devices: %s" % str(devices))
+    print("Found the following devices: {}".format(devices))
     return devices
 
 def replace_ethernets(interfaces_file, output_file, devices, fail_on_missing):
@@ -410,7 +412,7 @@ def replace_ethernets(interfaces_file, output_file, devices, fail_on_missing):
 
     formatter = Formatter()
     hwaddrs = [v[1] for v in formatter.parse(interfaces) if v[1]]
-    print("Found the following hwaddrs: %s" % str(hwaddrs))
+    print("Found the following hwaddrs: {}".format(hwaddrs))
     device_replacements = dict()
     for hwaddr in hwaddrs:
         hwaddr_clean = hwaddr[3:].replace("_", ":")
@@ -418,14 +420,15 @@ def replace_ethernets(interfaces_file, output_file, devices, fail_on_missing):
             device_replacements[hwaddr] = devices[hwaddr_clean]
         else:
             if fail_on_missing:
-                print("Can't find device with MAC %s, will retry" % hwaddr_clean)
+                print("Can not find device with MAC {}, will retry".format(hwaddr_clean))
                 return False
             else:
-                print("WARNING: Can't find device with MAC %s when expected" % hwaddr_clean)
+                print("WARNING: Can not find device with MAC {} when expected".format(hwaddr_clean))
                 device_replacements[hwaddr] = hwaddr
     formatted = interfaces.format(**device_replacements)
-    print("Used the values in: %s\nto fix the interfaces file:\n%s\ninto\n%s" %
-           (str(device_replacements), str(interfaces), str(formatted)))
+    print("Used the values in: {}".format(device_replacements))
+    print("to generate new interfaces file:")
+    print(formatted)
 
     with open(output_file, "w") as intf_out_file:
         intf_out_file.write(formatted)
@@ -433,7 +436,7 @@ def replace_ethernets(interfaces_file, output_file, devices, fail_on_missing):
     if not os.path.exists(interfaces_file + ".bak"):
         try:
             shutil.copyfile(interfaces_file, interfaces_file + ".bak")
-        except OSError: #silently ignore if the file is missing
+        except OSError:  # silently ignore if the file is missing
             pass
     return True
 
@@ -449,9 +452,9 @@ def main():
     for tries in range(retries):
         ip_output = ip_parse(subprocess.check_output(args.command.split()).splitlines())
         if replace_ethernets(args.intf_file, args.out_file, ip_output, (tries != retries - 1)):
-             break
+            break
         else:
-             time.sleep(float(args.wait))
+            time.sleep(float(args.wait))
 
 if __name__ == "__main__":
     main()

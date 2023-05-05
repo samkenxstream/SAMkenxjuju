@@ -482,21 +482,3 @@ func (s *execSuite) TestErrorHandling(c *gc.C) {
 	err = exec.HandleContainerNotFoundError(errors.New(`wow`))
 	c.Assert(err, gc.ErrorMatches, "wow")
 }
-
-func (s *execSuite) TestModelNameToNameSpace(c *gc.C) {
-	ctrl := s.setupExecClient(c)
-	defer ctrl.Finish()
-
-	gomock.InOrder(
-		s.mockNamespaces.EXPECT().List(gomock.Any(), metav1.ListOptions{LabelSelector: "model.juju.is/name=controller"}).
-			Return(&core.NamespaceList{Items: []core.Namespace{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "controller-k1"},
-				},
-			}}, nil),
-	)
-
-	nsName, err := exec.ModelNameToNameSpace("controller", false, s.mockNamespaces)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(nsName, gc.DeepEquals, "controller-k1")
-}

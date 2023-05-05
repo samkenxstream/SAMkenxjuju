@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +27,7 @@ import (
 // Archive writes the executable files found in the given directory in
 // gzipped tar format to w.
 func Archive(w io.Writer, dir string) error {
-	entries, err := ioutil.ReadDir(dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
@@ -40,15 +39,21 @@ func Archive(w io.Writer, dir string) error {
 	defer closeErrorCheck(&err, tarw)
 
 	for _, ent := range entries {
-		h := tarHeader(ent)
+		fi, err := ent.Info()
+		if err != nil {
+			logger.Errorf("failed to read file info: %s", ent.Name())
+			continue
+		}
+
+		h := tarHeader(fi)
 		logger.Debugf("adding entry: %#v", h)
 		// ignore local umask
-		if isExecutable(ent) {
+		if isExecutable(fi) {
 			h.Mode = 0755
 		} else {
 			h.Mode = 0644
 		}
-		err := tarw.WriteHeader(h)
+		err = tarw.WriteHeader(h)
 		if err != nil {
 			return err
 		}
@@ -249,7 +254,6 @@ func buildJujus(dir string) error {
 
 	// Determine if we are in tree of juju and if to prefer
 	// vendor or readonly mod deps.
-	var modArg string
 	var lastErr error
 	for _, m := range []string{"-mod=vendor", "-mod=readonly"} {
 		cmd := exec.Command("go", "list", m, "github.com/juju/juju")
@@ -262,7 +266,6 @@ func buildJujus(dir string) error {
 			lastErr = errors.Annotatef(err, info, jujuversion.Current.String(), jujuversion.GitCommit, out)
 			continue
 		}
-		modArg = m
 		lastErr = nil
 		break
 	}
@@ -270,27 +273,36 @@ func buildJujus(dir string) error {
 		return lastErr
 	}
 
+	// When using integration tests, you can't build jujud from outside of the
+	// root package. So if the GOPATH is set, we'll use that as the working
+	// directory to rebuild jujud.
+	var cmdDir string
+	if path, ok := os.LookupEnv("GOPATH"); ok && path != "" {
+		cmdDir = filepath.Join(path, "src", "github.com", "juju", "juju")
+	}
+
 	// Build binaries.
 	cmds := [][]string{
-		// TODO: jam 2020-03-12 do we want to also default to stripping the binary?
-		//       -ldflags "-s -w"
-		{"go", "build", modArg, "-ldflags", "-extldflags \"-static\"", "-o", filepath.Join(dir, names.Jujud), "github.com/juju/juju/cmd/jujud"},
-		{"go", "build", modArg, "-ldflags", "-extldflags \"-static\"", "-o", filepath.Join(dir, names.Jujuc), "github.com/juju/juju/cmd/jujuc"},
+		{"make", "jujud"},
 	}
 	for _, args := range cmds {
 		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		cmd.Env = append(os.Environ(), "GOBIN="+dir)
+		cmd.Dir = cmdDir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("build command %q failed: %v; %s", args[0], err, out)
+		}
+		if logger.IsTraceEnabled() {
+			logger.Tracef("Built jujud:\n%s", out)
 		}
 	}
 	return nil
 }
 
-func packageLocalTools(toolsDir string, buildAgent, skipCopyVersionFile bool) error {
+func packageLocalTools(toolsDir string, buildAgent bool) error {
 	if !buildAgent {
-		if err := copyExistingJujus(toolsDir, skipCopyVersionFile); err != nil {
+		if err := copyExistingJujus(toolsDir, true); err != nil {
 			return errors.New("no prepackaged agent available and no jujud binary can be found")
 		}
 		return nil
@@ -304,65 +316,68 @@ func packageLocalTools(toolsDir string, buildAgent, skipCopyVersionFile bool) er
 
 // BundleToolsFunc is a function which can bundle all the current juju tools
 // in gzipped tar format to the given writer.
-type BundleToolsFunc func(build bool, w io.Writer, forceVersion *version.Number) (version.Binary, bool, string, error)
+type BundleToolsFunc func(
+	build bool, w io.Writer,
+	getForceVersion func(version.Number) version.Number,
+) (builtVersion version.Binary, forceVersion version.Number, _ bool, _ string, _ error)
 
 // Override for testing.
 var BundleTools BundleToolsFunc = func(
-	build bool, w io.Writer, forceVersion *version.Number,
-) (version.Binary, bool, string, error) {
-	return bundleTools(build, w, forceVersion, JujudVersion)
+	build bool, w io.Writer,
+	getForceVersion func(version.Number) version.Number,
+) (version.Binary, version.Number, bool, string, error) {
+	return bundleTools(build, w, getForceVersion, JujudVersion)
 }
 
 // bundleTools bundles all the current juju tools in gzipped tar
-// format to the given writer.  If forceVersion is not nil and the
-// file isn't an official build, a FORCE-VERSION file is included in
+// format to the given writer. A FORCE-VERSION file is included in
 // the tools bundle so it will lie about its current version number.
 func bundleTools(
-	build bool, w io.Writer, forceVersion *version.Number, jujudVersion func(dir string) (version.Binary, bool, error),
-) (_ version.Binary, official bool, sha256hash string, _ error) {
-	dir, err := ioutil.TempDir("", "juju-tools")
+	build bool, w io.Writer,
+	getForceVersion func(version.Number) version.Number,
+	jujudVersion func(dir string) (version.Binary, bool, error),
+) (_ version.Binary, _ version.Number, official bool, sha256hash string, _ error) {
+	dir, err := os.MkdirTemp("", "juju-tools")
 	if err != nil {
-		return version.Binary{}, false, "", err
+		return version.Binary{}, version.Number{}, false, "", err
 	}
 	defer os.RemoveAll(dir)
 
 	existingJujuLocation, err := ExistingJujuLocation()
 	if err != nil {
-		return version.Binary{}, false, "", errors.Annotate(err, "couldn't find existing jujud")
+		return version.Binary{}, version.Number{}, false, "", errors.Annotate(err, "couldn't find existing jujud")
 	}
 	_, official, err = jujudVersion(existingJujuLocation)
 	if err != nil && !errors.IsNotFound(err) {
-		return version.Binary{}, official, "", errors.Trace(err)
+		return version.Binary{}, version.Number{}, official, "", errors.Trace(err)
 	}
 	if official && build {
-		return version.Binary{}, official, "", errors.Errorf("cannot build agent for official build")
+		return version.Binary{}, version.Number{}, official, "", errors.Errorf("cannot build agent for official build")
 	}
 
-	writeForceVersion := forceVersion != nil
-	if err := packageLocalTools(dir, build, writeForceVersion); err != nil {
-		return version.Binary{}, false, "", err
+	if err := packageLocalTools(dir, build); err != nil {
+		return version.Binary{}, version.Number{}, false, "", err
 	}
 
 	// We need to get the version again because the juju binaries at dir might be built from source code.
 	tvers, official, err := jujudVersion(dir)
 	if err != nil {
-		return version.Binary{}, false, "", errors.Trace(err)
+		return version.Binary{}, version.Number{}, false, "", errors.Trace(err)
 	}
 	if official {
 		logger.Debugf("using official version %s", tvers)
 	}
-	if writeForceVersion {
-		logger.Debugf("forcing version to %s", forceVersion)
-		if err := ioutil.WriteFile(filepath.Join(dir, "FORCE-VERSION"), []byte(forceVersion.String()), 0666); err != nil {
-			return version.Binary{}, false, "", err
-		}
+	forceVersion := getForceVersion(tvers.Number)
+	logger.Debugf("forcing version to %s", forceVersion)
+	if err := os.WriteFile(filepath.Join(dir, "FORCE-VERSION"), []byte(forceVersion.String()), 0666); err != nil {
+		return version.Binary{}, version.Number{}, false, "", err
 	}
 
 	sha256hash, err = archiveAndSHA256(w, dir)
 	if err != nil {
-		return version.Binary{}, false, "", err
+		return version.Binary{}, version.Number{}, false, "", err
 	}
-	return tvers, official, sha256hash, err
+	return tvers, forceVersion, official, sha256hash, err
 }
 
 // Override for testing.

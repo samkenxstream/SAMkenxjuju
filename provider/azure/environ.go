@@ -33,7 +33,6 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/os"
-	jujuseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
@@ -378,6 +377,13 @@ func (env *azureEnviron) SetConfig(cfg *config.Config) error {
 	return nil
 }
 
+var unsupportedConstraints = []string{
+	constraints.CpuPower,
+	constraints.Tags,
+	constraints.VirtType,
+	constraints.ImageID,
+}
+
 // ConstraintsValidator is defined on the Environs interface.
 func (env *azureEnviron) ConstraintsValidator(ctx context.ProviderCallContext) (constraints.Validator, error) {
 	instanceTypes, err := env.getInstanceTypes(ctx)
@@ -391,11 +397,7 @@ func (env *azureEnviron) ConstraintsValidator(ctx context.ProviderCallContext) (
 	sort.Strings(instTypeNames)
 
 	validator := constraints.NewValidator()
-	validator.RegisterUnsupported([]string{
-		constraints.CpuPower,
-		constraints.Tags,
-		constraints.VirtType,
-	})
+	validator.RegisterUnsupported(unsupportedConstraints)
 	validator.RegisterVocabulary(
 		constraints.Arch,
 		[]string{arch.AMD64},
@@ -488,7 +490,7 @@ func (env *azureEnviron) StartInstance(ctx context.ProviderCallContext, args env
 			instanceTypes,
 			&instances.InstanceConstraint{
 				Region:      env.location,
-				Series:      args.InstanceConfig.Series,
+				Base:        args.InstanceConfig.Base,
 				Arch:        arch,
 				Constraints: args.Constraints,
 			},
@@ -979,12 +981,12 @@ func (env *azureEnviron) waitCommonResourcesCreatedLocked(ctx context.ProviderCa
 // createAvailabilitySet creates the availability set for a machine to use
 // if it doesn't already exist, and returns the availability set's ID. The
 // algorithm used for choosing the availability set is:
-//  - if the machine is a controller, use the availability set name
-//    "juju-controller";
-//  - if the machine has units assigned, create an availability
-//    name with a name based on the value of the tags.JujuUnitsDeployed tag
-//    in vmTags, if it exists;
-//  - otherwise, do not assign the machine to an availability set
+//   - if the machine is a controller, use the availability set name
+//     "juju-controller";
+//   - if the machine has units assigned, create an availability
+//     name with a name based on the value of the tags.JujuUnitsDeployed tag
+//     in vmTags, if it exists;
+//   - otherwise, do not assign the machine to an availability set
 func availabilitySetName(
 	vmName string,
 	vmTags map[string]string,
@@ -1076,11 +1078,11 @@ func newOSProfile(
 		CustomData:   to.Ptr(string(customData)),
 	}
 
-	seriesOS, err := jujuseries.GetOSFromSeries(instanceConfig.Series)
+	instOS := os.OSTypeForName(instanceConfig.Base.OS)
 	if err != nil {
 		return nil, os.Unknown, errors.Trace(err)
 	}
-	switch seriesOS {
+	switch instOS {
 	case os.Ubuntu, os.CentOS:
 		// SSH keys are handled by custom data, but must also be
 		// specified in order to forego providing a password, and
@@ -1110,9 +1112,9 @@ func newOSProfile(
 			SSH:                           &armcompute.SSHConfiguration{PublicKeys: publicKeys},
 		}
 	default:
-		return nil, os.Unknown, errors.NotSupportedf("%s", seriesOS)
+		return nil, os.Unknown, errors.NotSupportedf("%s", instOS)
 	}
-	return osProfile, seriesOS, nil
+	return osProfile, instOS, nil
 }
 
 // StopInstances is specified in the InstanceBroker interface.

@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/version/v2"
@@ -149,6 +149,26 @@ func (c *Client) ModelInfo() (migration.ModelInfo, error) {
 		AgentVersion:           info.AgentVersion,
 		ControllerAgentVersion: info.ControllerAgentVersion,
 	}, nil
+}
+
+// SourceControllerInfo returns connection information about the source controller
+// and uuids of any other hosted models involved in cross model relations.
+func (c *Client) SourceControllerInfo() (migration.SourceControllerInfo, []string, error) {
+	var info params.MigrationSourceInfo
+	err := c.caller.FacadeCall("SourceControllerInfo", nil, &info)
+	if err != nil {
+		return migration.SourceControllerInfo{}, nil, errors.Trace(err)
+	}
+	sourceTag, err := names.ParseControllerTag(info.ControllerTag)
+	if err != nil {
+		return migration.SourceControllerInfo{}, nil, errors.Trace(err)
+	}
+	return migration.SourceControllerInfo{
+		ControllerTag:   sourceTag,
+		ControllerAlias: info.ControllerAlias,
+		Addrs:           info.Addrs,
+		CACert:          info.CACert,
+	}, info.LocalRelatedModels, nil
 }
 
 // Prechecks verifies that the source controller and model are healthy

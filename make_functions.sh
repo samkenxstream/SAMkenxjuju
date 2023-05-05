@@ -73,7 +73,7 @@ operator_image_path() {
 }
 
 
-# build_push_operator_image is responsible for doing the heavy lifiting when it
+# build_push_operator_image is responsible for doing the heavy lifting when it
 # comes time to build the Juju oci operator image. This function can also build
 # the operator image for multiple architectures at once. Takes 2 arguments that
 # describe one or more platforms to build for and whether to push the image.
@@ -123,11 +123,12 @@ build_push_operator_image() {
     WORKDIR=$(_make_docker_staging_dir)
     cp "${PROJECT_DIR}/caas/Dockerfile" "${WORKDIR}/"
     cp "${PROJECT_DIR}/caas/requirements.txt" "${WORKDIR}/"
-    DOCKER_BUILDKIT=1 "$DOCKER_BIN" buildx build \
+    BUILDX_NO_DEFAULT_ATTESTATIONS=true DOCKER_BUILDKIT=1 "$DOCKER_BIN" buildx build \
         --builder "$DOCKER_BUILDX_CONTEXT" \
         -f "${WORKDIR}/Dockerfile" \
         -t "$(operator_image_path)" \
         --platform="$build_multi_osarch" \
+        --provenance=false \
         ${output} \
         "${BUILD_DIR}"
 }

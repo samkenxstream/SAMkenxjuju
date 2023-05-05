@@ -7,11 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"sort"
 	"time"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
@@ -200,6 +199,57 @@ func (a *API) WatchApplications() (params.StringsWatchResult, error) {
 	return params.StringsWatchResult{}, watcher.EnsureErr(watch)
 }
 
+// WatchProvisioningInfo provides a watcher for changes that affect the
+// information returned by ProvisioningInfo. This is useful for ensuring the
+// latest application stated is ensured.
+func (a *API) WatchProvisioningInfo(args params.Entities) (params.NotifyWatchResults, error) {
+	var result params.NotifyWatchResults
+	result.Results = make([]params.NotifyWatchResult, len(args.Entities))
+	for i, entity := range args.Entities {
+		appName, err := names.ParseApplicationTag(entity.Tag)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		res, err := a.watchProvisioningInfo(appName)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		result.Results[i].NotifyWatcherId = res.NotifyWatcherId
+	}
+	return result, nil
+}
+
+func (a *API) watchProvisioningInfo(appName names.ApplicationTag) (params.NotifyWatchResult, error) {
+	result := params.NotifyWatchResult{}
+	app, err := a.state.Application(appName.Id())
+	if err != nil {
+		return result, errors.Trace(err)
+	}
+
+	model, err := a.state.Model()
+	if err != nil {
+		return result, errors.Trace(err)
+	}
+
+	modelConfigWatcher := model.WatchForModelConfigChanges()
+	appWatcher := app.Watch()
+	controllerConfigWatcher := a.ctrlSt.WatchControllerConfig()
+
+	multiWatcher := common.NewMultiNotifyWatcher(appWatcher, controllerConfigWatcher, modelConfigWatcher)
+
+	if _, ok := <-multiWatcher.Changes(); ok {
+		result.NotifyWatcherId = a.resources.Register(multiWatcher)
+	} else {
+		return result, watcher.EnsureErr(multiWatcher)
+	}
+
+	return result, nil
+}
+
 // ProvisioningInfo returns the info needed to provision a caas application.
 func (a *API) ProvisioningInfo(args params.Entities) (params.CAASApplicationProvisioningInfoResults, error) {
 	var result params.CAASApplicationProvisioningInfoResults
@@ -224,6 +274,15 @@ func (a *API) provisioningInfo(appName names.ApplicationTag) (*params.CAASApplic
 	app, err := a.state.Application(appName.Id())
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+
+	charmURL, _ := app.CharmURL()
+	if charmURL == nil {
+		return nil, errors.NotValidf("application charm url nil")
+	}
+
+	if app.CharmPendingToBeDownloaded() {
+		return nil, errors.NotProvisionedf("charm %q pending", *charmURL)
 	}
 
 	cfg, err := a.ctrlSt.ControllerConfig()
@@ -287,14 +346,11 @@ func (a *API) provisioningInfo(appName names.ApplicationTag) (*params.CAASApplic
 		}
 	}
 	caCert, _ := cfg.CACert()
-	charmURL, _ := app.CharmURL()
-	if charmURL == nil {
-		return nil, errors.NotValidf("application charm url nil")
-	}
 	appConfig, err := app.ApplicationConfig()
 	if err != nil {
 		return nil, errors.Annotatef(err, "getting application config")
 	}
+	base := app.Base()
 	return &params.CAASApplicationProvisioningInfo{
 		Version:              vers,
 		APIAddresses:         addrs,
@@ -303,7 +359,7 @@ func (a *API) provisioningInfo(appName names.ApplicationTag) (*params.CAASApplic
 		Filesystems:          filesystemParams,
 		Devices:              devices,
 		Constraints:          mergedCons,
-		Series:               app.Series(),
+		Base:                 params.Base{Name: base.OS, Channel: base.Channel},
 		ImageRepo:            params.NewDockerImageInfo(cfg.CAASImageRepo(), imagePath),
 		CharmModifiedVersion: app.CharmModifiedVersion(),
 		CharmURL:             *charmURL,
@@ -646,7 +702,7 @@ func (a *API) applicationFilesystemParams(
 			charmStorage := ch.Meta().Storage[name]
 			id := fmt.Sprintf("%s/%v", name, i)
 			tag := names.NewStorageTag(id)
-			location, err := state.FilesystemMountPoint(charmStorage, tag, "kubernetes")
+			location, err := state.FilesystemMountPoint(charmStorage, tag, "ubuntu")
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -766,7 +822,7 @@ func (a *API) ApplicationOCIResources(args params.Entities) (params.CAASApplicat
 
 func readDockerImageResource(reader io.Reader) (params.DockerImageInfo, error) {
 	var details resources.DockerImageDetails
-	contents, err := ioutil.ReadAll(reader)
+	contents, err := io.ReadAll(reader)
 	if err != nil {
 		return params.DockerImageInfo{}, errors.Trace(err)
 	}

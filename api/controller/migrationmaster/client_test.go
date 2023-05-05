@@ -7,13 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jujutesting "github.com/juju/testing"
@@ -32,6 +31,7 @@ import (
 	"github.com/juju/juju/core/resources"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
+	coretesting "github.com/juju/juju/testing"
 )
 
 type ClientSuite struct {
@@ -202,6 +202,34 @@ func (s *ClientSuite) TestModelInfo(c *gc.C) {
 	})
 }
 
+func (s *ClientSuite) TestSourceControllerInfo(c *gc.C) {
+	var stub jujutesting.Stub
+	apiCaller := apitesting.APICallerFunc(func(objType string, v int, id, request string, arg, result interface{}) error {
+		stub.AddCall(objType+"."+request, id, arg)
+		*(result.(*params.MigrationSourceInfo)) = params.MigrationSourceInfo{
+			LocalRelatedModels: []string{"related-model-uuid"},
+			ControllerTag:      coretesting.ControllerTag.String(),
+			ControllerAlias:    "mycontroller",
+			Addrs:              []string{"source-addr"},
+			CACert:             "cacert",
+		}
+		return nil
+	})
+	client := migrationmaster.NewClient(apiCaller, nil)
+	info, relatedModels, err := client.SourceControllerInfo()
+	stub.CheckCalls(c, []jujutesting.StubCall{
+		{"MigrationMaster.SourceControllerInfo", []interface{}{"", nil}},
+	})
+	c.Check(err, jc.ErrorIsNil)
+	c.Check(info, jc.DeepEquals, migration.SourceControllerInfo{
+		ControllerTag:   coretesting.ControllerTag,
+		ControllerAlias: "mycontroller",
+		Addrs:           []string{"source-addr"},
+		CACert:          "cacert",
+	})
+	c.Assert(relatedModels, jc.SameContents, []string{"related-model-uuid"})
+}
+
 func (s *ClientSuite) TestPrechecks(c *gc.C) {
 	var stub jujutesting.Stub
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
@@ -253,7 +281,7 @@ func (s *ClientSuite) TestExport(c *gc.C) {
 		out := result.(*params.SerializedModel)
 		*out = params.SerializedModel{
 			Bytes:  []byte("foo"),
-			Charms: []string{"cs:foo-1"},
+			Charms: []string{"ch:foo-1"},
 			Tools: []params.SerializedModelTools{{
 				Version: "2.0.0-ubuntu-amd64",
 				URI:     "/tools/0",
@@ -308,7 +336,7 @@ func (s *ClientSuite) TestExport(c *gc.C) {
 	})
 	c.Assert(out, gc.DeepEquals, migration.SerializedModel{
 		Bytes:  []byte("foo"),
-		Charms: []string{"cs:foo-1"},
+		Charms: []string{"ch:foo-1"},
 		Tools: map[version.Binary]string{
 			version.MustParseBinary("2.0.0-ubuntu-amd64"): "/tools/0",
 		},
@@ -383,7 +411,7 @@ func setupFakeHTTP() (*migrationmaster.Client, *fakeDoer) {
 	doer := &fakeDoer{
 		response: &http.Response{
 			StatusCode: 200,
-			Body:       ioutil.NopCloser(strings.NewReader(resourceContent)),
+			Body:       io.NopCloser(strings.NewReader(resourceContent)),
 		},
 	}
 	caller := &fakeHTTPCaller{
@@ -639,7 +667,7 @@ func (d *fakeDoer) Do(req *http.Request) (*http.Response, error) {
 }
 
 func checkReader(c *gc.C, r io.Reader, expected string) {
-	actual, err := ioutil.ReadAll(r)
+	actual, err := io.ReadAll(r)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(string(actual), gc.Equals, expected)
 }

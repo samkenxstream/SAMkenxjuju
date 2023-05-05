@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
@@ -117,7 +117,7 @@ var scenarioStatus = &params.FullStatus{
 			ModificationStatus: params.DetailedStatus{
 				Status: status.Idle.String(),
 			},
-			Series:     "quantal",
+			Base:       params.Base{Name: "ubuntu", Channel: "12.10/stable"},
 			Containers: map[string]params.MachineStatus{},
 			Jobs:       []model.MachineJob{model.JobManageModel},
 			HasVote:    false,
@@ -135,7 +135,7 @@ var scenarioStatus = &params.FullStatus{
 			ModificationStatus: params.DetailedStatus{
 				Status: status.Idle.String(),
 			},
-			Series:     "quantal",
+			Base:       params.Base{Name: "ubuntu", Channel: "12.10/stable"},
 			Containers: map[string]params.MachineStatus{},
 			Jobs:       []model.MachineJob{model.JobHostUnits},
 			HasVote:    false,
@@ -153,7 +153,7 @@ var scenarioStatus = &params.FullStatus{
 			ModificationStatus: params.DetailedStatus{
 				Status: status.Idle.String(),
 			},
-			Series:      "quantal",
+			Base:        params.Base{Name: "ubuntu", Channel: "12.10/stable"},
 			Constraints: "mem=1024M",
 			Containers:  map[string]params.MachineStatus{},
 			Jobs:        []model.MachineJob{model.JobHostUnits},
@@ -193,8 +193,8 @@ var scenarioStatus = &params.FullStatus{
 	},
 	Applications: map[string]params.ApplicationStatus{
 		"logging": {
-			Charm:  "local:quantal/logging-1",
-			Series: "quantal",
+			Charm: "local:quantal/logging-1",
+			Base:  params.Base{Name: "ubuntu", Channel: "12.10/stable"},
 			Relations: map[string][]string{
 				"logging-directory": {"wordpress"},
 			},
@@ -212,7 +212,7 @@ var scenarioStatus = &params.FullStatus{
 		},
 		"mysql": {
 			Charm:         "local:quantal/mysql-1",
-			Series:        "quantal",
+			Base:          params.Base{Name: "ubuntu", Channel: "12.10/stable"},
 			Relations:     map[string][]string{},
 			SubordinateTo: []string{},
 			Units:         map[string]params.UnitStatus{},
@@ -228,8 +228,8 @@ var scenarioStatus = &params.FullStatus{
 			},
 		},
 		"wordpress": {
-			Charm:  "local:quantal/wordpress-3",
-			Series: "quantal",
+			Charm: "local:quantal/wordpress-3",
+			Base:  params.Base{Name: "ubuntu", Channel: "12.10/stable"},
 			Relations: map[string][]string{
 				"logging-dir": {"logging"},
 			},
@@ -337,32 +337,46 @@ var scenarioStatus = &params.FullStatus{
 // user-admin
 // user-other
 // machine-0
-//  instance-id="i-machine-0"
-//  nonce="fake_nonce"
-//  jobs=manage-environ
-//  status=started, info=""
+//
+//	instance-id="i-machine-0"
+//	nonce="fake_nonce"
+//	jobs=manage-environ
+//	status=started, info=""
+//
 // machine-1
-//  instance-id="i-machine-1"
-//  nonce="fake_nonce"
-//  jobs=host-units
-//  status=started, info=""
-//  constraints=mem=1G
+//
+//	instance-id="i-machine-1"
+//	nonce="fake_nonce"
+//	jobs=host-units
+//	status=started, info=""
+//	constraints=mem=1G
+//
 // machine-2
-//  instance-id="i-machine-2"
-//  nonce="fake_nonce"
-//  jobs=host-units
-//  status=started, info=""
+//
+//	instance-id="i-machine-2"
+//	nonce="fake_nonce"
+//	jobs=host-units
+//	status=started, info=""
+//
 // application-wordpress
 // application-logging
 // unit-wordpress-0
-//  deployer-name=machine-1
-//  status=down with error and status data attached
+//
+//	deployer-name=machine-1
+//	status=down with error and status data attached
+//
 // unit-logging-0
-//  deployer-name=unit-wordpress-0
+//
+//	deployer-name=unit-wordpress-0
+//
 // unit-wordpress-1
-//     deployer-name=machine-2
+//
+//	deployer-name=machine-2
+//
 // unit-logging-1
-//  deployer-name=unit-wordpress-1
+//
+//	deployer-name=unit-wordpress-1
+//
 // remoteapplication-mediawiki
 // applicationoffer-hosted-mysql
 //
@@ -390,7 +404,7 @@ func (s *baseSuite) setUpScenario(c *gc.C) (entities []names.Tag) {
 	setDefaultPassword(c, u)
 	add(u)
 
-	m, err := s.State.AddMachine("quantal", state.JobManageModel)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Tag(), gc.Equals, names.NewMachineTag("0"))
 	err = m.SetProvisioned(instance.Id("i-"+m.Tag().String()), "", "fake_nonce", nil)
@@ -463,7 +477,7 @@ func (s *baseSuite) setUpScenario(c *gc.C) (entities []names.Tag) {
 		setDefaultPassword(c, wu)
 		add(wu)
 
-		m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+		m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 		c.Assert(err, jc.ErrorIsNil)
 		c.Assert(m.Tag(), gc.Equals, names.NewMachineTag(fmt.Sprintf("%d", i+1)))
 		if i == 1 {

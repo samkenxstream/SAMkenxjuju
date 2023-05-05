@@ -6,10 +6,9 @@ package resource_test
 import (
 	"strings"
 
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	jujucmd "github.com/juju/cmd/v3"
-	"github.com/juju/errors"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
@@ -57,14 +56,16 @@ series for the model is used.
 Channel can be specified with --channel.  If not provided, stable is used.
 
 Where a channel is not supplied, stable is used.
-
-Examples:
-
+`,
+		Examples: `
 Display charm resources for the postgresql charm:
+
     juju charm-resources postgresql
 
 Display charm resources for mycharm in the 2.0/edge channel:
+
     juju charm-resources mycharm --channel 2.0/edge
+
 `,
 		FlagKnownAs:    "option",
 		ShowSuperFlags: []string{"show-log", "debug", "logging-config", "verbose", "quiet", "h", "help"},
@@ -80,14 +81,13 @@ func (s *CharmResourcesSuite) TestOkay(c *gc.C) {
 	s.client.ReturnListResources = [][]charmresource.Resource{resources}
 
 	command := resourcecmd.NewCharmResourcesCommandForTest(s.client)
-	code, stdout, stderr := runCmd(c, command, "cs:a-charm")
+	code, stdout, stderr := runCmd(c, command, "a-charm")
 	c.Check(code, gc.Equals, 0)
 
 	c.Check(stdout, gc.Equals, `
 Resource  Revision
 music     1
 website   2
-
 `[1:])
 	c.Check(stderr, gc.Equals, "")
 	s.stub.CheckCallNames(c,
@@ -95,27 +95,17 @@ website   2
 	)
 	s.stub.CheckCall(c, 0, "ListResources", []jujuresource.CharmID{
 		{
-			URL:     charm.MustParseURL("cs:a-charm"),
+			URL:     charm.MustParseURL("a-charm"),
 			Channel: corecharm.MustParseChannel("stable"),
 		},
 	})
-}
-
-func (s *CharmResourcesSuite) TestCharmhub(c *gc.C) {
-	s.client.stub.SetErrors(errors.Errorf("charmhub charms are currently not supported"))
-
-	command := resourcecmd.NewCharmResourcesCommandForTest(s.client)
-	code, stdout, stderr := runCmd(c, command, "a-charm")
-	c.Check(code, gc.Equals, 1)
-	c.Check(stdout, gc.Equals, "")
-	c.Check(stderr, gc.Equals, "ERROR charmhub charms are currently not supported\n")
 }
 
 func (s *CharmResourcesSuite) TestNoResources(c *gc.C) {
 	s.client.ReturnListResources = [][]charmresource.Resource{{}}
 
 	command := resourcecmd.NewCharmResourcesCommandForTest(s.client)
-	code, stdout, stderr := runCmd(c, command, "cs:a-charm")
+	code, stdout, stderr := runCmd(c, command, "a-charm")
 	c.Check(code, gc.Equals, 0)
 
 	c.Check(stderr, gc.Equals, "No resources to display.\n")
@@ -139,7 +129,6 @@ func (s *CharmResourcesSuite) TestOutputFormats(c *gc.C) {
 Resource  Revision
 music     1
 website   1
-
 `[1:],
 		"yaml": `
 - name: music
@@ -188,7 +177,7 @@ website   1
 		command := resourcecmd.NewCharmResourcesCommandForTest(s.client)
 		args := []string{
 			"--format", format,
-			"cs:a-charm",
+			"ch:a-charm",
 		}
 		code, stdout, stderr := runCmd(c, command, args...)
 		c.Check(code, gc.Equals, 0)
@@ -212,7 +201,7 @@ func (s *CharmResourcesSuite) TestChannelFlag(c *gc.C) {
 
 	code, _, stderr := runCmd(c, command,
 		"--channel", "development",
-		"cs:a-charm",
+		"ch:a-charm",
 	)
 
 	c.Check(code, gc.Equals, 0)

@@ -6,9 +6,9 @@ run_deploy_revision() {
 
 	ensure "${model_name}" "${file}"
 
-	# revision 9 is in channel 2.0/edge
-	juju deploy juju-qa-test --revision 9 --channel 2.0/stable
-	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 9)"
+	# revision 23 is in channel 2.0/edge
+	juju deploy juju-qa-test --revision 23 --channel 2.0/stable
+	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 23)"
 
 	# check resource revision per channel specified.
 	got=$(juju resources juju-qa-test --format json | jq -S '.resources[0] | .["revision"] == "1"')
@@ -33,9 +33,9 @@ run_deploy_revision_resource() {
 
 	ensure "${model_name}" "${file}"
 
-	# revision 9 is in channel 2.0/edge
-	juju deploy juju-qa-test --revision 9 --channel 2.0/stable --resource foo-file=4
-	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 9)"
+	# revision 23 is in channel 2.0/edge
+	juju deploy juju-qa-test --revision 23 --channel 2.0/stable --resource foo-file=4
+	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 23)"
 
 	# check resource revision as specified in command.
 	got=$(juju resources juju-qa-test --format json | jq -S '.resources[0] | .["revision"] == "4"')
@@ -67,18 +67,22 @@ run_deploy_revision_fail() {
 	destroy_model "${model_name}"
 }
 
-run_deploy_revision_upgrade() {
+run_deploy_revision_refresh() {
 	echo
 
-	model_name="test-deploy-upgrade"
+	model_name="test-deploy-refresh"
 	file="${TEST_DIR}/${model_name}.log"
 
 	ensure "${model_name}" "${file}"
 
-	# revision 9 is in channel 2.0/edge
-	juju deploy juju-qa-test --revision 9 --channel latest/edge
-	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 9)"
+	# revision 23 is in channel 2.0/edge
+	juju deploy juju-qa-test --revision 23 --channel latest/edge
+	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 23)"
 
+	# NOTE:
+	# The following loop is specific to juju 3.0+ due to
+	# async charm download and should NOT be removed in
+	# a merge from 2.9.
 	attempt=0
 	while true; do
 		# Ensure that refresh gets the revision from the channel
@@ -97,7 +101,9 @@ run_deploy_revision_upgrade() {
 		sleep 5
 	done
 
-	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 15)"
+	# revision 21 is in channel latest/edge
+	wait_for "juju-qa-test" "$(charm_rev "juju-qa-test" 21)"
+	wait_for "juju-qa-test" "$(charm_channel "juju-qa-test" "latest/edge")"
 
 	destroy_model "${model_name}"
 }
@@ -115,7 +121,7 @@ test_deploy_revision() {
 
 		run "run_deploy_revision"
 		run "run_deploy_revision_fail"
-		run "run_deploy_revision_upgrade"
+		run "run_deploy_revision_refresh"
 		run "run_deploy_revision_resource"
 	)
 }

@@ -4,7 +4,7 @@
 package action_test
 
 import (
-	"io/ioutil"
+	"os"
 	"testing"
 	"time"
 
@@ -49,7 +49,7 @@ type BaseActionSuite struct {
 
 	modelFlags []string
 	store      *jujuclient.MemStore
-	clock      *testclock.Clock
+	clock      testclock.AdvanceableClock
 }
 
 func (s *BaseActionSuite) SetUpTest(c *gc.C) {
@@ -132,7 +132,7 @@ func setupValueFile(c *gc.C, dir, filename, value string) string {
 	ctx := cmdtesting.ContextForDir(c, dir)
 	path := ctx.AbsPath(filename)
 	content := []byte(value)
-	err := ioutil.WriteFile(path, content, 0666)
+	err := os.WriteFile(path, content, 0666)
 	c.Assert(err, jc.ErrorIsNil)
 	return path
 }

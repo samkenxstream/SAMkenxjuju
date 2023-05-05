@@ -1,5 +1,5 @@
 #!/bin/bash -e
-[ -n "${GOPATH:-}" ] && export "PATH=${GOPATH}/bin:${PATH}"
+[ -n "${GOPATH:-}" ] && export "PATH=${PATH}:${GOPATH}/bin"
 
 # Always ignore SC2230 ('which' is non-standard. Use builtin 'command -v' instead.)
 export SHELLCHECK_OPTS="-e SC2230 -e SC2039 -e SC2028 -e SC2002 -e SC2005 -e SC2001 -e SC2263"
@@ -11,7 +11,7 @@ export BOOTSTRAP_SERIES="${BOOTSTRAP_SERIES:-}"
 export BUILD_AGENT="${BUILD_AGENT:-false}"
 export RUN_SUBTEST="${RUN_SUBTEST:-}"
 
-export CURRENT_LTS="focal"
+export CURRENT_LTS="jammy"
 
 current_pwd=$(pwd)
 export CURRENT_DIR="${current_pwd}"
@@ -47,24 +47,35 @@ TEST_NAMES="agents \
             cli \
             constraints \
             controller \
+            coslite \
+            credential \
             ck \
             deploy \
-            expose_ec2 \
+            deploy_aks \
+            deploy_caas \
+            firewall \
             hooks \
             hooktools \
+            kubeflow \
             machine \
+            magma \
             manual \
             model \
             network \
             ovs_maas \
+            refresh \
             relations \
             resources \
+            secrets_iaas \
+            secrets_k8s \
             sidecar \
             smoke \
             spaces_ec2 \
             static_analysis \
+            storage \
             unit \
-            upgrade"
+            upgrade \
+            user"
 
 # Show test suites, can be used to test if a test suite is available or not.
 show_test_suites() {
@@ -177,10 +188,15 @@ while getopts "hH?vAs:a:x:rl:p:c:R:S:" opt; do
 	l)
 		export BOOTSTRAP_REUSE_LOCAL="${OPTARG}"
 		export BOOTSTRAP_REUSE="true"
+
 		CLOUD=$(juju show-controller "${OPTARG}" --format=json 2>/dev/null | jq -r ".[\"${OPTARG}\"] | .details | .cloud")
-		PROVIDER=$(juju clouds --client 2>/dev/null | grep "${CLOUD}" | awk '{print $4}' | head -n 1)
+		PROVIDER=$(juju clouds --client --all --format=json 2>/dev/null | jq -r ".[\"${CLOUD}\"] | .type")
 		if [[ -z ${PROVIDER} ]]; then
 			PROVIDER="${CLOUD}"
+		fi
+		# We want "ec2" to redirect to "aws". This is needed e.g. for the ck tests
+		if [[ ${PROVIDER} == "ec2" ]]; then
+			PROVIDER="aws"
 		fi
 		export BOOTSTRAP_PROVIDER="${PROVIDER}"
 		export BOOTSTRAP_CLOUD="${CLOUD}"
@@ -220,18 +236,26 @@ if [[ $# -eq 0 ]]; then
 		echo "$(red '---------------------------------------')"
 		echo ""
 		show_help
-		exit 1
 	fi
 fi
 
 echo ""
 
 echo "==> Checking for dependencies"
-check_dependencies curl jq shellcheck
+check_dependencies curl jq yq shellcheck expect
 
 if [[ ${USER:-'root'} == "root" ]]; then
 	echo "The testsuite must not be run as root." >&2
 	exit 1
+fi
+
+JUJU_FOUND=0
+which juju &>/dev/null || JUJU_FOUND=$?
+if [[ $JUJU_FOUND == 0 ]]; then
+	echo "==> Using Juju located at $(which juju)"
+else
+	# shellcheck disable=SC2016
+	echo '==> WARNING: no Juju found on $PATH'
 fi
 
 cleanup() {

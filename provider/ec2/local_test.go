@@ -49,6 +49,7 @@ import (
 	imagetesting "github.com/juju/juju/environs/imagemetadata/testing"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/jujutest"
+	"github.com/juju/juju/environs/models"
 	"github.com/juju/juju/environs/simplestreams"
 	sstesting "github.com/juju/juju/environs/simplestreams/testing"
 	"github.com/juju/juju/environs/tags"
@@ -89,7 +90,6 @@ type localServer struct {
 
 	defaultVPC *types.Vpc
 	zones      []types.AvailabilityZone
-	subnets    []types.Subnet
 }
 
 func (srv *localServer) startServer(c *gc.C) {
@@ -348,11 +348,11 @@ func (t *localServerSuite) prepareWithParamsAndBootstrapWithVPCID(c *gc.C, param
 
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			Placement:                "zone=test-available",
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			Placement:               "zone=test-available",
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -376,11 +376,11 @@ func (t *localServerSuite) TestSystemdBootstrapInstanceUserDataAndState(c *gc.C)
 	env := t.Prepare(c)
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			BootstrapSeries:          coreseries.LatestLTS(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			BootstrapBase:           coreseries.LatestLTSBase(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -450,10 +450,10 @@ func (t *localServerSuite) TestTerminateInstancesIgnoresNotFound(c *gc.C) {
 	env := t.Prepare(c)
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -529,10 +529,10 @@ func (t *localServerSuite) TestGetTerminatedInstances(c *gc.C) {
 	env := t.Prepare(c)
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -697,16 +697,34 @@ func (t *localServerSuite) TestInstanceStatus(c *gc.C) {
 	env := t.Prepare(c)
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 	t.srv.ec2srv.SetInitialInstanceState(ec2test.Terminated)
 	inst, _ := testing.AssertStartInstance(c, env, t.callCtx, t.ControllerUUID, "1")
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(inst.Status(t.callCtx).Message, gc.Equals, "terminated")
+}
+
+func (t *localServerSuite) TestInstancesCreatedWithIMDSv2(c *gc.C) {
+	t.srv.ec2srv.SetInitialInstanceState(ec2test.Running)
+	t.prepareAndBootstrap(c)
+
+	output, err := t.srv.ec2srv.DescribeInstances(
+		stdcontext.Background(), &awsec2.DescribeInstancesInput{
+			Filters: []types.Filter{makeFilter("tag:"+tags.JujuController, t.ControllerUUID)},
+		})
+	c.Assert(err, jc.ErrorIsNil)
+
+	for _, res := range output.Reservations {
+		for _, inst := range res.Instances {
+			c.Assert(inst.MetadataOptions, gc.NotNil)
+			c.Assert(inst.MetadataOptions.HttpEndpoint, gc.Equals, types.InstanceMetadataEndpointStateEnabled)
+		}
+	}
 }
 
 func (t *localServerSuite) TestStartInstanceHardwareCharacteristics(c *gc.C) {
@@ -815,22 +833,22 @@ func (t *localServerSuite) TestStartInstanceZoneIndependent(c *gc.C) {
 }
 
 func (t *localServerSuite) TestStartInstanceSubnet(c *gc.C) {
-	inst, err := t.testStartInstanceSubnet(c, "0.1.2.0/24")
+	inst, err := t.testStartInstanceSubnet(c, "10.1.2.0/24")
 	c.Assert(err, jc.ErrorIsNil)
 	ec2Inst := ec2.InstanceSDKEC2(inst)
 	c.Assert(aws.ToString(ec2Inst.Placement.AvailabilityZone), gc.Equals, "test-available")
 }
 
 func (t *localServerSuite) TestStartInstanceSubnetUnavailable(c *gc.C) {
-	// See addTestingSubnets, 0.1.3.0/24 is in state "unavailable", but is in
+	// See addTestingSubnets, 10.1.3.0/24 is in state "unavailable", but is in
 	// an AZ that would otherwise be available
-	_, err := t.testStartInstanceSubnet(c, "0.1.3.0/24")
-	c.Assert(err, gc.ErrorMatches, `subnet "0.1.3.0/24" is "unavailable"`)
+	_, err := t.testStartInstanceSubnet(c, "10.1.3.0/24")
+	c.Assert(err, gc.ErrorMatches, `subnet "10.1.3.0/24" is "unavailable"`)
 }
 
 func (t *localServerSuite) TestStartInstanceSubnetAZUnavailable(c *gc.C) {
-	// See addTestingSubnets, 0.1.4.0/24 is in an AZ that is unavailable
-	_, err := t.testStartInstanceSubnet(c, "0.1.4.0/24")
+	// See addTestingSubnets, 10.1.4.0/24 is in an AZ that is unavailable
+	_, err := t.testStartInstanceSubnet(c, "10.1.4.0/24")
 	c.Assert(err, gc.ErrorMatches, `availability zone "test-unavailable" is "unavailable"`)
 }
 
@@ -868,7 +886,7 @@ func (t *localServerSuite) TestDeriveAvailabilityZoneSubnetWrongVPC(c *gc.C) {
 	env := t.prepareAndBootstrapWithConfig(c, coretesting.Attrs{"vpc-id": "vpc-0", "vpc-id-force": true})
 	params := environs.StartInstanceParams{
 		ControllerUUID: t.ControllerUUID,
-		Placement:      "subnet=0.1.2.0/24",
+		Placement:      "subnet=10.1.2.0/24",
 		SubnetsToZones: []map[corenetwork.Id][]string{{
 			subIDs[0]: {"test-available"},
 			subIDs[1]: {"test-available"},
@@ -877,7 +895,7 @@ func (t *localServerSuite) TestDeriveAvailabilityZoneSubnetWrongVPC(c *gc.C) {
 	}
 	zonedEnviron := env.(common.ZonedEnviron)
 	_, err := zonedEnviron.DeriveAvailabilityZones(t.callCtx, params)
-	c.Assert(err, gc.ErrorMatches, `unknown placement directive: subnet=0.1.2.0/24`)
+	c.Assert(err, gc.ErrorMatches, `unknown placement directive: subnet=10.1.2.0/24`)
 }
 
 func (t *localServerSuite) TestGetAvailabilityZones(c *gc.C) {
@@ -1082,19 +1100,50 @@ func (t *localServerSuite) testStartInstanceAvailZoneAllConstrained(c *gc.C, run
 	c.Assert(errors.Details(err), jc.Contains, runInstancesError.ErrorMessage())
 }
 
+// addTestingNetworkInterface adds one network interface with vpc id and
+// availability zone. It will also have a private IP with no
+func (t *localServerSuite) addTestingNetworkInterfaceToInstance(c *gc.C, instId instance.Id) ([]instance.Id, string) {
+	vpc := t.srv.ec2srv.AddVpc(types.Vpc{
+		CidrBlock: aws.String("10.1.0.0/16"),
+		IsDefault: aws.Bool(true),
+	})
+	sub, err := t.srv.ec2srv.AddSubnet(types.Subnet{
+		VpcId:            vpc.VpcId,
+		CidrBlock:        aws.String("10.1.2.0/24"),
+		AvailabilityZone: aws.String("test-available"),
+		State:            "available",
+		DefaultForAz:     aws.Bool(true),
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	results := make([]instance.Id, 1)
+	iface1, err := t.srv.ec2srv.AddNetworkInterface(types.NetworkInterface{
+		VpcId:              vpc.VpcId,
+		AvailabilityZone:   aws.String("test-available"),
+		PrivateIpAddresses: []types.NetworkInterfacePrivateIpAddress{{}},
+		Attachment: &types.NetworkInterfaceAttachment{
+			DeviceIndex: aws.Int32(-1),
+			InstanceId:  aws.String(string(instId)),
+		},
+		SubnetId: sub.SubnetId,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	results[0] = instance.Id(aws.ToString(iface1.NetworkInterfaceId))
+	return results, aws.ToString(vpc.VpcId)
+}
+
 // addTestingSubnets adds a testing default VPC with 3 subnets in the EC2 test
 // server: 2 of the subnets are in the "test-available" AZ, the remaining - in
 // "test-unavailable". Returns a slice with the IDs of the created subnets and
 // vpc id that those were added to
 func (t *localServerSuite) addTestingSubnets(c *gc.C) ([]corenetwork.Id, string) {
 	vpc := t.srv.ec2srv.AddVpc(types.Vpc{
-		CidrBlock: aws.String("0.1.0.0/16"),
+		CidrBlock: aws.String("10.1.0.0/16"),
 		IsDefault: aws.Bool(true),
 	})
 	results := make([]corenetwork.Id, 3)
 	sub1, err := t.srv.ec2srv.AddSubnet(types.Subnet{
 		VpcId:            vpc.VpcId,
-		CidrBlock:        aws.String("0.1.2.0/24"),
+		CidrBlock:        aws.String("10.1.2.0/24"),
 		AvailabilityZone: aws.String("test-available"),
 		State:            "available",
 		DefaultForAz:     aws.Bool(true),
@@ -1103,7 +1152,7 @@ func (t *localServerSuite) addTestingSubnets(c *gc.C) ([]corenetwork.Id, string)
 	results[0] = corenetwork.Id(aws.ToString(sub1.SubnetId))
 	sub2, err := t.srv.ec2srv.AddSubnet(types.Subnet{
 		VpcId:            vpc.VpcId,
-		CidrBlock:        aws.String("0.1.3.0/24"),
+		CidrBlock:        aws.String("10.1.3.0/24"),
 		AvailabilityZone: aws.String("test-available"),
 		State:            "unavailable",
 	})
@@ -1111,7 +1160,7 @@ func (t *localServerSuite) addTestingSubnets(c *gc.C) ([]corenetwork.Id, string)
 	results[1] = corenetwork.Id(aws.ToString(sub2.SubnetId))
 	sub3, err := t.srv.ec2srv.AddSubnet(types.Subnet{
 		VpcId:            vpc.VpcId,
-		CidrBlock:        aws.String("0.1.4.0/24"),
+		CidrBlock:        aws.String("10.1.4.0/24"),
 		AvailabilityZone: aws.String("test-unavailable"),
 		DefaultForAz:     aws.Bool(true),
 		State:            "unavailable",
@@ -1140,12 +1189,12 @@ func (t *localServerSuite) prepareAndBootstrapWithConfig(c *gc.C, config coretes
 
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			BootstrapConstraints:     constraints,
-			ControllerConfig:         controllerConfig,
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			Placement:                "zone=test-available",
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			BootstrapConstraints:    constraints,
+			ControllerConfig:        controllerConfig,
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			Placement:               "zone=test-available",
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 	return env
@@ -1416,7 +1465,7 @@ func (t *localServerSuite) TestPrecheckInstanceValidInstanceType(c *gc.C) {
 	env := t.Prepare(c)
 	cons := constraints.MustParse("instance-type=m1.small root-disk=1G")
 	err := env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:      jujuversion.DefaultSupportedLTS(),
+		Base:        jujuversion.DefaultSupportedLTSBase(),
 		Constraints: cons,
 	})
 	c.Assert(err, jc.ErrorIsNil)
@@ -1426,7 +1475,7 @@ func (t *localServerSuite) TestPrecheckInstanceInvalidInstanceType(c *gc.C) {
 	env := t.Prepare(c)
 	cons := constraints.MustParse("instance-type=m1.invalid")
 	err := env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:      jujuversion.DefaultSupportedLTS(),
+		Base:        jujuversion.DefaultSupportedLTSBase(),
 		Constraints: cons,
 	})
 	c.Assert(err, gc.ErrorMatches, `invalid AWS instance type "m1.invalid" specified`)
@@ -1436,7 +1485,7 @@ func (t *localServerSuite) TestPrecheckInstanceUnsupportedArch(c *gc.C) {
 	env := t.Prepare(c)
 	cons := constraints.MustParse("instance-type=cc1.4xlarge arch=arm64")
 	err := env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:      jujuversion.DefaultSupportedLTS(),
+		Base:        jujuversion.DefaultSupportedLTSBase(),
 		Constraints: cons,
 	})
 	c.Assert(err, gc.ErrorMatches, `invalid AWS instance type "cc1.4xlarge" and arch "arm64" specified`)
@@ -1446,7 +1495,7 @@ func (t *localServerSuite) TestPrecheckInstanceAvailZone(c *gc.C) {
 	env := t.Prepare(c)
 	placement := "zone=test-available"
 	err := env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:    jujuversion.DefaultSupportedLTS(),
+		Base:      jujuversion.DefaultSupportedLTSBase(),
 		Placement: placement,
 	})
 	c.Assert(err, jc.ErrorIsNil)
@@ -1456,7 +1505,7 @@ func (t *localServerSuite) TestPrecheckInstanceAvailZoneUnavailable(c *gc.C) {
 	env := t.Prepare(c)
 	placement := "zone=test-unavailable"
 	err := env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:    jujuversion.DefaultSupportedLTS(),
+		Base:      jujuversion.DefaultSupportedLTSBase(),
 		Placement: placement,
 	})
 	c.Assert(err, gc.ErrorMatches, `availability zone "test-unavailable" is "unavailable"`)
@@ -1466,7 +1515,7 @@ func (t *localServerSuite) TestPrecheckInstanceAvailZoneUnknown(c *gc.C) {
 	env := t.Prepare(c)
 	placement := "zone=test-unknown"
 	err := env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:    jujuversion.DefaultSupportedLTS(),
+		Base:      jujuversion.DefaultSupportedLTSBase(),
 		Placement: placement,
 	})
 	c.Assert(err, gc.ErrorMatches, `invalid availability zone "test-unknown"`)
@@ -1490,7 +1539,7 @@ func (t *localServerSuite) testPrecheckInstanceVolumeAvailZone(c *gc.C, placemen
 	c.Assert(err, jc.ErrorIsNil)
 
 	err = env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:    jujuversion.DefaultSupportedLTS(),
+		Base:      jujuversion.DefaultSupportedLTSBase(),
 		Placement: placement,
 		VolumeAttachments: []storage.VolumeAttachmentParams{{
 			AttachmentParams: storage.AttachmentParams{
@@ -1513,7 +1562,7 @@ func (t *localServerSuite) TestPrecheckInstanceAvailZoneVolumeConflict(c *gc.C) 
 	c.Assert(err, jc.ErrorIsNil)
 
 	err = env.PrecheckInstance(t.callCtx, environs.PrecheckInstanceParams{
-		Series:    jujuversion.DefaultSupportedLTS(),
+		Base:      jujuversion.DefaultSupportedLTSBase(),
 		Placement: "zone=test-available",
 		VolumeAttachments: []storage.VolumeAttachmentParams{{
 			AttachmentParams: storage.AttachmentParams{
@@ -1536,7 +1585,7 @@ func (t *localServerSuite) TestValidateImageMetadata(c *gc.C) {
 	env := t.Prepare(c)
 	params, err := env.(simplestreams.ImageMetadataValidator).ImageMetadataLookupParams("test")
 	c.Assert(err, jc.ErrorIsNil)
-	params.Release = jujuversion.DefaultSupportedLTS()
+	params.Release = jujuversion.DefaultSupportedLTSBase().Channel.Track
 	params.Endpoint = "http://foo"
 	params.Sources, err = environs.ImageMetadataSources(env, ss)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1567,10 +1616,10 @@ func (t *localServerSuite) setUpInstanceWithDefaultVpc(c *gc.C) (environs.Networ
 	env := t.prepareEnviron(c)
 	err := bootstrap.Bootstrap(t.BootstrapContext, env,
 		t.callCtx, bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -1638,14 +1687,22 @@ func (t *localServerSuite) TestPartialInterfacesForMultipleInstances(c *gc.C) {
 
 func (t *localServerSuite) TestNetworkInterfaces(c *gc.C) {
 	env, instId := t.setUpInstanceWithDefaultVpc(c)
+	_, _ = t.addTestingNetworkInterfaceToInstance(c, instId)
 	infoLists, err := env.NetworkInterfaces(t.callCtx, []instance.Id{instId})
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(infoLists, gc.HasLen, 1)
 
 	list := infoLists[0]
-	c.Assert(list, gc.HasLen, 1)
+	c.Assert(list, gc.HasLen, 2)
 
-	t.assertInterfaceLooksValid(c, 0, 0, list[0])
+	// It's unpredictable which way around the interfaces are returned, so
+	// ensure the correct one is analysed. The misc interface is given the device
+	// index -1
+	if list[0].DeviceIndex == -1 {
+		t.assertInterfaceLooksValid(c, 0, 0, list[1])
+	} else {
+		t.assertInterfaceLooksValid(c, 0, 0, list[0])
+	}
 }
 
 func (t *localServerSuite) assertInterfaceLooksValid(c *gc.C, expIfaceID, expDevIndex int, iface corenetwork.InterfaceInfo) {
@@ -1895,8 +1952,9 @@ func (s *localServerSuite) TestAdoptResources(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	env, err := environs.New(s.BootstrapContext.Context(), environs.OpenParams{
-		Cloud:  s.CloudSpec(),
-		Config: cfg,
+		Cloud:          s.CloudSpec(),
+		Config:         cfg,
+		ControllerUUID: coretesting.ControllerTag.Id(),
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	inst, _ := testing.AssertStartInstance(c, env, s.callCtx, s.ControllerUUID, "0")
@@ -2200,9 +2258,8 @@ func (t *localServerSuite) TestInstanceGroups(c *gc.C) {
 	// that the unneeded permission that we added earlier
 	// has been deleted).
 	perms := info[0].IpPermissions
-	c.Assert(perms, gc.HasLen, 3)
+	c.Assert(perms, gc.HasLen, 5)
 	checkPortAllowed(c, perms, 22) // SSH
-	checkPortAllowed(c, perms, int32(coretesting.FakeControllerConfig().APIPort()))
 	checkSecurityGroupAllowed(c, perms, groups[0])
 
 	// The old machine group should have been reused also.
@@ -2256,39 +2313,6 @@ func (t *localServerSuite) TestInstanceGroups(c *gc.C) {
 		}
 	}
 	c.Assert(instIds, jc.SameContents, idsFromInsts(allInsts))
-}
-
-func (t *localServerSuite) TestInstanceGroupsWithAutocert(c *gc.C) {
-	// Prepare the controller configuration.
-	t.Prepare(c)
-	params := environs.StartInstanceParams{
-		ControllerUUID: t.ControllerUUID,
-	}
-	err := testing.FillInStartInstanceParams(t.Env, "42", true, &params)
-	c.Assert(err, jc.ErrorIsNil)
-	params.InstanceConfig.ControllerConfig["api-port"] = 443
-	params.InstanceConfig.ControllerConfig["autocert-dns-name"] = "example.com"
-
-	// Bootstrap the controller.
-	result, err := t.Env.StartInstance(t.callCtx, params)
-	c.Assert(err, jc.ErrorIsNil)
-	inst := result.Instance
-	defer t.Env.StopInstances(t.callCtx, inst.Id())
-
-	// Get security permissions.
-	group := ec2.JujuGroupName(t.Env)
-	ec2conn := ec2.EnvironEC2Client(t.Env)
-	groupsResp, err := ec2conn.DescribeSecurityGroups(t.callCtx, &awsec2.DescribeSecurityGroupsInput{
-		GroupNames: []string{group},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(groupsResp.SecurityGroups, gc.HasLen, 1)
-	perms := groupsResp.SecurityGroups[0].IpPermissions
-
-	// Check that the expected ports are accessible.
-	checkPortAllowed(c, perms, 22)
-	checkPortAllowed(c, perms, 80)
-	checkPortAllowed(c, perms, 443)
 }
 
 func checkPortAllowed(c *gc.C, perms []types.IpPermission, port int32) {
@@ -2358,7 +2382,7 @@ func (t *localServerSuite) TestPrechecker(c *gc.C) {
 	t.Prepare(c)
 	err := t.Env.PrecheckInstance(t.ProviderCallContext,
 		environs.PrecheckInstanceParams{
-			Series: "precise",
+			Base: jujuversion.DefaultSupportedLTSBase(),
 		})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -2663,6 +2687,79 @@ func (t *localServerSuite) TestGlobalPorts(c *gc.C) {
 	c.Assert(err, gc.ErrorMatches, `invalid firewall mode "global" for retrieving ingress rules from instance`)
 }
 
+func (t *localServerSuite) TestModelPorts(c *gc.C) {
+	t.prepareAndBootstrap(c)
+
+	fwModelEnv, ok := t.Env.(models.ModelFirewaller)
+	c.Assert(ok, gc.Equals, true)
+
+	rules, err := fwModelEnv.ModelIngressRules(t.ProviderCallContext)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(
+		rules, jc.DeepEquals,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("22/tcp"), firewall.AllNetworksIPV4CIDR),
+		},
+	)
+
+	err = fwModelEnv.OpenModelPorts(t.ProviderCallContext,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("67/udp")),
+			firewall.NewIngressRule(network.MustParsePortRange("45/tcp")),
+			firewall.NewIngressRule(network.MustParsePortRange("100-110/tcp")),
+		})
+	c.Assert(err, jc.ErrorIsNil)
+
+	rules, err = fwModelEnv.ModelIngressRules(t.ProviderCallContext)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(
+		rules, jc.DeepEquals,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("22/tcp"), firewall.AllNetworksIPV4CIDR),
+			firewall.NewIngressRule(network.MustParsePortRange("45/tcp"), firewall.AllNetworksIPV4CIDR),
+			firewall.NewIngressRule(network.MustParsePortRange("100-110/tcp"), firewall.AllNetworksIPV4CIDR),
+			firewall.NewIngressRule(network.MustParsePortRange("67/udp"), firewall.AllNetworksIPV4CIDR),
+		},
+	)
+
+	// Check closing some ports.
+	err = fwModelEnv.CloseModelPorts(t.ProviderCallContext,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("45/tcp")),
+			firewall.NewIngressRule(network.MustParsePortRange("67/udp")),
+		})
+	c.Assert(err, jc.ErrorIsNil)
+
+	rules, err = fwModelEnv.ModelIngressRules(t.ProviderCallContext)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(
+		rules, jc.DeepEquals,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("22/tcp"), firewall.AllNetworksIPV4CIDR),
+			firewall.NewIngressRule(network.MustParsePortRange("100-110/tcp"), firewall.AllNetworksIPV4CIDR),
+		},
+	)
+
+	// Check that we can close ports that aren't there.
+	err = fwModelEnv.CloseModelPorts(t.ProviderCallContext,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("111/tcp")),
+			firewall.NewIngressRule(network.MustParsePortRange("222/udp")),
+			firewall.NewIngressRule(network.MustParsePortRange("2000-2500/tcp")),
+		})
+	c.Assert(err, jc.ErrorIsNil)
+
+	rules, err = fwModelEnv.ModelIngressRules(t.ProviderCallContext)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(
+		rules, jc.DeepEquals,
+		firewall.IngressRules{
+			firewall.NewIngressRule(network.MustParsePortRange("22/tcp"), firewall.AllNetworksIPV4CIDR),
+			firewall.NewIngressRule(network.MustParsePortRange("100-110/tcp"), firewall.AllNetworksIPV4CIDR),
+		},
+	)
+}
+
 func (t *localServerSuite) TestBootstrapMultiple(c *gc.C) {
 	// bootstrap.Bootstrap no longer raises errors if the environment is
 	// already up, this has been moved into the bootstrap command.
@@ -2683,7 +2780,8 @@ func (t *localServerSuite) TestBootstrapMultiple(c *gc.C) {
 func (t *localServerSuite) TestStartInstanceWithEmptyNonceFails(c *gc.C) {
 	machineId := "4"
 	apiInfo := testing.FakeAPIInfo(machineId)
-	instanceConfig, err := instancecfg.NewInstanceConfig(coretesting.ControllerTag, machineId, "", "released", "jammy", apiInfo)
+	instanceConfig, err := instancecfg.NewInstanceConfig(coretesting.ControllerTag, machineId, "",
+		"released", jujuversion.DefaultSupportedLTSBase(), apiInfo)
 	c.Assert(err, jc.ErrorIsNil)
 
 	t.Prepare(c)
@@ -2703,7 +2801,7 @@ func (t *localServerSuite) TestStartInstanceWithEmptyNonceFails(c *gc.C) {
 	err = testing.SetImageMetadata(
 		t.Env,
 		simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory()),
-		[]string{"jammy"},
+		[]string{"22.04"},
 		[]string{"amd64"},
 		&params.ImageMetadata,
 	)

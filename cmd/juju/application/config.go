@@ -1,5 +1,6 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package application
 
 import (
@@ -72,11 +73,27 @@ example:
 juju config apache2 --branch=master servername=example.com
 juju config apache2 --branch test-branch servername=staging.example.com
 
-See also:
-    deploy
-    status
-    model-config
-    controller-config
+Rather than specifying each setting name/value inline, the --file flag option
+may be used to provide a list of settings to be updated as a yaml file. The
+yaml file contents must include a single top-level key with the application's
+name followed by a dictionary of key/value pairs that correspond to the names
+and values of the settings to be set. For instance, to configure apache2,
+the following yaml file can be used:
+
+apache2:
+  servername: "example.com"
+  lb_balancer_timeout: 60
+
+If the above yaml document is stored in a file called config.yaml, the
+following command can be used to apply the config changes:
+
+juju config apache2 --file config.yaml
+
+Finally, the --reset flag can be used to revert one or more configuration
+settings back to their default value as defined in the charm metadata:
+
+juju config apache2 --reset servername
+juju config apache2 --reset servername,lb_balancer_timeout
 `
 )
 
@@ -117,6 +134,12 @@ func (c *configCommand) Info() *cmd.Info {
 		Args:    "<application name> [--branch <branch-name>] [--reset <key[,key]>] [<attribute-key>][=<value>] ...]",
 		Purpose: configSummary,
 		Doc:     configDetails,
+		SeeAlso: []string{
+			"deploy",
+			"status",
+			"model-config",
+			"controller-config",
+		},
 	})
 }
 

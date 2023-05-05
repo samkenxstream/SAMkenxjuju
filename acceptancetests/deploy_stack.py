@@ -109,7 +109,7 @@ def deploy_dummy_stack(client, charm_series, use_charmstore=False):
             platform=platform)
     client.deploy(dummy_source, series=charm_series)
     client.deploy(dummy_sink, series=charm_series)
-    client.juju('add-relation', ('dummy-source', 'dummy-sink'))
+    client.juju('integrate', ('dummy-source', 'dummy-sink'))
     client.juju('expose', ('dummy-sink',))
     if client.env.kvm or client.env.maas:
         # A single virtual machine may need up to 30 minutes before
@@ -544,13 +544,13 @@ def deploy_job():
     series = args.series
     if not args.logs:
         args.logs = generate_default_clean_dir(args.temp_env_name)
-    if series is None:
-        series = 'bionic'
+    if not series:
+        series = 'jammy'
     charm_series = series
     # Don't need windows or centos state servers.
     if series.startswith("win") or series.startswith("centos"):
-        logging.info('Setting default series to bionic for win and centos.')
-        series = 'bionic'
+        logging.info('Setting default series to jammy for win and centos.')
+        series = 'jammy'
     return _deploy_job(args, charm_series, series)
 
 

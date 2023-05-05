@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -19,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	ziputil "github.com/juju/utils/v3/zip"
 
@@ -225,10 +224,10 @@ func (h *charmsHandler) processPost(r *http.Request, st *state.State) (*charm.UR
 		schema = "local"
 	}
 	if schema != "local" {
-		// charmstore and charmhub charms may only be uploaded into models
-		// which are being imported during model migrations. There's currently
-		// no other time where it makes sense to accept charm store
-		// charms through this endpoint.
+		// charmhub charms may only be uploaded into models
+		// which are being imported during model migrations.
+		// There's currently no other time where it makes sense
+		// to accept repository charms through this endpoint.
 		if isImporting, err := modelIsImporting(st); err != nil {
 			return nil, errors.Trace(err)
 		} else if !isImporting {
@@ -283,10 +282,6 @@ func (h *charmsHandler) processPost(r *http.Request, st *state.State) (*charm.UR
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-
-	case charm.CharmStore:
-		curl.User = query.Get("user")
-		fallthrough
 
 	case charm.CharmHub:
 		// If a revision argument is provided, it takes precedence
@@ -348,7 +343,7 @@ func (h *charmsHandler) processUploadedArchive(path string) error {
 
 	// There is one or more subdirs, so we need extract it to a temp
 	// dir and then read it as a charm dir.
-	tempDir, err := ioutil.TempDir("", "charm-extract")
+	tempDir, err := os.MkdirTemp("", "charm-extract")
 	if err != nil {
 		return errors.Annotate(err, "cannot create temp directory")
 	}
@@ -407,7 +402,7 @@ func (d byDepth) Less(i, j int) bool { return depth(d[i]) < depth(d[j]) }
 // then uploads it to storage, and finally updates the state.
 func RepackageAndUploadCharm(st *state.State, archive *charm.CharmArchive, curl *charm.URL) error {
 	// Create a temp dir to contain the extracted charm dir.
-	tempDir, err := ioutil.TempDir("", "charm-download")
+	tempDir, err := os.MkdirTemp("", "charm-download")
 	if err != nil {
 		return errors.Annotate(err, "cannot create temp directory")
 	}
@@ -579,7 +574,7 @@ func sendBundleContent(
 }
 
 func writeCharmToTempFile(r io.Reader) (string, error) {
-	tempFile, err := ioutil.TempFile("", "charm")
+	tempFile, err := os.CreateTemp("", "charm")
 	if err != nil {
 		return "", errors.Annotate(err, "creating temp file")
 	}

@@ -1,9 +1,6 @@
 // Copyright 2012, 2013, 2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package jujuc implements the server side of the
-// jujuc proxy tool, which forwards command invocations to the unit agent
-// process so that they can be executed against specific state.
 package jujuc
 
 import (
@@ -19,12 +16,10 @@ import (
 
 	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
 	"github.com/juju/loggo"
 	"github.com/juju/utils/v3/exec"
 
 	jujucmd "github.com/juju/juju/cmd"
-	"github.com/juju/juju/feature"
 	"github.com/juju/juju/juju/sockets"
 )
 
@@ -86,11 +81,14 @@ func constructCommandCreator(name string, newCmd functionCmdCreator) creator {
 }
 
 var secretCommands = map[string]creator{
-	"secret-create": NewSecretCreateCommand,
-	"secret-update": NewSecretUpdateCommand,
-	"secret-get":    NewSecretGetCommand,
-	"secret-grant":  NewSecretGrantCommand,
-	"secret-revoke": NewSecretRevokeCommand,
+	"secret-add":      NewSecretAddCommand,
+	"secret-set":      NewSecretSetCommand,
+	"secret-remove":   NewSecretRemoveCommand,
+	"secret-get":      NewSecretGetCommand,
+	"secret-info-get": NewSecretInfoGetCommand,
+	"secret-grant":    NewSecretGrantCommand,
+	"secret-revoke":   NewSecretRevokeCommand,
+	"secret-ids":      NewSecretIdsCommand,
 }
 
 var storageCommands = map[string]creator{
@@ -127,9 +125,7 @@ func allEnabledCommands() map[string]creator {
 	add(leaderCommands)
 	add(resourceCommands)
 	add(payloadCommands)
-	if featureflag.Enabled(feature.Secrets) {
-		add(secretCommands)
-	}
+	add(secretCommands)
 	return all
 }
 

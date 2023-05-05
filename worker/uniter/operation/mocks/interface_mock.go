@@ -6,7 +6,6 @@ package mocks
 
 import (
 	reflect "reflect"
-	time "time"
 
 	gomock "github.com/golang/mock/gomock"
 	model "github.com/juju/juju/core/model"
@@ -250,6 +249,21 @@ func (m *MockFactory) NewNoOpFinishUpgradeSeries() (operation.Operation, error) 
 func (mr *MockFactoryMockRecorder) NewNoOpFinishUpgradeSeries() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewNoOpFinishUpgradeSeries", reflect.TypeOf((*MockFactory)(nil).NewNoOpFinishUpgradeSeries))
+}
+
+// NewNoOpSecretsRemoved mocks base method.
+func (m *MockFactory) NewNoOpSecretsRemoved(arg0 []string) (operation.Operation, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NewNoOpSecretsRemoved", arg0)
+	ret0, _ := ret[0].(operation.Operation)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NewNoOpSecretsRemoved indicates an expected call of NewNoOpSecretsRemoved.
+func (mr *MockFactoryMockRecorder) NewNoOpSecretsRemoved(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewNoOpSecretsRemoved", reflect.TypeOf((*MockFactory)(nil).NewNoOpSecretsRemoved), arg0)
 }
 
 // NewRemoteInit mocks base method.
@@ -506,6 +520,20 @@ func (mr *MockCallbacksMockRecorder) RemoteInit(arg0, arg1 interface{}) *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoteInit", reflect.TypeOf((*MockCallbacks)(nil).RemoteInit), arg0, arg1)
 }
 
+// SecretsRemoved mocks base method.
+func (m *MockCallbacks) SecretsRemoved(arg0 []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SecretsRemoved", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SecretsRemoved indicates an expected call of SecretsRemoved.
+func (mr *MockCallbacksMockRecorder) SecretsRemoved(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SecretsRemoved", reflect.TypeOf((*MockCallbacks)(nil).SecretsRemoved), arg0)
+}
+
 // SetCurrentCharm mocks base method.
 func (m *MockCallbacks) SetCurrentCharm(arg0 string) error {
 	m.ctrl.T.Helper()
@@ -535,7 +563,7 @@ func (mr *MockCallbacksMockRecorder) SetExecutingStatus(arg0 interface{}) *gomoc
 }
 
 // SetSecretRotated mocks base method.
-func (m *MockCallbacks) SetSecretRotated(arg0 string, arg1 time.Time) error {
+func (m *MockCallbacks) SetSecretRotated(arg0 string, arg1 int) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetSecretRotated", arg0, arg1)
 	ret0, _ := ret[0].(error)

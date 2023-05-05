@@ -6,7 +6,7 @@ package cloud_test
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -132,7 +132,7 @@ credentials:
 func (s *addCredentialSuite) createTestCredentialFile(c *gc.C, content string) string {
 	dir := c.MkDir()
 	credsFile := filepath.Join(dir, "cred.yaml")
-	err := ioutil.WriteFile(credsFile, []byte(content), 0600)
+	err := os.WriteFile(credsFile, []byte(content), 0600)
 	c.Assert(err, jc.ErrorIsNil)
 	return credsFile
 }
@@ -140,7 +140,7 @@ func (s *addCredentialSuite) createTestCredentialFile(c *gc.C, content string) s
 func (s *addCredentialSuite) TestAddFromFileWithInvalidCredentialNames(c *gc.C) {
 	dir := c.MkDir()
 	sourceFile := filepath.Join(dir, "cred.yaml")
-	err := ioutil.WriteFile(sourceFile, []byte(`
+	err := os.WriteFile(sourceFile, []byte(`
 credentials:
   somecloud:
     credential with spaces:
@@ -217,7 +217,7 @@ credentials:
       username: user
       password: password
 `[1:]
-	err := ioutil.WriteFile(credsFile, []byte(data), 0600)
+	err := os.WriteFile(credsFile, []byte(data), 0600)
 	c.Assert(err, jc.ErrorIsNil)
 	return credsFile
 }
@@ -467,6 +467,56 @@ Credential "bobscreds" added locally for cloud "somecloud".
 	})
 }
 
+func (s *addCredentialSuite) TestAddCredentialInteractiveHiddenFile(c *gc.C) {
+	s.authTypes = []jujucloud.AuthType{"interactive"}
+	s.schema = map[jujucloud.AuthType]jujucloud.CredentialSchema{
+		"interactive": {
+			{
+				Name: "username",
+				CredentialAttr: jujucloud.CredentialAttr{
+					Description:    "the path to the username file",
+					ExpandFilePath: true,
+					Hidden:         true,
+				},
+			},
+		},
+	}
+
+	file, err := os.CreateTemp("", "username-file")
+	c.Assert(err, jc.ErrorIsNil)
+	defer file.Close()
+	_, err = file.WriteString("test")
+	c.Assert(err, jc.ErrorIsNil)
+
+	stdin := strings.NewReader(fmt.Sprintf("wallyworld\n%s\n", file.Name()))
+	ctx, err := s.run(c, stdin, "somecloud", "--client")
+	c.Assert(err, jc.ErrorIsNil)
+
+	// there's an extra line return after Using auth-type because the rest get a
+	// second line return from the user hitting return when they enter a value
+	// (which is not shown here), but that one does not.
+	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+Enter credential name: 
+Using auth-type "interactive".
+
+Enter the path to the username file: 
+Credential "wallyworld" added locally for cloud "somecloud".
+
+`[1:])
+
+	c.Assert(s.store.Credentials, jc.DeepEquals, map[string]jujucloud.CloudCredential{
+		"somecloud": {
+			AuthCredentials: map[string]jujucloud.Credential{
+				"wallyworld": jujucloud.NewCredential("userpass", map[string]string{
+					"application-password": "cloud-identity-endpoint",
+					"password":             "cloud-endpoint",
+					"username":             "test",
+				}),
+			},
+		},
+	})
+}
+
 func (s *addCredentialSuite) TestAddInvalidCredentialInteractive(c *gc.C) {
 	s.authTypes = []jujucloud.AuthType{"interactive"}
 	s.schema = map[jujucloud.AuthType]jujucloud.CredentialSchema{
@@ -573,7 +623,7 @@ Replace local credential? (y/N):
 func (s *addCredentialSuite) assertAddFileCredential(c *gc.C, input, fileKey string) {
 	dir := c.MkDir()
 	filename := filepath.Join(dir, "jsonfile")
-	err := ioutil.WriteFile(filename, []byte{}, 0600)
+	err := os.WriteFile(filename, []byte{}, 0600)
 	c.Assert(err, jc.ErrorIsNil)
 
 	stdin := strings.NewReader(fmt.Sprintf(input, filename))

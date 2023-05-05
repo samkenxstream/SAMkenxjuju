@@ -4,10 +4,12 @@
 package secrets
 
 import (
-	"context"
-	"time"
+	"github.com/juju/errors"
+	"github.com/juju/names/v4"
 
+	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/secrets/provider"
 )
 
 const (
@@ -15,57 +17,96 @@ const (
 	Version = 1
 )
 
+// ContentParams represents the content of a secret,
+// which is either a secret value or a reference used to
+// access the content from an external provider like vault.
+type ContentParams struct {
+	secrets.SecretValue
+	ValueRef *secrets.ValueRef
+}
+
+// Validate returns an error if the content is invalid.
+func (p *ContentParams) Validate() error {
+	if p.ValueRef == nil && p.SecretValue == nil {
+		return errors.NotValidf("secret content without value or backend reference")
+	}
+	return nil
+}
+
 // CreateParams are used to create a secret.
 type CreateParams struct {
-	ProviderLabel  string
-	Version        int
-	Type           secrets.SecretType
-	Owner          string
-	Path           string
-	RotateInterval time.Duration
-	Status         secrets.SecretStatus
-	Description    string
-	Tags           map[string]string
-	Params         map[string]interface{}
-	Data           map[string]string
+	Version int
+
+	secrets.SecretConfig
+	Content ContentParams
+	Owner   names.Tag
+
+	LeaderToken leadership.Token
+}
+
+// Validate returns an error if params are invalid.
+func (p *CreateParams) Validate() error {
+	switch p.Owner.Kind() {
+	case names.ApplicationTagKind, names.UnitTagKind:
+	default:
+		return errors.NotValidf("secret owner kind %q", p.Owner.Kind())
+	}
+	if err := p.Content.Validate(); err != nil {
+		return errors.Trace(err)
+	}
+	return p.SecretConfig.Validate()
 }
 
 // UpdateParams are used to update a secret.
 type UpdateParams struct {
-	RotateInterval *time.Duration
-	Status         *secrets.SecretStatus
-	Description    *string
-	Tags           *map[string]string
-	Params         map[string]interface{}
-	Data           map[string]string
+	secrets.SecretConfig
+	Content ContentParams
+
+	LeaderToken leadership.Token
 }
 
-// Filter is used when querying secrets.
-type Filter struct {
-	// TODO(wallyworld)
+// Validate returns an error if params are invalid.
+func (p *UpdateParams) Validate() error {
+	if err := p.Content.Validate(); err != nil {
+		return errors.Trace(err)
+	}
+	return p.SecretConfig.Validate()
 }
 
-// SecretsService instances provide a backend for storing secrets values.
-type SecretsService interface {
-	// CreateSecret creates a new secret and returns a URL for accessing the secret value.
-	CreateSecret(ctx context.Context, URL *secrets.URL, p CreateParams) (*secrets.SecretMetadata, error)
-
-	// UpdateSecret updates a given secret with a new secret value.
-	UpdateSecret(ctx context.Context, URL *secrets.URL, p UpdateParams) (*secrets.SecretMetadata, error)
-
-	// DeleteSecret deletes the specified secret.
-	DeleteSecret(ctx context.Context, URL *secrets.URL) error
-
-	// GetSecret returns the metadata for the specified secret.
-	GetSecret(ctx context.Context, URL *secrets.URL) (*secrets.SecretMetadata, error)
-
-	// GetSecretValue returns the value of the specified secret.
-	GetSecretValue(ctx context.Context, URL *secrets.URL) (secrets.SecretValue, error)
-
-	// ListSecrets returns secret metadata using the specified filter.
-	ListSecrets(ctx context.Context, filter Filter) ([]*secrets.SecretMetadata, error)
+// JujuAPIClient provides access to the SecretsManager facade.
+type JujuAPIClient interface {
+	// GetContentInfo returns info about the content of a secret and the backend config
+	// needed to make a backend client if necessary.
+	GetContentInfo(uri *secrets.URI, label string, refresh, peek bool) (*ContentParams, *provider.ModelBackendConfig, bool, error)
+	// GetRevisionContentInfo returns info about the content of a secret revision and the backend config
+	// needed to make a backend client if necessary.
+	// If pendingDelete is true, the revision is marked for deletion.
+	GetRevisionContentInfo(uri *secrets.URI, revision int, pendingDelete bool) (*ContentParams, *provider.ModelBackendConfig, bool, error)
+	// GetSecretBackendConfig fetches the config needed to make secret backend clients.
+	// If backendID is nil, return the current active backend (if any).
+	GetSecretBackendConfig(backendID *string) (*provider.ModelBackendConfigInfo, error)
 }
 
-// ProviderConfig is used when constructing a secrets provider.
-// TODO(wallyworld) - use a schema
-type ProviderConfig map[string]interface{}
+// BackendsClient provides access to a client which can access secret backends.
+type BackendsClient interface {
+	// GetContent returns the content of a secret, either from an external backend if
+	// one is configured, or from Juju.
+	GetContent(uri *secrets.URI, label string, refresh, peek bool) (secrets.SecretValue, error)
+
+	// GetRevisionContent returns the content of a secret revision, either from an external backend if
+	// one is configured, or from Juju.
+	GetRevisionContent(uri *secrets.URI, revision int) (secrets.SecretValue, error)
+
+	// SaveContent saves the content of a secret to an external backend returning the backend id.
+	SaveContent(uri *secrets.URI, revision int, value secrets.SecretValue) (secrets.ValueRef, error)
+
+	// DeleteContent deletes a secret from an external backend
+	// if it exists there.
+	DeleteContent(uri *secrets.URI, revision int) error
+
+	// DeleteExternalContent deletes a secret from an external backend.
+	DeleteExternalContent(ref secrets.ValueRef) error
+
+	// GetBackend returns the secret client for the provided backend ID.
+	GetBackend(backendID *string) (provider.SecretsBackend, string, error)
+}

@@ -9,9 +9,10 @@ import (
 
 	gomock "github.com/golang/mock/gomock"
 	modelupgrader "github.com/juju/juju/apiserver/facades/client/modelupgrader"
+	controller "github.com/juju/juju/controller"
 	state "github.com/juju/juju/state"
 	names "github.com/juju/names/v4"
-	replicaset "github.com/juju/replicaset/v2"
+	replicaset "github.com/juju/replicaset/v3"
 	version "github.com/juju/version/v2"
 )
 
@@ -36,6 +37,21 @@ func NewMockStatePool(ctrl *gomock.Controller) *MockStatePool {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockStatePool) EXPECT() *MockStatePoolMockRecorder {
 	return m.recorder
+}
+
+// ControllerModel mocks base method.
+func (m *MockStatePool) ControllerModel() (modelupgrader.Model, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ControllerModel")
+	ret0, _ := ret[0].(modelupgrader.Model)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ControllerModel indicates an expected call of ControllerModel.
+func (mr *MockStatePoolMockRecorder) ControllerModel() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ControllerModel", reflect.TypeOf((*MockStatePool)(nil).ControllerModel))
 }
 
 // Get mocks base method.
@@ -105,6 +121,21 @@ func (mr *MockStateMockRecorder) AbortCurrentUpgrade() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AbortCurrentUpgrade", reflect.TypeOf((*MockState)(nil).AbortCurrentUpgrade))
 }
 
+// AllCharmURLs mocks base method.
+func (m *MockState) AllCharmURLs() ([]*string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AllCharmURLs")
+	ret0, _ := ret[0].([]*string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AllCharmURLs indicates an expected call of AllCharmURLs.
+func (mr *MockStateMockRecorder) AllCharmURLs() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AllCharmURLs", reflect.TypeOf((*MockState)(nil).AllCharmURLs))
+}
+
 // AllModelUUIDs mocks base method.
 func (m *MockState) AllModelUUIDs() ([]string, error) {
 	m.ctrl.T.Helper()
@@ -118,6 +149,21 @@ func (m *MockState) AllModelUUIDs() ([]string, error) {
 func (mr *MockStateMockRecorder) AllModelUUIDs() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AllModelUUIDs", reflect.TypeOf((*MockState)(nil).AllModelUUIDs))
+}
+
+// ControllerConfig mocks base method.
+func (m *MockState) ControllerConfig() (controller.Config, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ControllerConfig")
+	ret0, _ := ret[0].(controller.Config)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ControllerConfig indicates an expected call of ControllerConfig.
+func (mr *MockStateMockRecorder) ControllerConfig() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ControllerConfig", reflect.TypeOf((*MockState)(nil).ControllerConfig))
 }
 
 // HasUpgradeSeriesLocks mocks base method.
@@ -135,23 +181,23 @@ func (mr *MockStateMockRecorder) HasUpgradeSeriesLocks() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasUpgradeSeriesLocks", reflect.TypeOf((*MockState)(nil).HasUpgradeSeriesLocks))
 }
 
-// MachineCountForSeries mocks base method.
-func (m *MockState) MachineCountForSeries(arg0 ...string) (map[string]int, error) {
+// MachineCountForBase mocks base method.
+func (m *MockState) MachineCountForBase(arg0 ...state.Base) (map[string]int, error) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{}
 	for _, a := range arg0 {
 		varargs = append(varargs, a)
 	}
-	ret := m.ctrl.Call(m, "MachineCountForSeries", varargs...)
+	ret := m.ctrl.Call(m, "MachineCountForBase", varargs...)
 	ret0, _ := ret[0].(map[string]int)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// MachineCountForSeries indicates an expected call of MachineCountForSeries.
-func (mr *MockStateMockRecorder) MachineCountForSeries(arg0 ...interface{}) *gomock.Call {
+// MachineCountForBase indicates an expected call of MachineCountForBase.
+func (mr *MockStateMockRecorder) MachineCountForBase(arg0 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MachineCountForSeries", reflect.TypeOf((*MockState)(nil).MachineCountForSeries), arg0...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MachineCountForBase", reflect.TypeOf((*MockState)(nil).MachineCountForBase), arg0...)
 }
 
 // Model mocks base method.
@@ -304,4 +350,18 @@ func (m *MockModel) Owner() names.UserTag {
 func (mr *MockModelMockRecorder) Owner() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Owner", reflect.TypeOf((*MockModel)(nil).Owner))
+}
+
+// Type mocks base method.
+func (m *MockModel) Type() state.ModelType {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Type")
+	ret0, _ := ret[0].(state.ModelType)
+	return ret0
+}
+
+// Type indicates an expected call of Type.
+func (mr *MockModelMockRecorder) Type() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Type", reflect.TypeOf((*MockModel)(nil).Type))
 }

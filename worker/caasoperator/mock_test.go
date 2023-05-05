@@ -4,20 +4,20 @@
 package caasoperator_test
 
 import (
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
-	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/worker/fortress"
 	"github.com/juju/names/v4"
 	"github.com/juju/proxy"
 	"github.com/juju/testing"
 	"github.com/juju/version/v2"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/worker/fortress"
+
 	"github.com/juju/juju/agent"
 	caasoperatorapi "github.com/juju/juju/api/agent/caasoperator"
-	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/caas/kubernetes/provider/exec"
 	"github.com/juju/juju/core/status"
@@ -29,7 +29,7 @@ import (
 )
 
 var (
-	gitlabCharmURL = charm.MustParseURL("cs:gitlab-1")
+	gitlabCharmURL = charm.MustParseURL("ch:gitlab-1")
 	gitlabSettings = charm.Settings{"k": 123}
 
 	fakeCharmContent    = []byte("abc")
@@ -62,10 +62,6 @@ func (c *fakeAgentConfig) Model() names.ModelTag {
 
 func (c *fakeAgentConfig) DataDir() string {
 	return c.dataDir
-}
-
-type fakeAPICaller struct {
-	base.APICaller
 }
 
 type fakeClient struct {

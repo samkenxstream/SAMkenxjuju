@@ -1,18 +1,20 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package state
 
 import (
 	"github.com/golang/mock/gomock"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
 	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/environs/config"
 )
 
 type MigrationImportTasksSuite struct{}
@@ -635,43 +637,47 @@ func (s *MigrationImportTasksSuite) TestImportFirewallRules(c *gc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	entity0 := s.firewallRule(ctrl, "ssh", "ssh", []string{"192.168.0.1/24"})
-	entity1 := s.firewallRule(ctrl, "ssh", "ssh", []string{"10.0.0.1/16"})
+	entity0 := s.firewallRule(ctrl, "ssh", "ssh", []string{"192.168.0.1/24", "192.168.3.0/24"})
+	entity1 := s.firewallRule(ctrl, "juju-application-offer", "juju-application-offer", []string{"10.0.0.1/16"})
 
 	entities := []description.FirewallRule{
 		entity0,
 		entity1,
 	}
 
+	modelIn := NewMockFirewallRulesInput(ctrl)
+	modelIn.EXPECT().FirewallRules().Return(entities)
+
+	modelOut := NewMockFirewallRulesOutput(ctrl)
+	modelOut.EXPECT().UpdateModelConfig(map[string]interface{}{
+		config.SSHAllowKey: "192.168.0.1/24,192.168.3.0/24",
+	}, nil)
+	modelOut.EXPECT().UpdateModelConfig(map[string]interface{}{
+		config.SAASIngressAllowKey: "10.0.0.1/16",
+	}, nil)
+
+	m := ImportFirewallRules{}
+	err := m.Execute(modelIn, modelOut)
+	c.Assert(err, jc.ErrorIsNil)
+}
+
+func (s *MigrationImportTasksSuite) TestImportFirewallRulesEmptyJujuApplicationOffer(c *gc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	entity0 := s.firewallRule(ctrl, "juju-application-offer", "juju-application-offer", []string{})
+
+	entities := []description.FirewallRule{
+		entity0,
+	}
+
 	model := NewMockFirewallRulesInput(ctrl)
 	model.EXPECT().FirewallRules().Return(entities)
 
-	runner := NewMockTransactionRunner(ctrl)
-	runner.EXPECT().RunTransaction([]txn.Op{
-		{
-			C:      firewallRulesC,
-			Id:     "ssh",
-			Assert: txn.DocMissing,
-			Insert: firewallRulesDoc{
-				Id:               "ssh",
-				WellKnownService: "ssh",
-				WhitelistCIDRS:   []string{"192.168.0.1/24"},
-			},
-		},
-		{
-			C:      firewallRulesC,
-			Id:     "ssh",
-			Assert: txn.DocMissing,
-			Insert: firewallRulesDoc{
-				Id:               "ssh",
-				WellKnownService: "ssh",
-				WhitelistCIDRS:   []string{"10.0.0.1/16"},
-			},
-		},
-	}).Return(nil)
+	// No call to UpdateModeConfig since juju-application-offer is empty
 
 	m := ImportFirewallRules{}
-	err := m.Execute(model, runner)
+	err := m.Execute(model, nil)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -684,11 +690,10 @@ func (s *MigrationImportTasksSuite) TestImportFirewallRulesWithNoEntities(c *gc.
 	model := NewMockFirewallRulesInput(ctrl)
 	model.EXPECT().FirewallRules().Return(entities)
 
-	runner := NewMockTransactionRunner(ctrl)
-	// No call to RunTransaction if there are no operations.
+	// No call to UpdateModeConfig if there are no operations.
 
 	m := ImportFirewallRules{}
-	err := m.Execute(model, runner)
+	err := m.Execute(model, nil)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -702,25 +707,16 @@ func (s *MigrationImportTasksSuite) TestImportFirewallRulesWithTransactionRunner
 		entity0,
 	}
 
-	model := NewMockFirewallRulesInput(ctrl)
-	model.EXPECT().FirewallRules().Return(entities)
+	modelIn := NewMockFirewallRulesInput(ctrl)
+	modelIn.EXPECT().FirewallRules().Return(entities)
 
-	runner := NewMockTransactionRunner(ctrl)
-	runner.EXPECT().RunTransaction([]txn.Op{
-		{
-			C:      firewallRulesC,
-			Id:     "ssh",
-			Assert: txn.DocMissing,
-			Insert: firewallRulesDoc{
-				Id:               "ssh",
-				WellKnownService: "ssh",
-				WhitelistCIDRS:   []string{"192.168.0.1/24"},
-			},
-		},
-	}).Return(errors.New("fail"))
+	modelOut := NewMockFirewallRulesOutput(ctrl)
+	modelOut.EXPECT().UpdateModelConfig(map[string]interface{}{
+		config.SSHAllowKey: "192.168.0.1/24",
+	}, nil).Return(errors.New("fail"))
 
 	m := ImportFirewallRules{}
-	err := m.Execute(model, runner)
+	err := m.Execute(modelIn, modelOut)
 	c.Assert(err, gc.ErrorMatches, "fail")
 }
 

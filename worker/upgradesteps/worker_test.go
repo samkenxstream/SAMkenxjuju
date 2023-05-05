@@ -57,7 +57,7 @@ func (s *UpgradeSuite) SetUpTest(c *gc.C) {
 	// wedged, so dump the logs.
 	coretesting.DumpTestLogsAfter(time.Minute, c, s)
 
-	s.oldVersion = coretesting.CurrentVersion(c)
+	s.oldVersion = coretesting.CurrentVersion()
 	s.oldVersion.Major = 1
 	s.oldVersion.Minor = 16
 
@@ -433,7 +433,7 @@ func (s *UpgradeSuite) create3Controllers(c *gc.C) (machineIdA, machineIdB, mach
 	})
 	machineIdA = machine0.Id()
 
-	changes, err := s.State.EnableHA(3, constraints.Value{}, "quantal", nil)
+	changes, err := s.State.EnableHA(3, constraints.Value{}, state.UbuntuBase("12.10"), nil)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(len(changes.Added), gc.Equals, 2)
 

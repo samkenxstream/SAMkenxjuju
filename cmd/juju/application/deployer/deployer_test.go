@@ -5,40 +5,44 @@ package deployer
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/clock"
 	"github.com/juju/cmd/v3"
+	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
+	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/resources"
 	commoncharm "github.com/juju/juju/api/common/charm"
+	"github.com/juju/juju/api/common/charms"
 	"github.com/juju/juju/cmd/juju/application/deployer/mocks"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/series"
+	jujuseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/testcharms"
 	coretesting "github.com/juju/juju/testing"
 )
 
 type deployerSuite struct {
+	testing.IsolationSuite
+
 	consumeDetails    *mocks.MockConsumeDetails
 	resolver          *mocks.MockResolver
 	deployerAPI       *mocks.MockDeployerAPI
 	deployStep        *fakeDeployStep
-	macaroonGetter    *mocks.MockMacaroonGetter
 	modelCommand      *mocks.MockModelCommand
 	filesystem        *mocks.MockFilesystem
 	bundle            *mocks.MockBundle
@@ -53,11 +57,20 @@ var _ = gc.Suite(&deployerSuite{})
 
 func (s *deployerSuite) SetUpTest(_ *gc.C) {
 	s.deployResourceIDs = make(map[string]string)
+
+	// TODO: remove this patch once we removed all the old series from tests in current package.
+	s.PatchValue(&SupportedJujuSeries,
+		func(time.Time, string, string) (set.Strings, error) {
+			return set.NewStrings(
+				"centos7", "centos8", "centos9", "genericlinux", "kubernetes", "opensuseleap",
+				"jammy", "focal", "bionic", "xenial",
+			), nil
+		},
+	)
 }
 
 func (s *deployerSuite) TestGetDeployerPredeployedLocalCharm(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
 	s.expectModelType()
 
 	cfg := s.basicDeployerConfig()
@@ -73,15 +86,12 @@ func (s *deployerSuite) TestGetDeployerPredeployedLocalCharm(c *gc.C) {
 
 func (s *deployerSuite) TestGetDeployerLocalCharm(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
 	s.expectModelGet(c)
-	cfg := s.basicDeployerConfig()
-	cfg.Series = "bionic"
+	cfg := s.basicDeployerConfig(series.MustParseBaseFromString("ubuntu@18.04"))
 	s.expectModelType()
 
 	dir := c.MkDir()
 	charmPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(dir, "multi-series")
-
 	s.expectStat(charmPath, nil)
 	cfg.CharmOrBundle = charmPath
 
@@ -94,24 +104,14 @@ func (s *deployerSuite) TestGetDeployerLocalCharm(c *gc.C) {
 
 func (s *deployerSuite) TestGetDeployerLocalCharmError(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-
+	path := "./bad.charm"
 	factory := s.newDeployerFactory().(*factory)
-	factory.charmOrBundle = "./bad.charm"
+	factory.charmOrBundle = path
 
-	s.expectStat("./bad.charm", os.ErrNotExist)
+	s.expectStat(path, os.ErrNotExist)
 
-	_, err := factory.maybePredeployedLocalCharm()
+	_, err := factory.GetDeployer(DeployerConfig{CharmOrBundle: path}, s.modelConfigGetter, nil)
 	c.Assert(err, gc.ErrorMatches, `no charm was found at "./bad.charm"`)
-}
-
-func (s *deployerSuite) TestGetDeployerCharmStoreCharm(c *gc.C) {
-	ch := charm.MustParseURL("cs:test-charm")
-	s.testGetDeployerRepositoryCharm(c, ch)
-}
-
-func (s *deployerSuite) TestGetDeployerCharmStoreCharmWithRevisionInURL(c *gc.C) {
-	ch := charm.MustParseURL("cs:test-charm-7")
-	s.testGetDeployerRepositoryCharm(c, ch)
 }
 
 func (s *deployerSuite) TestGetDeployerCharmHubCharm(c *gc.C) {
@@ -121,7 +121,7 @@ func (s *deployerSuite) TestGetDeployerCharmHubCharm(c *gc.C) {
 
 func (s *deployerSuite) testGetDeployerRepositoryCharm(c *gc.C, ch *charm.URL) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
+
 	s.expectModelType()
 	// NotValid ensures that maybeReadRepositoryBundle won't find
 	// charmOrBundle is a bundle.
@@ -135,18 +135,6 @@ func (s *deployerSuite) testGetDeployerRepositoryCharm(c *gc.C, ch *charm.URL) {
 	deployer, err := factory.GetDeployer(cfg, s.modelConfigGetter, s.resolver)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy charm: %s", ch.String()))
-}
-
-func (s *deployerSuite) TestGetDeployerCharmStoreCharmWithRevision(c *gc.C) {
-	cfg := s.basicDeployerConfig()
-	cfg.Revision = 8
-	ch := charm.MustParseURL("cs:test-charm")
-	s.expectStat(ch.String(), errors.NotFoundf("file"))
-	cfg.CharmOrBundle = ch.String()
-
-	deployer, err := s.testGetDeployerRepositoryCharmWithRevision(c, ch, cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy charm: %s", ch.WithRevision(8).String()))
 }
 
 func (s *deployerSuite) TestGetDeployerCharmHubCharmWithRevision(c *gc.C) {
@@ -170,7 +158,6 @@ func (s *deployerSuite) TestGetDeployerCharmHubCharmWithRevisionFail(c *gc.C) {
 
 func (s *deployerSuite) testGetDeployerRepositoryCharmWithRevision(c *gc.C, ch *charm.URL, cfg DeployerConfig) (Deployer, error) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
 	s.expectModelType()
 	// NotValid ensures that maybeReadRepositoryBundle won't find
 	// charmOrBundle is a bundle.
@@ -183,15 +170,13 @@ func (s *deployerSuite) testGetDeployerRepositoryCharmWithRevision(c *gc.C, ch *
 	return factory.GetDeployer(cfg, s.modelConfigGetter, s.resolver)
 }
 
-func (s *deployerSuite) TestCharmStoreSeriesOverride(c *gc.C) {
+func (s *deployerSuite) TestSeriesOverride(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
 	s.expectModelType()
 	s.expectResolveBundleURL(errors.NotValidf("not a bundle"), 1)
 
 	cfg := s.basicDeployerConfig()
-	cfg.Series = "bionic" // Override the default series (as if --series was specified)
-	ch := charm.MustParseURL("cs:test-charm")
+	ch := charm.MustParseURL("ch:test-charm")
 	s.expectStat(ch.String(), errors.NotFoundf("file"))
 	cfg.CharmOrBundle = ch.String()
 
@@ -200,16 +185,15 @@ func (s *deployerSuite) TestCharmStoreSeriesOverride(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy charm: %s", ch.String()))
 
-	charmStoreDeployer := deployer.(*repositoryCharm)
-	c.Assert(charmStoreDeployer.series, gc.Equals, "bionic")
+	charmDeployer := deployer.(*repositoryCharm)
+	c.Assert(charmDeployer.id.Origin.Base.OS, gc.Equals, "ubuntu")
+	c.Assert(charmDeployer.id.Origin.Base.Channel.String(), gc.Equals, "20.04/stable")
 }
 
 func (s *deployerSuite) TestGetDeployerLocalBundle(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
 
-	cfg := s.basicDeployerConfig()
-	cfg.Series = "bionic"
+	cfg := s.basicDeployerConfig(series.MustParseBaseFromString("ubuntu@18.04"))
 	cfg.FlagSet = &gnuflag.FlagSet{}
 	s.expectModelType()
 
@@ -235,45 +219,15 @@ func (s *deployerSuite) TestGetDeployerLocalBundle(c *gc.C) {
 	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy local bundle from: %s", bundlePath))
 }
 
-func (s *deployerSuite) TestGetDeployerCharmStoreBundle(c *gc.C) {
-	bundle := charm.MustParseURL("cs:test-bundle")
-	cfg := s.basicDeployerConfig()
+func (s *deployerSuite) TestGetDeployerCharmHubBundleWithChannel(c *gc.C) {
+	defer s.setupMocks(c).Finish()
 
-	cfg.CharmOrBundle = bundle.String()
-
-	deployer, err := s.testGetDeployerRepositoryBundle(c, cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy bundle: %s", bundle.String()))
-}
-
-func (s *deployerSuite) TestGetDeployerCharmStoreBundleWithChannel(c *gc.C) {
-	bundle := charm.MustParseURL("cs:test-bundle")
+	bundle := charm.MustParseURL("ch:test-bundle")
 	cfg := s.channelDeployerConfig()
 	cfg.CharmOrBundle = bundle.String()
 
-	deployer, err := s.testGetDeployerRepositoryBundle(c, cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy bundle: %s from channel edge", bundle.String()))
-}
-
-func (s *deployerSuite) TestGetDeployerCharmHubBundleWithRevision(c *gc.C) {
-	bundle := charm.MustParseURL("ch:test-bundle")
-	cfg := s.basicDeployerConfig()
-	cfg.Revision = 8
-	cfg.CharmOrBundle = bundle.String()
-
-	deployer, err := s.testGetDeployerRepositoryBundle(c, cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy bundle: %s with revision 8", bundle.String()))
-}
-
-func (s *deployerSuite) testGetDeployerRepositoryBundle(c *gc.C, cfg DeployerConfig) (Deployer, error) {
-	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
-
 	s.expectResolveBundleURL(nil, 1)
-
-	cfg.Series = "bionic"
+	cfg.Base = series.MustParseBaseFromString("ubuntu@18.04")
 	cfg.FlagSet = &gnuflag.FlagSet{}
 	s.expectStat(cfg.CharmOrBundle, errors.NotFoundf("file"))
 	s.expectModelType()
@@ -281,17 +235,38 @@ func (s *deployerSuite) testGetDeployerRepositoryBundle(c *gc.C, cfg DeployerCon
 	s.expectData()
 
 	factory := s.newDeployerFactory()
-	return factory.GetDeployer(cfg, s.modelConfigGetter, s.resolver)
+	deployer, err := factory.GetDeployer(cfg, s.modelConfigGetter, s.resolver)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy bundle: %s from channel edge", bundle.String()))
+}
+
+func (s *deployerSuite) TestGetDeployerCharmHubBundleWithRevision(c *gc.C) {
+	defer s.setupMocks(c).Finish()
+
+	bundle := charm.MustParseURL("ch:test-bundle")
+	cfg := s.basicDeployerConfig()
+	cfg.Revision = 8
+	cfg.CharmOrBundle = bundle.String()
+	cfg.Base = series.MustParseBaseFromString("ubuntu@18.04")
+	cfg.FlagSet = &gnuflag.FlagSet{}
+	s.expectStat(cfg.CharmOrBundle, errors.NotFoundf("file"))
+	s.expectModelType()
+	s.expectGetBundle(nil)
+	s.expectData()
+
+	s.expectResolveBundleURL(nil, 1)
+	factory := s.newDeployerFactory()
+	deployer, err := factory.GetDeployer(cfg, s.modelConfigGetter, s.resolver)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(deployer.String(), gc.Equals, fmt.Sprintf("deploy bundle: %s with revision 8", bundle.String()))
 }
 
 func (s *deployerSuite) TestGetDeployerCharmHubBundleWithRevisionURL(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
 
 	bundle := charm.MustParseURL("ch:test-bundle-8")
-	cfg := s.basicDeployerConfig()
+	cfg := s.basicDeployerConfig(series.MustParseBaseFromString("ubuntu@18.04"))
 	cfg.CharmOrBundle = bundle.String()
-	cfg.Series = "bionic"
 	cfg.FlagSet = &gnuflag.FlagSet{}
 	s.expectStat(cfg.CharmOrBundle, errors.NotFoundf("file"))
 	s.expectModelType()
@@ -303,18 +278,15 @@ func (s *deployerSuite) TestGetDeployerCharmHubBundleWithRevisionURL(c *gc.C) {
 
 func (s *deployerSuite) TestGetDeployerCharmHubBundleError(c *gc.C) {
 	defer s.setupMocks(c).Finish()
-	s.expectFilesystem()
-
-	s.expectResolveBundleURL(nil, 1)
 
 	bundle := charm.MustParseURL("ch:test-bundle")
-	cfg := s.channelDeployerConfig()
+	cfg := s.channelDeployerConfig(series.MustParseBaseFromString("ubuntu@18.04"))
 	cfg.Revision = 42
 	cfg.CharmOrBundle = bundle.String()
-	cfg.Series = "bionic"
 	cfg.FlagSet = &gnuflag.FlagSet{}
 	s.expectStat(cfg.CharmOrBundle, errors.NotFoundf("file"))
 	s.expectModelType()
+	s.expectResolveBundleURL(nil, 1)
 
 	factory := s.newDeployerFactory()
 	_, err := factory.GetDeployer(cfg, s.modelConfigGetter, s.resolver)
@@ -332,29 +304,13 @@ func (s *deployerSuite) TestResolveCharmURL(c *gc.C) {
 		path:          "wordpress",
 		url:           &charm.URL{Schema: "ch", Name: "wordpress", Revision: -1},
 	}, {
-		defaultSchema: charm.CharmStore,
-		path:          "cs:wordpress-42",
-		url:           &charm.URL{Schema: "cs", Name: "wordpress", Revision: 42},
-	}, {
 		defaultSchema: charm.CharmHub,
-		path:          "cs:wordpress",
-		url:           &charm.URL{Schema: "cs", Name: "wordpress", Revision: -1},
+		path:          "ch:wordpress",
+		url:           &charm.URL{Schema: "ch", Name: "wordpress", Revision: -1},
 	}, {
 		defaultSchema: charm.CharmHub,
 		path:          "local:wordpress",
 		url:           &charm.URL{Schema: "local", Name: "wordpress", Revision: -1},
-	}, {
-		defaultSchema: charm.CharmHub,
-		path:          "cs:~user/series/name",
-		url:           &charm.URL{Schema: "cs", User: "user", Name: "name", Series: "series", Revision: -1},
-	}, {
-		defaultSchema: charm.CharmHub,
-		path:          "wordpress",
-		url:           &charm.URL{Schema: "ch", Name: "wordpress", Revision: -1},
-	}, {
-		defaultSchema: charm.CharmStore,
-		path:          "wordpress",
-		url:           &charm.URL{Schema: "cs", Name: "wordpress", Revision: -1},
 	}}
 	for i, test := range tests {
 		c.Logf("%d %s", i, test.path)
@@ -378,7 +334,7 @@ func (s *deployerSuite) TestValidateResourcesNeededForLocalDeployCAAS(c *gc.C) {
 	}
 
 	err := f.validateResourcesNeededForLocalDeploy(&charm.Meta{
-		Series: []string{series.Kubernetes.String()},
+		Series: []string{jujuseries.Kubernetes.String()},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -393,7 +349,7 @@ func (s *deployerSuite) TestValidateResourcesNeededForLocalDeployIAAS(c *gc.C) {
 	}
 
 	err := f.validateResourcesNeededForLocalDeploy(&charm.Meta{
-		Series: []string{series.Kubernetes.String()},
+		Series: []string{jujuseries.Kubernetes.String()},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -402,6 +358,8 @@ func (s *deployerSuite) TestMaybeReadLocalCharmErrorWithApplicationName(c *gc.C)
 	defer s.setupMocks(c).Finish()
 	s.expectModelGet(c)
 
+	url := "local:meshuggah"
+	s.expectStat(url, errors.NotFoundf("file"))
 	s.charmReader.EXPECT().ReadCharm("meshuggah").Return(s.charm, nil)
 	s.charm.EXPECT().Manifest().Return(&charm.Manifest{}).AnyTimes()
 	s.charm.EXPECT().Meta().Return(&charm.Meta{Series: []string{"focal"}}).AnyTimes()
@@ -409,12 +367,13 @@ func (s *deployerSuite) TestMaybeReadLocalCharmErrorWithApplicationName(c *gc.C)
 	f := &factory{
 		clock:           clock.WallClock,
 		applicationName: "meshuggah",
-		charmOrBundle:   "local:meshuggah",
+		charmOrBundle:   url,
 		charmReader:     s.charmReader,
 		model:           s.modelCommand,
+		fileSystem:      s.filesystem,
 	}
 
-	_, err := f.maybeReadLocalCharm(s.modelConfigGetter)
+	_, err := f.GetDeployer(DeployerConfig{CharmOrBundle: url}, s.modelConfigGetter, s.resolver)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -422,27 +381,63 @@ func (s *deployerSuite) TestMaybeReadLocalCharmErrorWithoutApplicationName(c *gc
 	defer s.setupMocks(c).Finish()
 	s.expectModelGet(c)
 
+	url := "local:meshuggah"
+	s.expectStat(url, errors.NotFoundf("file"))
 	s.charmReader.EXPECT().ReadCharm("meshuggah").Return(s.charm, nil)
 	s.charm.EXPECT().Manifest().Return(&charm.Manifest{}).AnyTimes()
 	s.charm.EXPECT().Meta().Return(&charm.Meta{Name: "meshuggah", Series: []string{"focal"}}).AnyTimes()
 
 	f := &factory{
 		clock:         clock.WallClock,
-		charmOrBundle: "local:meshuggah",
+		charmOrBundle: url,
 		charmReader:   s.charmReader,
 		model:         s.modelCommand,
+		fileSystem:    s.filesystem,
 	}
 
-	_, err := f.maybeReadLocalCharm(s.modelConfigGetter)
+	_, err := f.GetDeployer(DeployerConfig{CharmOrBundle: url}, s.modelConfigGetter, s.resolver)
 	c.Assert(err, jc.ErrorIsNil)
+}
+
+func (s *deployerSuite) TestCheckPodspec(c *gc.C) {
+	tests := []struct {
+		charm     charms.CharmInfo
+		isPodspec bool
+	}{{
+		// redis-k8s
+		charm: charms.CharmInfo{
+			Meta: &charm.Meta{
+				Name: "redis-k8s",
+				Series: []string{
+					"kubernetes",
+				},
+			},
+		},
+		isPodspec: true,
+	}, {
+		// prometheus-k8s
+		charm: charms.CharmInfo{
+			Meta: &charm.Meta{
+				Name: "prometheus-k8s",
+				Containers: map[string]charm.Container{
+					"prometheus": {},
+				},
+			},
+		},
+		isPodspec: false,
+	}}
+
+	for _, t := range tests {
+		c.Check(checkPodspec(t.charm.Charm(), &cmd.Context{}), gc.Equals, t.isPodspec)
+	}
 }
 
 func (s *deployerSuite) makeBundleDir(c *gc.C, content string) string {
 	bundlePath := filepath.Join(c.MkDir(), "example")
 	c.Assert(os.Mkdir(bundlePath, 0777), jc.ErrorIsNil)
-	err := ioutil.WriteFile(filepath.Join(bundlePath, "bundle.yaml"), []byte(content), 0644)
+	err := os.WriteFile(filepath.Join(bundlePath, "bundle.yaml"), []byte(content), 0644)
 	c.Assert(err, jc.ErrorIsNil)
-	err = ioutil.WriteFile(filepath.Join(bundlePath, "README.md"), []byte("README"), 0644)
+	err = os.WriteFile(filepath.Join(bundlePath, "README.md"), []byte("README"), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 	return bundlePath
 }
@@ -452,7 +447,6 @@ func (s *deployerSuite) newDeployerFactory() DeployerFactory {
 		DeployResources: func(
 			string,
 			resources.CharmID,
-			*macaroon.Macaroon,
 			map[string]string,
 			map[string]charmresource.Meta,
 			base.APICallCloser,
@@ -469,16 +463,28 @@ func (s *deployerSuite) newDeployerFactory() DeployerFactory {
 	return NewDeployerFactory(dep)
 }
 
-func (s *deployerSuite) basicDeployerConfig() DeployerConfig {
+func (s *deployerSuite) basicDeployerConfig(bases ...series.Base) DeployerConfig {
+	var base series.Base
+	if len(bases) == 0 {
+		base = series.MustParseBaseFromString("ubuntu@20.04")
+	} else {
+		base = bases[0]
+	}
 	return DeployerConfig{
-		Series:   "focal",
+		Base:     base,
 		Revision: -1,
 	}
 }
 
-func (s *deployerSuite) channelDeployerConfig() DeployerConfig {
+func (s *deployerSuite) channelDeployerConfig(bases ...series.Base) DeployerConfig {
+	var base series.Base
+	if len(bases) == 0 {
+		base = series.MustParseBaseFromString("ubuntu@20.04")
+	} else {
+		base = bases[0]
+	}
 	return DeployerConfig{
-		Series: "focal",
+		Base: base,
 		Channel: charm.Channel{
 			Risk: "edge",
 		},
@@ -492,7 +498,6 @@ func (s *deployerSuite) setupMocks(c *gc.C) *gomock.Controller {
 	s.resolver = mocks.NewMockResolver(ctrl)
 	s.bundle = mocks.NewMockBundle(ctrl)
 	s.deployerAPI = mocks.NewMockDeployerAPI(ctrl)
-	s.macaroonGetter = mocks.NewMockMacaroonGetter(ctrl)
 	s.modelCommand = mocks.NewMockModelCommand(ctrl)
 	s.filesystem = mocks.NewMockFilesystem(ctrl)
 	s.modelConfigGetter = mocks.NewMockModelConfigGetter(ctrl)
@@ -513,10 +518,6 @@ func (s *deployerSuite) expectResolveBundleURL(err error, times int) {
 		}).Times(times)
 }
 
-func (s *deployerSuite) expectFilesystem() {
-	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem)
-}
-
 func (s *deployerSuite) expectStat(name string, err error) {
 	s.filesystem.EXPECT().Stat(name).Return(nil, err)
 }
@@ -528,6 +529,7 @@ func (s *deployerSuite) expectModelGet(c *gc.C) {
 		"uuid":            coretesting.ModelTag.Id(),
 		"controller-uuid": coretesting.ControllerTag.Id(),
 		"firewall-mode":   "instance",
+		"secret-backend":  "auto",
 		// While the ca-cert bits aren't entirely minimal, they avoid the need
 		// to set up a fake home.
 		"ca-cert":        coretesting.CACert,
@@ -556,9 +558,6 @@ type fakeDeployStep struct {
 }
 
 func (f *fakeDeployStep) SetFlags(*gnuflag.FlagSet) {}
-
-// SetPlanURL sets the plan URL prefix.
-func (f *fakeDeployStep) SetPlanURL(string) {}
 
 // RunPre runs before the call is made to add the charm to the environment.
 func (f *fakeDeployStep) RunPre(DeployStepAPI, *httpbakery.Client, *cmd.Context, DeploymentInfo) error {

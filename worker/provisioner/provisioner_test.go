@@ -55,7 +55,6 @@ import (
 	"github.com/juju/juju/storage/poolmanager"
 	coretesting "github.com/juju/juju/testing"
 	coretools "github.com/juju/juju/tools"
-	jujuversion "github.com/juju/juju/version"
 	"github.com/juju/juju/worker/provisioner"
 )
 
@@ -83,8 +82,6 @@ func (s *CommonProvisionerSuite) assertProvisionerObservesConfigChanges(c *gc.C,
 	err := s.Model.UpdateModelConfig(attrs, nil)
 	c.Assert(err, jc.ErrorIsNil)
 
-	s.BackingState.StartSync()
-
 	// Wait for the PA to load the new configuration. We wait for the change we expect
 	// like this because sometimes we pick up the initial harvest config (destroyed)
 	// rather than the one we change to (all).
@@ -98,7 +95,6 @@ func (s *CommonProvisionerSuite) assertProvisionerObservesConfigChanges(c *gc.C,
 			}
 			received = append(received, newCfg.ProvisionerHarvestMode().String())
 		case <-time.After(coretesting.ShortWait):
-			s.BackingState.StartSync()
 		case <-timeout:
 			if len(received) == 0 {
 				c.Fatalf("PA did not action config change")
@@ -125,8 +121,6 @@ func (s *CommonProvisionerSuite) assertProvisionerObservesConfigChangesWorkerCou
 	err := s.Model.UpdateModelConfig(attrs, nil)
 	c.Assert(err, jc.ErrorIsNil)
 
-	s.BackingState.StartSync()
-
 	// Wait for the PA to load the new configuration. We wait for the change we expect
 	// like this because sometimes we pick up the initial harvest config (destroyed)
 	// rather than the one we change to (all).
@@ -146,9 +140,6 @@ func (s *CommonProvisionerSuite) assertProvisionerObservesConfigChangesWorkerCou
 				}
 				received = append(received, newCfg.NumProvisionWorkers())
 			}
-
-		case <-time.After(coretesting.ShortWait):
-			s.BackingState.StartSync()
 		case <-timeout:
 			if len(received) == 0 {
 				c.Fatalf("PA did not action config change")
@@ -180,7 +171,7 @@ func (s *CommonProvisionerSuite) SetUpTest(c *gc.C) {
 	err := s.State.CloudImageMetadataStorage.SaveMetadata([]cloudimagemetadata.Metadata{{
 		MetadataAttributes: cloudimagemetadata.MetadataAttributes{
 			Region:          "region",
-			Series:          "jammy",
+			Version:         "22.04",
 			Arch:            "amd64",
 			VirtType:        "",
 			RootStorageType: "",
@@ -218,7 +209,7 @@ func (s *CommonProvisionerSuite) SetUpTest(c *gc.C) {
 
 	machine, err := s.State.AddOneMachine(state.MachineTemplate{
 		Addresses:  pAddrs,
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		Nonce:      agent.BootstrapNonce,
 		InstanceId: dummy.BootstrapInstanceId,
 		Jobs:       []state.MachineJob{state.JobManageModel},
@@ -226,7 +217,7 @@ func (s *CommonProvisionerSuite) SetUpTest(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(machine.Id(), gc.Equals, "0")
 
-	current := coretesting.CurrentVersion(c)
+	current := coretesting.CurrentVersion()
 	err = machine.SetAgentVersion(current)
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -301,7 +292,6 @@ func (s *CommonProvisionerSuite) checkStartInstancesCustom(
 ) (
 	returnInstances map[string]instances.Instance,
 ) {
-	s.BackingState.StartSync()
 	returnInstances = make(map[string]instances.Instance, len(machines))
 	found := 0
 	for {
@@ -395,7 +385,6 @@ func (s *CommonProvisionerSuite) checkStartInstancesCustom(
 
 // checkNoOperations checks that the environ was not operated upon.
 func (s *CommonProvisionerSuite) checkNoOperations(c *gc.C) {
-	s.BackingState.StartSync()
 	select {
 	case o := <-s.op:
 		c.Fatalf("unexpected operation %+v", o)
@@ -413,7 +402,6 @@ func (s *CommonProvisionerSuite) checkStopInstances(c *gc.C, instances ...instan
 func (s *CommonProvisionerSuite) checkStopSomeInstances(c *gc.C,
 	instancesToStop []instances.Instance, instancesToKeep []instances.Instance) {
 
-	s.BackingState.StartSync()
 	instanceIdsToStop := set.NewStrings()
 	for _, instance := range instancesToStop {
 		instanceIdsToStop.Add(string(instance.Id()))
@@ -463,7 +451,7 @@ func (s *CommonProvisionerSuite) waitForWatcher(c *gc.C, w state.NotifyWatcher, 
 			}
 		case <-resync:
 			resync = time.After(coretesting.ShortWait)
-			s.BackingState.StartSync()
+
 		case <-timeout:
 			c.Fatalf("%v wait timed out", name)
 		}
@@ -524,7 +512,7 @@ func (s *CommonProvisionerSuite) addMachine() (*state.Machine, error) {
 
 func (s *CommonProvisionerSuite) addMachineWithConstraints(cons constraints.Value) (*state.Machine, error) {
 	return s.BackingState.AddOneMachine(state.MachineTemplate{
-		Series:      jujuversion.DefaultSupportedLTS(),
+		Base:        state.DefaultLTSBase(),
 		Jobs:        []state.MachineJob{state.JobHostUnits},
 		Constraints: cons,
 	})
@@ -534,7 +522,7 @@ func (s *CommonProvisionerSuite) addMachines(number int) ([]*state.Machine, erro
 	templates := make([]state.MachineTemplate, number)
 	for i := range templates {
 		templates[i] = state.MachineTemplate{
-			Series:      jujuversion.DefaultSupportedLTS(),
+			Base:        state.DefaultLTSBase(),
 			Jobs:        []state.MachineJob{state.JobHostUnits},
 			Constraints: s.defaultConstraints,
 		}
@@ -543,7 +531,7 @@ func (s *CommonProvisionerSuite) addMachines(number int) ([]*state.Machine, erro
 }
 
 func (s *CommonProvisionerSuite) enableHA(c *gc.C, n int) []*state.Machine {
-	changes, err := s.BackingState.EnableHA(n, s.defaultConstraints, jujuversion.DefaultSupportedLTS(), nil)
+	changes, err := s.BackingState.EnableHA(n, s.defaultConstraints, state.DefaultLTSBase(), nil)
 	c.Assert(err, jc.ErrorIsNil)
 	added := make([]*state.Machine, len(changes.Added))
 	for i, mid := range changes.Added {
@@ -627,8 +615,8 @@ func (s *ProvisionerSuite) TestPossibleTools(c *gc.C) {
 
 	// Create the machine and check the tools that get passed into StartInstance.
 	machine, err := s.BackingState.AddOneMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -657,7 +645,9 @@ func (s *ProvisionerSuite) TestSetUpToStartMachine(c *gc.C) {
 	attrs := map[string]interface{}{
 		config.CloudInitUserDataKey: validCloudInitUserData,
 	}
-	s.Model.UpdateModelConfig(attrs, nil)
+
+	err := s.Model.UpdateModelConfig(attrs, nil)
+	c.Assert(err, jc.ErrorIsNil)
 
 	task := s.newProvisionerTask(
 		c,
@@ -672,16 +662,20 @@ func (s *ProvisionerSuite) TestSetUpToStartMachine(c *gc.C) {
 	machine, err := s.addMachine()
 	c.Assert(err, jc.ErrorIsNil)
 
-	result, err := s.provisioner.Machines(machine.MachineTag())
+	mRes, err := s.provisioner.Machines(machine.MachineTag())
 	c.Assert(err, gc.IsNil)
-	c.Assert(result, gc.HasLen, 1)
-	c.Assert(result[0].Err, gc.IsNil)
-	apiMachine := result[0].Machine
+	c.Assert(mRes, gc.HasLen, 1)
+	c.Assert(mRes[0].Err, gc.IsNil)
+	apiMachine := mRes[0].Machine
+
+	pRes, err := s.provisioner.ProvisioningInfo([]names.MachineTag{machine.MachineTag()})
+	c.Assert(err, gc.IsNil)
+	c.Assert(pRes.Results, gc.HasLen, 1)
 
 	v, err := apiMachine.ModelAgentVersion()
 	c.Assert(err, jc.ErrorIsNil)
 
-	startInstanceParams, err := provisioner.SetupToStartMachine(task, apiMachine, v)
+	startInstanceParams, err := provisioner.SetupToStartMachine(task, apiMachine, v, pRes.Results[0])
 	c.Assert(err, jc.ErrorIsNil)
 	cloudInitUserData := startInstanceParams.InstanceConfig.CloudInitUserData
 	c.Assert(cloudInitUserData, gc.DeepEquals, map[string]interface{}{
@@ -699,7 +693,7 @@ func (s *ProvisionerSuite) TestProvisionerSetsErrorStatusWhenNoToolsAreAvailable
 	// Check that an instance is not provisioned when the machine is created...
 	m, err := s.BackingState.AddOneMachine(state.MachineTemplate{
 		// We need a valid series that has no tools uploaded
-		Series:      "centos7",
+		Base:        state.Base{OS: "centos", Channel: "7"},
 		Jobs:        []state.MachineJob{state.JobHostUnits},
 		Constraints: s.defaultConstraints,
 	})
@@ -853,8 +847,8 @@ func (s *ProvisionerSuite) TestProvisioningDoesNotOccurForLXD(c *gc.C) {
 
 	// make a container on the machine we just created
 	template := state.MachineTemplate{
-		Series: jujuversion.DefaultSupportedLTS(),
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.DefaultLTSBase(),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	container, err := s.State.AddMachineInsideMachine(template, m.Id(), instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
@@ -881,8 +875,8 @@ func (s *ProvisionerSuite) TestProvisioningDoesNotOccurForKVM(c *gc.C) {
 
 	// make a container on the machine we just created
 	template := state.MachineTemplate{
-		Series: jujuversion.DefaultSupportedLTS(),
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.DefaultLTSBase(),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	container, err := s.State.AddMachineInsideMachine(template, m.Id(), instance.KVM)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1091,7 +1085,7 @@ func (s *ProvisionerSuite) TestProvisioningMachinesFailsWithEmptySpaces(c *gc.C)
 
 func (s *CommonProvisionerSuite) addMachineWithRequestedVolumes(volumes []state.HostVolumeParams, cons constraints.Value) (*state.Machine, error) {
 	return s.BackingState.AddOneMachine(state.MachineTemplate{
-		Series:      jujuversion.DefaultSupportedLTS(),
+		Base:        state.DefaultLTSBase(),
 		Jobs:        []state.MachineJob{state.JobHostUnits},
 		Constraints: cons,
 		Volumes:     volumes,
@@ -1109,7 +1103,7 @@ func (s *ProvisionerSuite) TestProvisioningMachinesWithRequestedRootDisk(c *gc.C
 
 	cons := constraints.MustParse("root-disk-source=persistent-pool " + s.defaultConstraints.String())
 	m, err := s.BackingState.AddOneMachine(state.MachineTemplate{
-		Series:      jujuversion.DefaultSupportedLTS(),
+		Base:        state.DefaultLTSBase(),
 		Jobs:        []state.MachineJob{state.JobHostUnits},
 		Constraints: cons,
 	})
@@ -1257,13 +1251,15 @@ func (s *ProvisionerSuite) TestDyingMachines(c *gc.C) {
 	c.Assert(m0.Life(), gc.Equals, state.Dying)
 }
 
-type mockMachineGetter struct{}
+type mockTaskAPI struct {
+	provisioner.TaskAPI
+}
 
-func (mock *mockMachineGetter) Machines(tags ...names.MachineTag) ([]apiprovisioner.MachineResult, error) {
+func (mock *mockTaskAPI) Machines(tags ...names.MachineTag) ([]apiprovisioner.MachineResult, error) {
 	return nil, fmt.Errorf("error")
 }
 
-func (*mockMachineGetter) MachinesWithTransientErrors() ([]apiprovisioner.MachineStatusResult, error) {
+func (*mockTaskAPI) MachinesWithTransientErrors() ([]apiprovisioner.MachineStatusResult, error) {
 	return nil, fmt.Errorf("error")
 }
 
@@ -1271,18 +1267,21 @@ type mockDistributionGroupFinder struct {
 	groups map[names.MachineTag][]string
 }
 
-func (mock *mockDistributionGroupFinder) DistributionGroupByMachineId(tags ...names.MachineTag) ([]apiprovisioner.DistributionGroupResult, error) {
+func (mock *mockDistributionGroupFinder) DistributionGroupByMachineId(
+	tags ...names.MachineTag,
+) ([]apiprovisioner.DistributionGroupResult, error) {
 	result := make([]apiprovisioner.DistributionGroupResult, len(tags))
 	if len(mock.groups) == 0 {
 		for i := range tags {
-			result[i] = apiprovisioner.DistributionGroupResult{[]string{}, nil}
+			result[i] = apiprovisioner.DistributionGroupResult{MachineIds: []string{}}
 		}
 	} else {
 		for i, tag := range tags {
 			if dg, ok := mock.groups[tag]; ok {
-				result[i] = apiprovisioner.DistributionGroupResult{dg, nil}
+				result[i] = apiprovisioner.DistributionGroupResult{MachineIds: dg}
 			} else {
-				result[i] = apiprovisioner.DistributionGroupResult{[]string{}, &params.Error{Code: params.CodeNotFound, Message: "Fail"}}
+				result[i] = apiprovisioner.DistributionGroupResult{
+					MachineIds: []string{}, Err: &params.Error{Code: params.CodeNotFound, Message: "Fail"}}
 			}
 		}
 	}
@@ -1308,12 +1307,13 @@ func (s *ProvisionerSuite) TestMachineErrorsRetainInstances(c *gc.C) {
 	// create an instance out of band
 	s.startUnknownInstance(c, "999")
 
-	// start the provisioner and ensure it doesn't kill any instances if there are error getting machines
+	// start the provisioner and ensure it doesn't kill any
+	// instances if there are errors getting machines.
 	task = s.newProvisionerTask(
 		c,
 		config.HarvestAll,
 		s.Environ,
-		&mockMachineGetter{},
+		&mockTaskAPI{},
 		&mockDistributionGroupFinder{},
 		&mockToolsFinder{},
 	)
@@ -1340,7 +1340,7 @@ func (s *ProvisionerSuite) newProvisionerTask(
 	c *gc.C,
 	harvestingMethod config.HarvestMode,
 	broker environs.InstanceBroker,
-	machineGetter provisioner.MachineGetter,
+	taskAPI provisioner.TaskAPI,
 	distributionGroupFinder provisioner.DistributionGroupFinder,
 	toolsFinder provisioner.ToolsFinder,
 ) provisioner.ProvisionerTask {
@@ -1348,14 +1348,14 @@ func (s *ProvisionerSuite) newProvisionerTask(
 	retryStrategy := provisioner.NewRetryStrategy(0*time.Second, 0)
 
 	return s.newProvisionerTaskWithRetryStrategy(c, harvestingMethod, broker,
-		machineGetter, distributionGroupFinder, toolsFinder, retryStrategy)
+		taskAPI, distributionGroupFinder, toolsFinder, retryStrategy)
 }
 
 func (s *ProvisionerSuite) newProvisionerTaskWithRetryStrategy(
 	c *gc.C,
 	harvestingMethod config.HarvestMode,
 	broker environs.InstanceBroker,
-	machineGetter provisioner.MachineGetter,
+	taskAPI provisioner.TaskAPI,
 	distributionGroupFinder provisioner.DistributionGroupFinder,
 	toolsFinder provisioner.ToolsFinder,
 	retryStrategy provisioner.RetryStrategy,
@@ -1368,24 +1368,23 @@ func (s *ProvisionerSuite) newProvisionerTaskWithRetryStrategy(
 	auth, err := authentication.NewAPIAuthenticator(s.provisioner)
 	c.Assert(err, jc.ErrorIsNil)
 
-	w, err := provisioner.NewProvisionerTask(
-		s.ControllerConfig.ControllerUUID(),
-		names.NewMachineTag("0"),
-		loggo.GetLogger("test"),
-		harvestingMethod,
-		machineGetter,
-		distributionGroupFinder,
-		toolsFinder,
-		machineWatcher,
-		retryWatcher,
-		broker,
-		auth,
-		imagemetadata.ReleasedStream,
-		retryStrategy,
-		func(_ stdcontext.Context) context.ProviderCallContext { return s.callCtx },
-		numProvisionWorkersForTesting,
-		nil,
-	)
+	w, err := provisioner.NewProvisionerTask(provisioner.TaskConfig{
+		ControllerUUID:             s.ControllerConfig.ControllerUUID(),
+		HostTag:                    names.NewMachineTag("0"),
+		Logger:                     loggo.GetLogger("test"),
+		HarvestMode:                harvestingMethod,
+		TaskAPI:                    taskAPI,
+		DistributionGroupFinder:    distributionGroupFinder,
+		ToolsFinder:                toolsFinder,
+		MachineWatcher:             machineWatcher,
+		RetryWatcher:               retryWatcher,
+		Broker:                     broker,
+		Auth:                       auth,
+		ImageStream:                imagemetadata.ReleasedStream,
+		RetryStartInstanceStrategy: retryStrategy,
+		CloudCallContextFunc:       func(_ stdcontext.Context) context.ProviderCallContext { return s.callCtx },
+		NumProvisionWorkers:        numProvisionWorkersForTesting,
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	return w
 }
@@ -1410,7 +1409,6 @@ func (s *ProvisionerSuite) TestHarvestNoneReapsNothing(c *gc.C) {
 }
 
 func (s *ProvisionerSuite) TestHarvestUnknownReapsOnlyUnknown(c *gc.C) {
-
 	task := s.newProvisionerTask(c,
 		config.HarvestDestroyed,
 		s.Environ,
@@ -1975,8 +1973,8 @@ func (b *mockBroker) DeriveAvailabilityZones(ctx context.ProviderCallContext, ar
 type mockToolsFinder struct {
 }
 
-func (f mockToolsFinder) FindTools(number version.Number, series string, a string) (coretools.List, error) {
-	v, err := version.ParseBinary(fmt.Sprintf("%s-%s-%s", number, series, arch.HostArch()))
+func (f mockToolsFinder) FindTools(number version.Number, os string, a string) (coretools.List, error) {
+	v, err := version.ParseBinary(fmt.Sprintf("%s-%s-%s", number, os, arch.HostArch()))
 	if err != nil {
 		return nil, err
 	}

@@ -6,9 +6,10 @@ package migration_test
 import (
 	"strings"
 
+	"github.com/golang/mock/gomock"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
-	"github.com/juju/replicaset/v2"
+	"github.com/juju/replicaset/v3"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/version/v2"
 	gc "gopkg.in/check.v1"
@@ -16,10 +17,14 @@ import (
 	coremigration "github.com/juju/juju/core/migration"
 	"github.com/juju/juju/core/presence"
 	"github.com/juju/juju/core/status"
+	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/migration"
+	"github.com/juju/juju/provider/lxd"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/testing"
 	"github.com/juju/juju/tools"
+	"github.com/juju/juju/upgrades/upgradevalidation"
+	upgradevalidationmocks "github.com/juju/juju/upgrades/upgradevalidation/mocks"
 )
 
 var (
@@ -37,13 +42,23 @@ type SourcePrecheckSuite struct {
 var _ = gc.Suite(&SourcePrecheckSuite{})
 
 func sourcePrecheck(backend migration.PrecheckBackend) error {
-	return migration.SourcePrecheck(backend, version.MustParse("2.9.32"), allAlivePresence(), allAlivePresence())
+	return migration.SourcePrecheck(
+		backend, version.MustParse("2.9.32"), allAlivePresence(), allAlivePresence(),
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) {
+			return environscloudspec.CloudSpec{Type: "lxd"}, nil
+		},
+	)
 }
 
 func (*SourcePrecheckSuite) TestSuccess(c *gc.C) {
 	backend := newHappyBackend()
 	backend.controllerBackend = newHappyBackend()
-	err := migration.SourcePrecheck(backend, version.MustParse("2.9.32"), allAlivePresence(), allAlivePresence())
+	err := migration.SourcePrecheck(
+		backend, version.MustParse("2.9.32"), allAlivePresence(), allAlivePresence(),
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) {
+			return environscloudspec.CloudSpec{Type: "lxd"}, nil
+		},
+	)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -59,10 +74,10 @@ func (*SourcePrecheckSuite) TestCharmUpgrades(c *gc.C) {
 		apps: []migration.PrecheckApplication{
 			&fakeApp{
 				name:     "spanner",
-				charmURL: "cs:spanner-3",
+				charmURL: "ch:spanner-3",
 				units: []migration.PrecheckUnit{
-					&fakeUnit{name: "spanner/0", charmURL: "cs:spanner-3"},
-					&fakeUnit{name: "spanner/1", charmURL: "cs:spanner-2"},
+					&fakeUnit{name: "spanner/0", charmURL: "ch:spanner-3"},
+					&fakeUnit{name: "spanner/1", charmURL: "ch:spanner-2"},
 				},
 			},
 		},
@@ -71,24 +86,45 @@ func (*SourcePrecheckSuite) TestCharmUpgrades(c *gc.C) {
 	c.Assert(err, gc.ErrorMatches, "unit spanner/1 is upgrading")
 }
 
-func (*SourcePrecheckSuite) TestTargetController3Failed(c *gc.C) {
+func (s *SourcePrecheckSuite) TestTargetController3Failed(c *gc.C) {
+	ctrl := gomock.NewController(c)
+	server := upgradevalidationmocks.NewMockServer(ctrl)
+	serverFactory := upgradevalidationmocks.NewMockServerFactory(ctrl)
+	s.PatchValue(&upgradevalidation.NewServerFactory,
+		func(_ lxd.NewHTTPClientFunc) lxd.ServerFactory {
+			return serverFactory
+		},
+	)
+	cloudSpec := environscloudspec.CloudSpec{Type: "lxd"}
+
 	backend := newFakeBackend()
 	hasUpgradeSeriesLocks := true
 	backend.hasUpgradeSeriesLocks = &hasUpgradeSeriesLocks
 	backend.machineCountForSeriesWin = map[string]int{"win10": 1, "win7": 2}
 	backend.machineCountForSeriesUbuntu = map[string]int{"xenial": 1, "vivid": 2, "trusty": 3}
-	agentVersion := version.MustParse("2.9.31")
+	agentVersion := version.MustParse("2.9.35")
 	backend.model.agentVersion = &agentVersion
 	backend.model.name = "model-1"
 	backend.model.owner = names.NewUserTag("foo")
-	err := migration.SourcePrecheck(backend, version.MustParse("3.0.0"), allAlivePresence(), allAlivePresence())
+
+	// - check LXD version.
+	serverFactory.EXPECT().RemoteServer(cloudSpec).Return(server, nil)
+	server.EXPECT().ServerVersion().Return("4.0")
+
+	err := migration.SourcePrecheck(
+		backend, version.MustParse("3.0.0"), allAlivePresence(), allAlivePresence(),
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) {
+			return cloudSpec, nil
+		},
+	)
 	c.Assert(err.Error(), gc.Equals, `
 cannot migrate to controller ("3.0.0") due to issues:
 "foo/model-1":
-- current model ("2.9.31") has to be upgraded to "2.9.32" at least
+- current model ("2.9.35") has to be upgraded to "2.9.36" at least
 - unexpected upgrade series lock found
 - the model hosts deprecated windows machine(s): win10(1) win7(2)
-- the model hosts deprecated ubuntu machine(s): trusty(3) vivid(2) xenial(1)`[1:])
+- the model hosts deprecated ubuntu machine(s): trusty(3) vivid(2) xenial(1)
+- LXD version has to be at least "5.0.0", but current version is only "4.0.0"`[1:])
 }
 
 func (*SourcePrecheckSuite) TestTargetController2Failed(c *gc.C) {
@@ -101,7 +137,12 @@ func (*SourcePrecheckSuite) TestTargetController2Failed(c *gc.C) {
 	backend.model.agentVersion = &agentVersion
 	backend.model.name = "model-1"
 	backend.model.owner = names.NewUserTag("foo")
-	err := migration.SourcePrecheck(backend, version.MustParse("2.9.99"), allAlivePresence(), allAlivePresence())
+	err := migration.SourcePrecheck(
+		backend, version.MustParse("2.9.99"), allAlivePresence(), allAlivePresence(),
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) {
+			return environscloudspec.CloudSpec{Type: "lxd"}, nil
+		},
+	)
 	c.Assert(err.Error(), gc.Equals, `
 cannot migrate to controller ("2.9.99") due to issues:
 "foo/model-1":
@@ -176,7 +217,12 @@ func (s *SourcePrecheckSuite) TestDownMachineAgent(c *gc.C) {
 	backend := newHappyBackend()
 	modelPresence := downAgentPresence("machine-1")
 	controllerPresence := allAlivePresence()
-	err := migration.SourcePrecheck(backend, version.MustParse("2.9.32"), modelPresence, controllerPresence)
+	err := migration.SourcePrecheck(
+		backend, version.MustParse("2.9.32"), modelPresence, controllerPresence,
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) {
+			return environscloudspec.CloudSpec{Type: "foo"}, nil
+		},
+	)
 	c.Assert(err.Error(), gc.Equals, "machine 1 agent not functioning at this time (down)")
 }
 
@@ -291,7 +337,12 @@ func (s *SourcePrecheckSuite) TestUnitLost(c *gc.C) {
 	backend := newHappyBackend()
 	modelPresence := downAgentPresence("unit-foo-0")
 	controllerPresence := allAlivePresence()
-	err := migration.SourcePrecheck(backend, version.MustParse("2.9.32"), modelPresence, controllerPresence)
+	err := migration.SourcePrecheck(
+		backend, version.MustParse("2.9.32"), modelPresence, controllerPresence,
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) {
+			return environscloudspec.CloudSpec{Type: "foo"}, nil
+		},
+	)
 	c.Assert(err.Error(), gc.Equals, "unit foo/0 not idle or executing (lost)")
 }
 
@@ -374,13 +425,13 @@ func (s *SourcePrecheckSuite) TestSubordinatesNotYetInScope(c *gc.C) {
 			{ApplicationName: "bar"},
 		},
 		relUnits: map[string]*fakeRelationUnit{
-			"foo/0": {valid: true, inScope: true},
-			"bar/0": {valid: true, inScope: true},
-			"bar/1": {valid: true, inScope: false},
+			"foo/0": {unitName: "foo/0", valid: true, inScope: true},
+			"bar/0": {unitName: "bar/0", valid: true, inScope: true},
+			"bar/1": {unitName: "bar/1", valid: true, inScope: false},
 		},
 	}}
 	err := sourcePrecheck(backend)
-	c.Assert(err, gc.ErrorMatches, "unit bar/1 hasn't joined relation foo:db bar:db yet")
+	c.Assert(err, gc.ErrorMatches, `unit bar/1 hasn't joined relation "foo:db bar:db" yet`)
 }
 
 func (s *SourcePrecheckSuite) TestSubordinatesInvalidUnitsNotYetInScope(c *gc.C) {
@@ -404,18 +455,21 @@ func (s *SourcePrecheckSuite) TestSubordinatesInvalidUnitsNotYetInScope(c *gc.C)
 func (s *SourcePrecheckSuite) TestCrossModelUnitsNotYetInScope(c *gc.C) {
 	backend := newHappyBackend()
 	backend.relations = []migration.PrecheckRelation{&fakeRelation{
-		key:        "foo:db bar:db",
-		crossModel: true,
+		key: "foo:db remote-mysql:db",
 		endpoints: []state.Endpoint{
 			{ApplicationName: "foo"},
 			{ApplicationName: "remote-mysql"},
 		},
 		relUnits: map[string]*fakeRelationUnit{
-			"foo/0": {valid: true, inScope: false},
+			"foo/0": {unitName: "foo/0", valid: true, inScope: true},
+		},
+		remoteAppName: "remote-mysql",
+		remoteRelUnits: map[string][]*fakeRelationUnit{
+			"remote-mysql": {{unitName: "remote-mysql/0", valid: true, inScope: false}},
 		},
 	}}
 	err := sourcePrecheck(backend)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, gc.ErrorMatches, `unit remote-mysql/0 hasn't joined relation "foo:db remote-mysql:db" yet`)
 }
 
 type TargetPrecheckSuite struct {
@@ -469,10 +523,10 @@ func (s *TargetPrecheckSuite) TestModelMinimumVersion(c *gc.C) {
 
 	s.modelInfo.AgentVersion = version.MustParse("2.8.0")
 	err := s.runPrecheck(backend)
-	c.Assert(err, gc.ErrorMatches,
-		`model must be upgraded to at least version 2.9.32 before being migrated to a controller with version 3.0.0`)
+	c.Assert(err.Error(), gc.Equals,
+		`model must be upgraded to at least version 2.9.36 before being migrated to a controller with version 3.0.0`)
 
-	s.modelInfo.AgentVersion = version.MustParse("2.9.32")
+	s.modelInfo.AgentVersion = version.MustParse("2.9.36")
 	err = s.runPrecheck(backend)
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -857,8 +911,8 @@ func (b *fakeBackend) HasUpgradeSeriesLocks() (bool, error) {
 	return *b.hasUpgradeSeriesLocks, b.hasUpgradeSeriesLocksErr
 }
 
-func (b *fakeBackend) MachineCountForSeries(series ...string) (map[string]int, error) {
-	if strings.HasPrefix(series[0], "win") {
+func (b *fakeBackend) MachineCountForBase(base ...state.Base) (map[string]int, error) {
+	if strings.HasPrefix(base[0].Channel, "win") {
 		if b.machineCountForSeriesWin == nil {
 			return nil, nil
 		}
@@ -875,6 +929,10 @@ func (b *fakeBackend) MongoCurrentStatus() (*replicaset.Status, error) {
 		return &replicaset.Status{}, nil
 	}
 	return b.mongoCurrentStatus, b.mongoCurrentStatusErr
+}
+
+func (b *fakeBackend) AllCharmURLs() ([]*string, error) {
+	return nil, errors.NotFoundf("charms")
 }
 
 type fakePool struct {
@@ -1021,7 +1079,7 @@ func (a *fakeApp) Life() state.Life {
 func (a *fakeApp) CharmURL() (*string, bool) {
 	url := a.charmURL
 	if url == "" {
-		url = "cs:foo-1"
+		url = "ch:foo-1"
 	}
 	return &url, false
 }
@@ -1073,7 +1131,7 @@ func (u *fakeUnit) ShouldBeAssigned() bool {
 func (u *fakeUnit) CharmURL() *string {
 	url := u.charmURL
 	if url == "" {
-		url = "cs:foo-1"
+		url = "ch:foo-1"
 	}
 	return &url
 }
@@ -1096,24 +1154,32 @@ func (u *fakeUnit) IsSidecar() (bool, error) {
 }
 
 type fakeRelation struct {
-	key           string
-	crossModel    bool
-	crossModelErr error
-	endpoints     []state.Endpoint
-	relUnits      map[string]*fakeRelationUnit
-	unitErr       error
+	key            string
+	endpoints      []state.Endpoint
+	relUnits       map[string]*fakeRelationUnit
+	remoteAppName  string
+	remoteRelUnits map[string][]*fakeRelationUnit
+	unitErr        error
 }
 
 func (r *fakeRelation) String() string {
 	return r.key
 }
 
-func (r *fakeRelation) IsCrossModel() (bool, error) {
-	return r.crossModel, r.crossModelErr
-}
-
 func (r *fakeRelation) Endpoints() []state.Endpoint {
 	return r.endpoints
+}
+
+func (r *fakeRelation) AllRemoteUnits(appName string) ([]migration.PrecheckRelationUnit, error) {
+	out := make([]migration.PrecheckRelationUnit, len(r.remoteRelUnits[appName]))
+	for i, ru := range r.remoteRelUnits[appName] {
+		out[i] = ru
+	}
+	return out, nil
+}
+
+func (r *fakeRelation) RemoteApplication() (string, bool, error) {
+	return r.remoteAppName, r.remoteAppName != "", nil
 }
 
 func (r *fakeRelation) Unit(u migration.PrecheckUnit) (migration.PrecheckRelationUnit, error) {
@@ -1121,8 +1187,13 @@ func (r *fakeRelation) Unit(u migration.PrecheckUnit) (migration.PrecheckRelatio
 }
 
 type fakeRelationUnit struct {
+	unitName           string
 	valid, inScope     bool
 	validErr, scopeErr error
+}
+
+func (ru *fakeRelationUnit) UnitName() string {
+	return ru.unitName
 }
 
 func (ru *fakeRelationUnit) Valid() (bool, error) {

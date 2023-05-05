@@ -9,11 +9,11 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 )
 
 // Operation represents a number of tasks resulting from running an action.
@@ -211,7 +211,7 @@ func newOperationDoc(mb modelBackend, summary string, count int) (operationDoc, 
 		return operationDoc{}, "", errors.Trace(err)
 	}
 	operationID := strconv.Itoa(id)
-	modelUUID := mb.modelUUID()
+	modelUUID := mb.ModelUUID()
 	return operationDoc{
 		DocId:            mb.docID(operationID),
 		ModelUUID:        modelUUID,

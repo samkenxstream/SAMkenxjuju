@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/storage"
 )
@@ -39,9 +40,19 @@ func BuildModelRepresentation(
 	machineMap := make(map[string]string)
 	machines := make(map[string]*bundlechanges.Machine)
 	for id, machineStatus := range status.Machines {
+		var (
+			base series.Base
+			err  error
+		)
+		if machineStatus.Base.Channel != "" {
+			base, err = series.ParseBase(machineStatus.Base.Name, machineStatus.Base.Channel)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+		}
 		machines[id] = &bundlechanges.Machine{
-			ID:     id,
-			Series: machineStatus.Series,
+			ID:   id,
+			Base: base,
 		}
 		tag := names.NewMachineTag(id)
 		annotationTags = append(annotationTags, tag.String())
@@ -76,12 +87,16 @@ func BuildModelRepresentation(
 			charmAlias = curl.Name
 		}
 
+		base, err := series.ParseBase(appStatus.Base.Name, appStatus.Base.Channel)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
 		app := &bundlechanges.Application{
 			Name:          name,
 			Charm:         charmAlias,
 			Scale:         appStatus.Scale,
 			Exposed:       appStatus.Exposed,
-			Series:        appStatus.Series,
+			Base:          base,
 			Channel:       appStatus.CharmChannel,
 			Revision:      curl.Revision,
 			SubordinateTo: appStatus.SubordinateTo,
@@ -231,35 +246,75 @@ func applicationConfigValue(key string, valueMap interface{}) (interface{}, erro
 }
 
 // ComposeAndVerifyBundle merges base and overlays then verifies the
-// combined bundle data.
-func ComposeAndVerifyBundle(base BundleDataSource, pathToOverlays []string) (*charm.BundleData, error) {
+// combined bundle data. Returns a slice of errors encountered while
+// processing the bundle. They are for informational purposes and do
+// not require failing the bundle deployment.
+func ComposeAndVerifyBundle(base BundleDataSource, pathToOverlays []string) (*charm.BundleData, []error, error) {
+
+	verifyConstraints := func(s string) error {
+		_, err := constraints.Parse(s)
+		return err
+	}
+	// verify that the base bundle does not contain image-id constraint
+	err := verifyBaseBundle(base)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
 	var dsList []charm.BundleDataSource
+	unMarshallErrors := make([]error, 0)
+	unMarshallErrors = append(unMarshallErrors, gatherErrors(base)...)
 
 	dsList = append(dsList, base)
 	for _, pathToOverlay := range pathToOverlays {
 		ds, err := charm.LocalBundleDataSource(pathToOverlay)
 		if err != nil {
-			return nil, errors.Annotatef(err, "unable to process overlays")
+			return nil, nil, errors.Annotatef(err, "unable to process overlays")
 		}
 		dsList = append(dsList, ds)
+		unMarshallErrors = append(unMarshallErrors, gatherErrors(ds)...)
 	}
 
 	bundleData, err := charm.ReadAndMergeBundleData(dsList...)
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if err = verifyBundle(bundleData, base.BasePath()); err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 
-	return bundleData, nil
+	// verify composed (base + overlay bundles)
+	if err = verifyBundle(bundleData, base.BasePath(), verifyConstraints); err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
+	return bundleData, unMarshallErrors, nil
 }
 
-func verifyBundle(data *charm.BundleData, bundleDir string) error {
-	verifyConstraints := func(s string) error {
-		_, err := constraints.Parse(s)
-		return err
+func gatherErrors(ds BundleDataSource) []error {
+	returnErrors := make([]error, 0)
+	for _, p := range ds.Parts() {
+		if p.UnmarshallError == nil {
+			continue
+		}
+		returnErrors = append(returnErrors, p.UnmarshallError)
 	}
+	return returnErrors
+}
+
+func verifyBaseBundle(base BundleDataSource) error {
+	verifyBaseConstraints := func(s string) error {
+		bundleConstraints, err := constraints.Parse(s)
+		if err != nil {
+			return err
+		}
+		if bundleConstraints.HasImageID() {
+			return errors.NotSupportedf("'image-id' constraint in a base bundle")
+		}
+		return nil
+	}
+
+	return verifyBundle(base.Parts()[0].Data, base.BasePath(), verifyBaseConstraints)
+}
+
+func verifyBundle(data *charm.BundleData, bundleDir string, verifyConstraints func(string) error) error {
 	verifyStorage := func(s string) error {
 		_, err := storage.ParseConstraints(s)
 		return err
@@ -268,6 +323,7 @@ func verifyBundle(data *charm.BundleData, bundleDir string) error {
 		_, err := devices.ParseConstraints(s)
 		return err
 	}
+
 	var verifyError error
 	if bundleDir == "" {
 		verifyError = data.Verify(verifyConstraints, verifyStorage, verifyDevices)

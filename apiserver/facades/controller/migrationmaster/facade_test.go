@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/network"
 
 	"github.com/golang/mock/gomock"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
@@ -27,6 +28,7 @@ import (
 	apiservertesting "github.com/juju/juju/apiserver/testing"
 	coremigration "github.com/juju/juju/core/migration"
 	"github.com/juju/juju/core/presence"
+	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
 	coretesting "github.com/juju/juju/testing"
@@ -44,6 +46,7 @@ type Suite struct {
 	model          description.Model
 	resources      *common.Resources
 	authorizer     apiservertesting.FakeAuthorizer
+	cloudSpec      environscloudspec.CloudSpec
 }
 
 var _ = gc.Suite(&Suite{})
@@ -65,6 +68,7 @@ func (s *Suite) SetUpTest(c *gc.C) {
 	s.AddCleanup(func(*gc.C) { s.resources.StopAll() })
 
 	s.authorizer = apiservertesting.FakeAuthorizer{Controller: true}
+	s.cloudSpec = environscloudspec.CloudSpec{Type: "lxd"}
 }
 
 func (s *Suite) TestNotController(c *gc.C) {
@@ -171,6 +175,36 @@ func (s *Suite) TestModelInfo(c *gc.C) {
 	c.Assert(mod.Name, gc.Equals, "model-name")
 	c.Assert(mod.OwnerTag, gc.Equals, names.NewUserTag("owner").String())
 	c.Assert(mod.AgentVersion, gc.Equals, version.MustParse("1.2.3"))
+}
+
+func (s *Suite) TestSourceControllerInfo(c *gc.C) {
+	defer s.setupMocks(c).Finish()
+
+	exp := s.backend.EXPECT()
+	exp.AllLocalRelatedModels().Return([]string{"related-model-uuid"}, nil)
+	s.backend.EXPECT().ControllerConfig().Return(controller.Config{
+		controller.ControllerUUIDKey: coretesting.ControllerTag.Id(),
+		controller.ControllerName:    "mycontroller",
+		controller.CACertKey:         "cacert",
+	}, nil)
+	apiAddr := []network.SpaceHostPorts{{{
+		SpaceAddress: network.SpaceAddress{
+			MachineAddress: network.MachineAddress{Value: "10.0.0.1"},
+		},
+		NetPort: 666,
+	}}}
+	s.backend.EXPECT().APIHostPortsForClients().Return(apiAddr, nil)
+
+	info, err := s.mustMakeAPI(c).SourceControllerInfo()
+	c.Assert(err, jc.ErrorIsNil)
+
+	c.Assert(info, jc.DeepEquals, params.MigrationSourceInfo{
+		LocalRelatedModels: []string{"related-model-uuid"},
+		ControllerTag:      coretesting.ControllerTag.String(),
+		ControllerAlias:    "mycontroller",
+		Addrs:              []string{"10.0.0.1:666"},
+		CACert:             "cacert",
+	})
 }
 
 func (s *Suite) TestSetPhase(c *gc.C) {
@@ -283,7 +317,7 @@ func (s *Suite) assertExport(c *gc.C, modelType string) {
 
 	app := s.model.AddApplication(description.ApplicationArgs{
 		Tag:      names.NewApplicationTag("foo"),
-		CharmURL: "cs:foo-0",
+		CharmURL: "ch:foo-0",
 	})
 
 	const tools0 = "2.0.0-ubuntu-amd64"
@@ -339,7 +373,7 @@ func (s *Suite) assertExport(c *gc.C, modelType string) {
 	})
 	unitRev := unitRes.Revision()
 
-	s.backend.EXPECT().Export().Return(s.model, nil)
+	s.backend.EXPECT().Export(map[string]string{}).Return(s.model, nil)
 
 	serialized, err := s.mustMakeAPI(c).Export()
 	c.Assert(err, jc.ErrorIsNil)
@@ -349,7 +383,7 @@ func (s *Suite) assertExport(c *gc.C, modelType string) {
 	// is in the serialised output.
 	c.Check(string(serialized.Bytes), jc.Contains, jujuversion.Current.String())
 
-	c.Check(serialized.Charms, gc.DeepEquals, []string{"cs:foo-0"})
+	c.Check(serialized.Charms, gc.DeepEquals, []string{"ch:foo-0"})
 	if modelType == "caas" {
 		c.Check(serialized.Tools, gc.HasLen, 0)
 	} else {
@@ -559,6 +593,8 @@ func (s *Suite) makeAPI() (*migrationmaster.API, error) {
 		s.resources,
 		s.authorizer,
 		&stubPresence{},
+		func(names.ModelTag) (environscloudspec.CloudSpec, error) { return s.cloudSpec, nil },
+		stubLeadership{},
 	)
 }
 
@@ -570,4 +606,10 @@ func (f *stubPresence) ModelPresence(modelUUID string) facade.ModelPresence {
 
 func (f *stubPresence) AgentStatus(agent string) (presence.Status, error) {
 	return presence.Alive, nil
+}
+
+type stubLeadership struct{}
+
+func (stubLeadership) Leaders() (map[string]string, error) {
+	return map[string]string{}, nil
 }

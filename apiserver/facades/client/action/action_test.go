@@ -64,7 +64,7 @@ func (s *baseSuite) SetUpTest(c *gc.C) {
 	s.AddCleanup(func(_ *gc.C) { s.resources.StopAll() })
 
 	var err error
-	s.action, err = action.NewActionAPI(s.State, s.resources, s.authorizer)
+	s.action, err = action.NewActionAPI(s.State, s.resources, s.authorizer, action.FakeLeadership{})
 	c.Assert(err, jc.ErrorIsNil)
 
 	s.charm = s.Factory.MakeCharm(c, &factory.CharmParams{
@@ -82,8 +82,8 @@ func (s *baseSuite) SetUpTest(c *gc.C) {
 		Charm: s.charm,
 	})
 	s.machine0 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits, state.JobManageModel},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits, state.JobManageModel},
 	})
 	s.wordpressUnit = s.Factory.MakeUnit(c, &factory.UnitParams{
 		Application: s.wordpress,
@@ -98,8 +98,8 @@ func (s *baseSuite) SetUpTest(c *gc.C) {
 		Charm: mysqlCharm,
 	})
 	s.machine1 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	})
 	s.mysqlUnit = s.Factory.MakeUnit(c, &factory.UnitParams{
 		Application: s.mysql,
@@ -401,7 +401,7 @@ func (s *actionSuite) TestWatchActionProgress(c *gc.C) {
 	defer statetesting.AssertStop(c, resource)
 
 	// Check that the Watch has consumed the initial event
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 
 	// Log a message and check the watcher result.

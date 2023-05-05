@@ -6,15 +6,13 @@ package agentbootstrap
 import (
 	stdcontext "context"
 	"fmt"
-	"path/filepath"
 
-	coreraft "github.com/hashicorp/raft"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v3"
 	"github.com/juju/names/v4"
-	"github.com/juju/os/v2/series"
+	utilseries "github.com/juju/os/v2/series"
 	"github.com/juju/utils/v3"
 
 	"github.com/juju/juju/agent"
@@ -27,7 +25,8 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
 	corenetwork "github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/raft/queue"
+	"github.com/juju/juju/core/series"
+	"github.com/juju/juju/database"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
@@ -37,7 +36,6 @@ import (
 	"github.com/juju/juju/network"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/storage"
-	"github.com/juju/juju/worker/raft"
 )
 
 var logger = loggo.GetLogger("juju.agent.agentbootstrap")
@@ -74,7 +72,7 @@ type bootstrapController interface {
 // InitializeState should be called with the bootstrap machine's agent
 // configuration. It uses that information to create the controller, dial the
 // controller, and initialize it. It also generates a new password for the
-// bootstrap machine and calls Write to save the the configuration.
+// bootstrap machine and calls Write to save the configuration.
 //
 // The cfg values will be stored in the state's ModelConfig; the
 // machineCfg values will be used to configure the bootstrap Machine,
@@ -108,7 +106,7 @@ func InitializeState(
 	info.Tag = nil
 	info.Password = c.OldPassword()
 
-	if err := initRaft(c); err != nil {
+	if err := database.BootstrapDqlite(stdcontext.TODO(), database.NewNodeManager(c, logger), logger); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -400,17 +398,6 @@ func getEnviron(
 	return environs.Open(stdcontext.TODO(), provider, openParams)
 }
 
-func initRaft(agentConfig agent.Config) error {
-	raftDir := filepath.Join(agentConfig.DataDir(), "raft")
-	return raft.Bootstrap(raft.Config{
-		Clock:      clock.WallClock,
-		StorageDir: raftDir,
-		Logger:     logger,
-		LocalID:    coreraft.ServerID(agentConfig.Tag().Id()),
-		Queue:      queue.NewOpQueue(clock.WallClock),
-	})
-}
-
 // initMongo dials the initial MongoDB connection, setting a
 // password for the admin user, and returning the session.
 func initMongo(info mongo.Info, dialOpts mongo.DialOpts, password string) (*mgo.Session, error) {
@@ -446,7 +433,7 @@ func initBootstrapMachine(st *state.State, args InitializeStateParams) (bootstra
 		hardware = *args.BootstrapMachineHardwareCharacteristics
 	}
 
-	hostSeries, err := series.HostSeries()
+	hostSeries, err := utilseries.HostSeries()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -456,9 +443,13 @@ func initBootstrapMachine(st *state.State, args InitializeStateParams) (bootstra
 		return nil, errors.Trace(err)
 	}
 
+	base, err := series.GetBaseFromSeries(hostSeries)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	m, err := st.AddOneMachine(state.MachineTemplate{
 		Addresses:               spaceAddrs,
-		Series:                  hostSeries,
+		Base:                    state.Base{OS: base.OS, Channel: base.Channel.String()},
 		Nonce:                   agent.BootstrapNonce,
 		Constraints:             args.BootstrapMachineConstraints,
 		InstanceId:              args.BootstrapMachineInstanceId,

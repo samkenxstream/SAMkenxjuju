@@ -6,23 +6,15 @@ package machinemanager
 import (
 	"reflect"
 
-	"github.com/juju/errors"
-
 	"github.com/juju/juju/apiserver/facade"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("MachineManager", 7, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV7(ctx)
+	registry.MustRegister("MachineManager", 9, func(ctx facade.Context) (facade.Facade, error) {
+		return NewFacadeV9(ctx)
+	}, reflect.TypeOf((*MachineManagerV9)(nil)))
+	registry.MustRegister("MachineManager", 10, func(ctx facade.Context) (facade.Facade, error) {
+		return NewFacadeV10(ctx) // DestroyMachineWithParams gains dry-run
 	}, reflect.TypeOf((*MachineManagerAPI)(nil)))
-}
-
-// newFacadeV7 creates a new server-side MachineManager API facade.
-func newFacadeV7(ctx facade.Context) (*MachineManagerAPI, error) {
-	machineManagerAPI, err := NewFacadeV7(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return machineManagerAPI, nil
 }

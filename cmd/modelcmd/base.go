@@ -151,6 +151,8 @@ func (c *CommandBase) setRunStarted() {
 
 // closeAPIContexts closes any API contexts that have
 // been created.
+//
+//nolint:unused
 func (c *CommandBase) closeAPIContexts() {
 	for name, ctx := range c.apiContexts {
 		if err := ctx.Close(); err != nil {
@@ -267,6 +269,7 @@ func (c *CommandBase) NewAPIRootWithDialOpts(
 		return nil, errors.New("no controller API addresses; is bootstrap still in progress?")
 	}
 	if proxyerrors.IsProxyConnectError(err) {
+		logger.Debugf("proxy connection error: %v", err)
 		if proxyerrors.ProxyType(err) == k8sproxy.ProxierTypeKey {
 			return nil, errors.New("cannot connect to k8s api server; try running 'juju update-k8s --client <k8s cloud name>'")
 		}
@@ -679,9 +682,11 @@ func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (
 		// DetectCredential ensures that there is only one credential
 		// to choose from. It's still in a map, though, hence for..range.
 		var credentialName string
-		for name, one := range cloudCredential.AuthCredentials {
+		for name, v := range cloudCredential.AuthCredentials {
+			one := v
 			credential = &one
 			credentialName = name
+			break
 		}
 		credential, err = FinalizeFileContent(credential, provider)
 		if err != nil {

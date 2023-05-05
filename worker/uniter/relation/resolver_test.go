@@ -4,14 +4,13 @@
 package relation_test
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
@@ -125,7 +124,7 @@ func (s *relationResolverSuite) SetUpTest(c *gc.C) {
 	s.charmDir = filepath.Join(c.MkDir(), "charm")
 	err := os.MkdirAll(s.charmDir, 0755)
 	c.Assert(err, jc.ErrorIsNil)
-	err = ioutil.WriteFile(filepath.Join(s.charmDir, "metadata.yaml"), []byte(minimalMetadata), 0755)
+	err = os.WriteFile(filepath.Join(s.charmDir, "metadata.yaml"), []byte(minimalMetadata), 0755)
 	c.Assert(err, jc.ErrorIsNil)
 	s.leadershipContextFunc = func(accessor context.LeadershipSettingsAccessor, tracker leadership.Tracker, unitName string) context.LeadershipContext {
 		return &stubLeadershipContext{isLeader: true}
@@ -1697,11 +1696,6 @@ func (s *mockRelationResolverSuite) expectStateUnknown(id int) {
 func (s *mockRelationResolverSuite) expectState(st relation.State) {
 	exp := s.mockRelStTracker.EXPECT()
 	exp.State(st.RelationId).Return(&st, nil)
-}
-
-func (s *mockRelationResolverSuite) expectStateMaybe(st relation.State) {
-	exp := s.mockRelStTracker.EXPECT()
-	exp.State(st.RelationId).Return(&st, nil).AnyTimes()
 }
 
 func (s *mockRelationResolverSuite) expectIsPeerRelationFalse(id int) {

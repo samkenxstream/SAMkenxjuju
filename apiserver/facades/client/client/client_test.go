@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	jtesting "github.com/juju/testing"
@@ -37,7 +37,6 @@ import (
 	registrymocks "github.com/juju/juju/docker/registry/mocks"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
 	envtools "github.com/juju/juju/environs/tools"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/params"
@@ -102,32 +101,6 @@ func (s *serverSuite) TestNewFacadeWaitsForCachedModel(c *gc.C) {
 	// the model exists in the database but the cache hasn't been updated
 	// before we ask for the client.
 	_ = s.clientForState(c, state)
-}
-
-func (s *serverSuite) assertModelVersion(c *gc.C, st *state.State, expectedVersion, expectedStream string) {
-	m, err := st.Model()
-	c.Assert(err, jc.ErrorIsNil)
-	modelConfig, err := m.ModelConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	agentVersion, found := modelConfig.AllAttrs()["agent-version"].(string)
-	c.Assert(found, jc.IsTrue)
-	c.Assert(agentVersion, gc.Equals, expectedVersion)
-	var agentStream string
-	agentStream, found = modelConfig.AllAttrs()["agent-stream"].(string)
-	c.Assert(found, jc.IsTrue)
-	c.Assert(agentStream, gc.Equals, expectedStream)
-
-}
-
-type mockEnviron struct {
-	environs.Environ
-	validateCloudEndpointCalled bool
-	err                         error
-}
-
-func (m *mockEnviron) ValidateCloudEndpoint(context.ProviderCallContext) error {
-	m.validateCloudEndpointCalled = true
-	return m.err
 }
 
 type clientSuite struct {
@@ -247,7 +220,7 @@ func (s *clientSuite) TestClientWatchAllReadPermission(c *gc.C) {
 	loggo.GetLogger("juju.apiserver").SetLogLevel(loggo.TRACE)
 	// A very simple end-to-end test, because
 	// all the logic is tested elsewhere.
-	m, err := s.State.AddMachine("quantal", state.JobManageModel)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 	err = m.SetProvisioned("i-0", "", agent.BootstrapNonce, nil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -290,7 +263,7 @@ func (s *clientSuite) TestClientWatchAllReadPermission(c *gc.C) {
 				Current: status.Pending,
 			},
 			Life:                    life.Alive,
-			Series:                  "quantal",
+			Base:                    "ubuntu@12.10",
 			Jobs:                    []model.MachineJob{state.JobManageModel.ToParams()},
 			Addresses:               []params.Address{},
 			HardwareCharacteristics: &instance.HardwareCharacteristics{},
@@ -334,7 +307,7 @@ func (s *clientSuite) TestClientWatchAllAdminPermission(c *gc.C) {
 	loggo.GetLogger("juju.state.allwatcher").SetLogLevel(loggo.TRACE)
 	// A very simple end-to-end test, because
 	// all the logic is tested elsewhere.
-	m, err := s.State.AddMachine("quantal", state.JobManageModel)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 	err = m.SetProvisioned("i-0", "", agent.BootstrapNonce, nil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -386,7 +359,7 @@ func (s *clientSuite) TestClientWatchAllAdminPermission(c *gc.C) {
 				Current: status.Pending,
 			},
 			Life:                    life.Alive,
-			Series:                  "quantal",
+			Base:                    "ubuntu@12.10",
 			Jobs:                    []model.MachineJob{state.JobManageModel.ToParams()},
 			Addresses:               []params.Address{},
 			HardwareCharacteristics: &instance.HardwareCharacteristics{},
@@ -472,10 +445,8 @@ func (s *findToolsSuite) TestFindToolsIAAS(c *gc.C) {
 	registryProvider := registrymocks.NewMockRegistry(ctrl)
 	toolsFinder := mocks.NewMockToolsFinder(ctrl)
 
-	simpleStreams := params.FindToolsResult{
-		List: []*tools.Tools{
-			{Version: version.MustParseBinary("2.9.6-ubuntu-amd64")},
-		},
+	simpleStreams := []*tools.Tools{
+		{Version: version.MustParseBinary("2.9.6-ubuntu-amd64")},
 	}
 
 	gomock.InOrder(
@@ -486,7 +457,7 @@ func (s *findToolsSuite) TestFindToolsIAAS(c *gc.C) {
 		authorizer.EXPECT().HasPermission(permission.WriteAccess, coretesting.ModelTag).Return(true, nil),
 
 		backend.EXPECT().Model().Return(model, nil),
-		toolsFinder.EXPECT().FindTools(params.FindToolsParams{MajorVersion: 2}).
+		toolsFinder.EXPECT().FindAgents(common.FindAgentsParams{MajorVersion: 2}).
 			Return(simpleStreams, nil),
 		model.EXPECT().Type().Return(state.ModelTypeIAAS),
 	)
@@ -503,7 +474,7 @@ func (s *findToolsSuite) TestFindToolsIAAS(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	result, err := api.FindTools(params.FindToolsParams{MajorVersion: 2})
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, simpleStreams)
+	c.Assert(result, gc.DeepEquals, params.FindToolsResult{List: simpleStreams})
 }
 
 func (s *findToolsSuite) getModelConfig(c *gc.C, agentVersion string) *config.Config {
@@ -527,12 +498,10 @@ func (s *findToolsSuite) TestFindToolsCAASReleased(c *gc.C) {
 	registryProvider := registrymocks.NewMockRegistry(ctrl)
 	toolsFinder := mocks.NewMockToolsFinder(ctrl)
 
-	simpleStreams := params.FindToolsResult{
-		List: []*tools.Tools{
-			{Version: version.MustParseBinary("2.9.9-ubuntu-amd64")},
-			{Version: version.MustParseBinary("2.9.10-ubuntu-amd64")},
-			{Version: version.MustParseBinary("2.9.11-ubuntu-amd64")},
-		},
+	simpleStreams := []*tools.Tools{
+		{Version: version.MustParseBinary("2.9.9-ubuntu-amd64")},
+		{Version: version.MustParseBinary("2.9.10-ubuntu-amd64")},
+		{Version: version.MustParseBinary("2.9.11-ubuntu-amd64")},
 	}
 	s.PatchValue(&coreos.HostOS, func() coreos.OSType { return coreos.Ubuntu })
 
@@ -544,7 +513,7 @@ func (s *findToolsSuite) TestFindToolsCAASReleased(c *gc.C) {
 		authorizer.EXPECT().HasPermission(permission.WriteAccess, coretesting.ModelTag).Return(true, nil),
 
 		backend.EXPECT().Model().Return(model, nil),
-		toolsFinder.EXPECT().FindTools(params.FindToolsParams{MajorVersion: 2}).
+		toolsFinder.EXPECT().FindAgents(common.FindAgentsParams{MajorVersion: 2}).
 			Return(simpleStreams, nil),
 		model.EXPECT().Type().Return(state.ModelTypeCAAS),
 		model.EXPECT().Config().Return(s.getModelConfig(c, "2.9.9"), nil),
@@ -609,13 +578,11 @@ func (s *findToolsSuite) TestFindToolsCAASNonReleased(c *gc.C) {
 	registryProvider := registrymocks.NewMockRegistry(ctrl)
 	toolsFinder := mocks.NewMockToolsFinder(ctrl)
 
-	simpleStreams := params.FindToolsResult{
-		List: []*tools.Tools{
-			{Version: version.MustParseBinary("2.9.9-ubuntu-amd64")},
-			{Version: version.MustParseBinary("2.9.10-ubuntu-amd64")},
-			{Version: version.MustParseBinary("2.9.11-ubuntu-amd64")},
-			{Version: version.MustParseBinary("2.9.12-ubuntu-amd64")},
-		},
+	simpleStreams := []*tools.Tools{
+		{Version: version.MustParseBinary("2.9.9-ubuntu-amd64")},
+		{Version: version.MustParseBinary("2.9.10-ubuntu-amd64")},
+		{Version: version.MustParseBinary("2.9.11-ubuntu-amd64")},
+		{Version: version.MustParseBinary("2.9.12-ubuntu-amd64")},
 	}
 	s.PatchValue(&coreos.HostOS, func() coreos.OSType { return coreos.Ubuntu })
 
@@ -627,7 +594,7 @@ func (s *findToolsSuite) TestFindToolsCAASNonReleased(c *gc.C) {
 		authorizer.EXPECT().HasPermission(permission.WriteAccess, coretesting.ModelTag).Return(true, nil),
 
 		backend.EXPECT().Model().Return(model, nil),
-		toolsFinder.EXPECT().FindTools(params.FindToolsParams{MajorVersion: 2, AgentStream: envtools.DevelStream}).
+		toolsFinder.EXPECT().FindAgents(common.FindAgentsParams{MajorVersion: 2, AgentStream: envtools.DevelStream}).
 			Return(simpleStreams, nil),
 		model.EXPECT().Type().Return(state.ModelTypeCAAS),
 		model.EXPECT().Config().Return(s.getModelConfig(c, "2.9.9.1"), nil),

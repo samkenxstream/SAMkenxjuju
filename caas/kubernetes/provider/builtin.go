@@ -6,7 +6,6 @@ package provider
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -104,16 +103,13 @@ func getLocalMicroK8sConfig(cmdRunner CommandRunner, getKubeConfigDir func() (st
 		return getLocalMicroK8sConfigNonLinux(cmdRunner)
 	}
 
-	_, err := cmdRunner.LookPath("microk8s")
-	if err != nil {
-		return []byte{}, errors.NotFoundf("microk8s")
-	}
 	notSupportErr := errors.NewNotSupported(nil, fmt.Sprintf("juju %q can only work with strictly confined microk8s", version.Current))
 	clientConfigPath, err := getKubeConfigDir()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	content, err := ioutil.ReadFile(clientConfigPath)
+	logger.Tracef("reading kubeconfig %q", clientConfigPath)
+	content, err := os.ReadFile(clientConfigPath)
 	if os.IsNotExist(err) {
 		return nil, errors.Annotatef(notSupportErr, "%q does not exist", clientConfigPath)
 	}

@@ -3,7 +3,16 @@ on:
   push:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'snap/**'
+      - '.github/workflows/snap.yml'
+      - 'scripts/dqlite/**'
+      - 'Makefile'
+      - 'make_functions.sh'
   workflow_dispatch:
+
 permissions:
   contents: read
 
@@ -19,30 +28,21 @@ jobs:
       shell: bash
       run: |
         set -euxo pipefail
-        sudo apt-get remove lxd lxd-client
         sudo snap install snapcraft --classic
-        sudo snap install lxd
-        sudo lxd waitready
-        sudo lxd init --auto
-        sudo chmod a+wr /var/snap/lxd/common/lxd/unix.socket
         echo "/snap/bin" >> $GITHUB_PATH
 
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Find required go version
-      id: go-version
-      if: env.RUN_TEST == 'RUN'
-      run: |
-        set -euxo pipefail
-        echo "::set-output name=version::$(grep '^go ' go.mod | awk '{print $2}')"
+    - name: Setup LXD
+      uses: canonical/setup-lxd@ea57509243d3cf39f8ab926e021bb353947b01b5
 
     - name: Set up Go
       if: env.RUN_TEST == 'RUN'
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
-        go-version: ${{ steps.go-version.outputs.version }}
-      id: go
+        go-version-file: 'go.mod'
+        cache: true
 
     - name: Build snap
       shell: bash
@@ -60,13 +60,12 @@ jobs:
         sudo snap connect juju:lxd lxd
         sudo snap connect juju:config-lxd
         sudo snap connect juju:dot-local-share-juju
-        sudo snap connect juju:ssh-public-keys
+        sudo snap connect juju:ssh-keys
         snap connections juju
 
     - name: Test bootstrap
       shell: bash
       run: |
         set -euxo pipefail
-        lxc network set lxdbr0 ipv6.address none
         mkdir ~/.ssh
         juju bootstrap localhost --debug

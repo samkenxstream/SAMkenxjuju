@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 )
@@ -23,7 +23,7 @@ func NewCharmAtPath(path, series string) (charm.Charm, *charm.URL, error) {
 	return NewCharmAtPathForceSeries(path, series, false)
 }
 
-// NewCharmAtPathForSeries returns the charm represented by this path,
+// NewCharmAtPathForceSeries returns the charm represented by this path,
 // and a URL that describes it. If the series is empty,
 // the charm's default series is used, if any.
 // Otherwise, the series is validated against those the
@@ -74,6 +74,7 @@ func charmSeries(series string, force bool, cm charm.CharmMeta) (string, error) 
 		return series, nil
 	}
 	computedSeries, err := ComputedSeries(cm)
+	logger.Tracef("series %q, %v", series, computedSeries)
 	if err != nil {
 		return "", err
 	}
@@ -151,7 +152,7 @@ type unsupportedSeriesError struct {
 
 func (e *unsupportedSeriesError) Error() string {
 	return fmt.Sprintf(
-		"series %q not supported by charm, supported series are: %s",
+		"series %q not supported by charm, the charm supported series are: %s",
 		e.requestedSeries, strings.Join(e.supportedSeries, ","),
 	)
 }

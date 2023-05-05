@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strconv"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/resources"
@@ -95,7 +95,7 @@ func setResource(isUnit bool, target, user string, res charmresource.Resource, r
 	if isUnit {
 		return rSt.SetUnitResource(target, user, res)
 	}
-	return rSt.SetResource(target, user, res, r, state.IncrementCharmModifiedVersion)
+	return rSt.SetResource(target, user, res, r, state.DoNotIncrementCharmModifiedVersion)
 }
 
 func isPlaceholder(query url.Values) bool {

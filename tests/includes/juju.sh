@@ -60,10 +60,10 @@ ensure() {
 bootstrap() {
 	local cloud name output model bootstrapped_name
 	case "${BOOTSTRAP_PROVIDER:-}" in
-	"aws" | "ec2")
+	"ec2")
 		cloud="aws"
 		;;
-	"google" | "gce")
+	"gce")
 		cloud="google"
 		;;
 	"azure")
@@ -129,11 +129,11 @@ bootstrap() {
 	if [[ ${BOOTSTRAP_REUSE} == "true" ]]; then
 		echo "====> Reusing bootstrapped juju ($(green "${version}:${cloud}"))"
 
-		OUT=$(juju models -c "${bootstrapped_name}" --format=json 2>/dev/null | jq '.models[] | .["short-name"]' | grep "${model}" || true)
+		OUT=$(juju models -c "${bootstrapped_name}" --format=json 2>/dev/null | jq -r ".models[] | .[\"short-name\"] | select(. == \"${model}\")" || true)
 		if [[ -n ${OUT} ]]; then
 			echo "${model} already exists. Use the following to clean up the environment:"
 			echo "    juju switch ${bootstrapped_name}"
-			echo "    juju destroy-model -y ${model}"
+			echo "    juju destroy-model --no-prompt ${model}"
 			exit 1
 		fi
 
@@ -193,7 +193,7 @@ setup_vsphere_simplestreams() {
 	local dir series
 
 	dir=${1}
-	series=${2:-"focal"}
+	series=${2:-"jammy"}
 
 	if [[ ! -f ${dir} ]]; then
 		mkdir "${dir}" || true
@@ -237,7 +237,7 @@ juju_bootstrap() {
 
 	pre_bootstrap
 
-	command="juju bootstrap ${series} ${cloud_region} ${name} --add-model ${model} ${BOOTSTRAP_ADDITIONAL_ARGS}"
+	command="juju bootstrap ${series} ${cloud_region} ${name} --add-model ${model} --model-default mode= ${BOOTSTRAP_ADDITIONAL_ARGS}"
 	# keep $@ here, otherwise hit SC2124
 	${command} "$@" 2>&1 | OUTPUT "${output}"
 	echo "${name}" >>"${TEST_DIR}/jujus"
@@ -261,15 +261,33 @@ pre_bootstrap() {
 	esac
 
 	if [[ ${BUILD_AGENT:-} == true ]]; then
-		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --build-agent=${BUILD_AGENT}"
+		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --build-agent"
 	else
 		# In CI tests, both Build and OfficialBuild are set.
 		# Juju confuses when it needs to decide the operator image tag to use.
-		# So we need to explicitely set the agent version for CI tests.
-		version=$(juju_version)
+		# So we need to explicitly set the agent version for CI tests.
+		if [[ -n ${JUJU_VERSION:-} ]]; then
+			version=${JUJU_VERSION}
+		else
+			version=$(juju_version)
+		fi
 		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --agent-version=${version}"
 	fi
-	echo "BOOTSTRAP_ADDITIONAL_ARGS => ${BOOTSTRAP_ADDITIONAL_ARGS}"
+
+	if [[ -n ${SHORT_GIT_COMMIT:-} ]]; then
+		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --model-default agent-metadata-url=https://ci-run-streams.s3.amazonaws.com/builds/build-${SHORT_GIT_COMMIT}/"
+		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --model-default agent-stream=build-${SHORT_GIT_COMMIT}"
+	fi
+
+	if [[ -n ${BOOTSTRAP_ARCH:-} ]]; then
+		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --bootstrap-constraints arch=${BOOTSTRAP_ARCH}"
+	fi
+
+	if [[ -n ${OPERATOR_IMAGE_ACCOUNT:-} ]]; then
+		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS:-} --config caas-image-repo=${OPERATOR_IMAGE_ACCOUNT}"
+	fi
+
+	echo "====> BOOTSTRAP_ADDITIONAL_ARGS: ${BOOTSTRAP_ADDITIONAL_ARGS}"
 }
 
 # post_bootstrap contains actions required after bootstrap specific to providers
@@ -292,18 +310,23 @@ post_add_model() {
 		add_images_for_vsphere
 		;;
 	esac
+
+	if [[ -n ${MODEL_ARCH:-} ]]; then
+		juju set-model-constraints "arch=${MODEL_ARCH}"
+	fi
 }
 
 # destroy_model takes a model name and destroys a model. It first checks if the
 # model is found before attempting to do so.
 #
 # ```
-# destroy_model <model name>
+# destroy_model <model name> [<timeout>]
 # ```
 destroy_model() {
-	local name
+	local name timeout
 
 	name=${1}
+	timeout=${2:-30m}
 	shift
 
 	# shellcheck disable=SC2034
@@ -316,7 +339,7 @@ destroy_model() {
 	output="${TEST_DIR}/${name}-destroy.log"
 
 	echo "====> Destroying juju model ${name}"
-	echo "${name}" | xargs -I % juju destroy-model -y --destroy-storage % >"${output}" 2>&1 || true
+	echo "${name}" | xargs -I % juju destroy-model --no-prompt --destroy-storage --timeout="$timeout" % >"${output}" 2>&1 || true
 	CHK=$(cat "${output}" | grep -i "ERROR\|Unable to get the model status from the API" || true)
 	if [[ -n ${CHK} ]]; then
 		printf '\nFound some issues\n'
@@ -350,7 +373,7 @@ destroy_controller() {
 		echo "====> Destroying model ($(green "${name}"))"
 
 		output="${TEST_DIR}/${name}-destroy-model.log"
-		echo "${name}" | xargs -I % juju destroy-model -y % >"${output}" 2>&1 || true
+		echo "${name}" | xargs -I % juju destroy-model --no-prompt % >"${output}" 2>&1 || true
 
 		echo "====> Destroyed model ($(green "${name}"))"
 		return
@@ -374,7 +397,11 @@ destroy_controller() {
 	output="${TEST_DIR}/${name}-destroy-controller.log"
 
 	echo "====> Destroying juju ($(green "${name}"))"
-	echo "${name}" | xargs -I % juju destroy-controller --destroy-all-models -y % >"${output}" 2>&1
+	if [[ ${KILL_CONTROLLER:-} != "true" ]]; then
+		echo "${name}" | xargs -I % juju destroy-controller --destroy-all-models --no-prompt % >"${output}" 2>&1
+	else
+		echo "${name}" | xargs -I % juju kill-controller -t 0 --no-prompt % >"${output}" 2>&1
+	fi
 
 	set +e
 	CHK=$(cat "${output}" | grep -i "ERROR" || true)

@@ -11,18 +11,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	mgotxn "github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	mgotesting "github.com/juju/mgo/v3/testing"
+	mgotxn "github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	gitjujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
-	"github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3"
 	"github.com/juju/utils/v3/arch"
 	"github.com/juju/version/v2"
@@ -41,6 +41,7 @@ import (
 	"github.com/juju/juju/core/network"
 	coreos "github.com/juju/juju/core/os"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/mongo"
@@ -320,8 +321,8 @@ func (s *MultiModelStateSuite) TestWatchTwoModels(c *gc.C) {
 				c.Assert(err, jc.ErrorIsNil)
 				_, err = st.AddMachineInsideMachine(
 					state.MachineTemplate{
-						Series: "jammy",
-						Jobs:   []state.MachineJob{state.JobHostUnits},
+						Base: state.UbuntuBase("22.04"),
+						Jobs: []state.MachineJob{state.JobHostUnits},
 					},
 					m.Id(),
 					instance.KVM,
@@ -341,8 +342,8 @@ func (s *MultiModelStateSuite) TestWatchTwoModels(c *gc.C) {
 				c.Assert(err, jc.ErrorIsNil)
 				_, err = st.AddMachineInsideMachine(
 					state.MachineTemplate{
-						Series: "jammy",
-						Jobs:   []state.MachineJob{state.JobHostUnits},
+						Base: state.UbuntuBase("22.04"),
+						Jobs: []state.MachineJob{state.JobHostUnits},
 					},
 					m.Id(),
 					instance.LXD,
@@ -508,8 +509,7 @@ func (s *MultiModelStateSuite) TestWatchTwoModels(c *gc.C) {
 				err = r.Destroy()
 				c.Assert(err, jc.ErrorIsNil)
 				loggo.GetLogger("juju.state").SetLogLevel(loggo.DEBUG)
-
-				return false
+				return true
 			},
 			triggerEvent: func(st *state.State) {
 				loggo.GetLogger("juju.state").SetLogLevel(loggo.TRACE)
@@ -548,7 +548,7 @@ func (s *MultiModelStateSuite) TestWatchTwoModels(c *gc.C) {
 				sdb := state.BlockDeviceInfo{DeviceName: "sdb"}
 				err = m.SetMachineBlockDevices(sdb)
 				c.Assert(err, jc.ErrorIsNil)
-				return false
+				return true
 			},
 			triggerEvent: func(st *state.State) {
 				m, err := st.Machine("0")
@@ -560,7 +560,7 @@ func (s *MultiModelStateSuite) TestWatchTwoModels(c *gc.C) {
 		}, {
 			about: "statuses",
 			getWatcher: func(st *state.State) interface{} {
-				m, err := st.AddMachine("jammy", state.JobHostUnits)
+				m, err := st.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
 				c.Assert(err, jc.ErrorIsNil)
 				c.Assert(m.Id(), gc.Equals, "0")
 				// Ensure that all the creation events have flowed through the system.
@@ -661,13 +661,13 @@ func (s *MultiModelStateSuite) TestWatchTwoModels(c *gc.C) {
 				var wc interface{}
 				switch w := test.getWatcher(st).(type) {
 				case statetesting.StringsWatcher:
-					wc = statetesting.NewStringsWatcherC(c, st, w)
+					wc = statetesting.NewStringsWatcherC(c, w)
 					swc := wc.(statetesting.StringsWatcherC)
 					// consume initial event
 					swc.AssertChange()
 					swc.AssertNoChange()
 				case statetesting.NotifyWatcher:
-					wc = statetesting.NewNotifyWatcherC(c, st, w)
+					wc = statetesting.NewNotifyWatcherC(c, w)
 					nwc := wc.(statetesting.NotifyWatcherC)
 					// consume initial event
 					nwc.AssertOneChange()
@@ -757,9 +757,9 @@ func (tw *TestWatcherC) Stop() {
 func (s *StateSuite) TestAddresses(c *gc.C) {
 	var err error
 	machines := make([]*state.Machine, 4)
-	machines[0], err = s.State.AddMachine("quantal", state.JobManageModel, state.JobHostUnits)
+	machines[0], err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel, state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
-	machines[1], err = s.State.AddMachine("quantal", state.JobHostUnits)
+	machines[1], err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 
 	node, err := s.State.ControllerNode(machines[0].Id())
@@ -767,7 +767,7 @@ func (s *StateSuite) TestAddresses(c *gc.C) {
 	err = node.SetHasVote(true)
 	c.Assert(err, jc.ErrorIsNil)
 
-	changes, err := s.State.EnableHA(3, constraints.Value{}, "quantal", nil)
+	changes, err := s.State.EnableHA(3, constraints.Value{}, state.UbuntuBase("12.10"), nil)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(changes.Added, gc.DeepEquals, []string{"2", "3"})
 	c.Assert(changes.Maintained, gc.DeepEquals, []string{machines[0].Id()})
@@ -801,7 +801,7 @@ func (s *StateSuite) TestAddresses(c *gc.C) {
 
 func (s *StateSuite) TestPing(c *gc.C) {
 	c.Assert(s.State.Ping(), gc.IsNil)
-	gitjujutesting.MgoServer.Restart()
+	mgotesting.MgoServer.Restart()
 	c.Assert(s.State.Ping(), gc.NotNil)
 }
 
@@ -835,11 +835,11 @@ func (s *StateSuite) TestJobString(c *gc.C) {
 }
 
 func (s *StateSuite) TestAddMachineErrors(c *gc.C) {
-	_, err := s.State.AddMachine("")
-	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: no series specified")
-	_, err = s.State.AddMachine("quantal")
+	_, err := s.State.AddMachine(state.Base{})
+	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: no base specified")
+	_, err = s.State.AddMachine(state.UbuntuBase("12.10"))
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: no jobs specified")
-	_, err = s.State.AddMachine("quantal", state.JobHostUnits, state.JobHostUnits)
+	_, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits, state.JobHostUnits)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: duplicate job: .*")
 }
 
@@ -848,37 +848,37 @@ func (s *StateSuite) TestAddMachine(c *gc.C) {
 		state.JobHostUnits,
 		state.JobManageModel,
 	}
-	m0, err := s.State.AddMachine("quantal", allJobs...)
+	m0, err := s.State.AddMachine(state.UbuntuBase("12.10"), allJobs...)
 	c.Assert(err, jc.ErrorIsNil)
-	check := func(m *state.Machine, id, series string, jobs []state.MachineJob) {
+	check := func(m *state.Machine, id string, base state.Base, jobs []state.MachineJob) {
 		c.Assert(m.Id(), gc.Equals, id)
-		c.Assert(m.Series(), gc.Equals, series)
+		c.Assert(m.Base().String(), gc.Equals, base.String())
 		c.Assert(m.Jobs(), gc.DeepEquals, jobs)
 		s.assertMachineContainers(c, m, nil)
 	}
-	check(m0, "0", "quantal", allJobs)
+	check(m0, "0", state.UbuntuBase("12.10"), allJobs)
 	m0, err = s.State.Machine("0")
 	c.Assert(err, jc.ErrorIsNil)
-	check(m0, "0", "quantal", allJobs)
+	check(m0, "0", state.UbuntuBase("12.10"), allJobs)
 
 	oneJob := []state.MachineJob{state.JobHostUnits}
-	m1, err := s.State.AddMachine("blahblah", oneJob...)
+	m1, err := s.State.AddMachine(state.UbuntuBase("22.04"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
-	check(m1, "1", "blahblah", oneJob)
+	check(m1, "1", state.UbuntuBase("22.04"), oneJob)
 
 	m1, err = s.State.Machine("1")
 	c.Assert(err, jc.ErrorIsNil)
-	check(m1, "1", "blahblah", oneJob)
+	check(m1, "1", state.UbuntuBase("22.04"), oneJob)
 
 	m, err := s.State.AllMachines()
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m, gc.HasLen, 2)
-	check(m[0], "0", "quantal", allJobs)
-	check(m[1], "1", "blahblah", oneJob)
+	check(m[0], "0", state.UbuntuBase("12.10"), allJobs)
+	check(m[1], "1", state.UbuntuBase("22.04"), oneJob)
 
 	st2 := s.Factory.MakeModel(c, nil)
 	defer st2.Close()
-	_, err = st2.AddMachine("quantal", state.JobManageModel)
+	_, err = st2.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: controller jobs specified but not allowed")
 }
 
@@ -887,7 +887,7 @@ func (s *StateSuite) TestAddMachines(c *gc.C) {
 	cons := constraints.MustParse("mem=4G")
 	hc := instance.MustParseHardware("mem=2G")
 	machineTemplate := state.MachineTemplate{
-		Series:                  "precise",
+		Base:                    state.UbuntuBase("12.10"),
 		Constraints:             cons,
 		HardwareCharacteristics: hc,
 		InstanceId:              "inst-id",
@@ -901,7 +901,7 @@ func (s *StateSuite) TestAddMachines(c *gc.C) {
 	m, err := s.State.Machine(machines[0].Id())
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.CheckProvisioned("nonce"), jc.IsTrue)
-	c.Assert(m.Series(), gc.Equals, "precise")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	mcons, err := m.Constraints()
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(mcons, gc.DeepEquals, cons)
@@ -918,7 +918,7 @@ func (s *StateSuite) TestAddMachinesModelDying(c *gc.C) {
 	err := s.Model.Destroy(state.DestroyModelParams{})
 	c.Assert(err, jc.ErrorIsNil)
 	// Check that machines cannot be added if the model is initially Dying.
-	_, err = s.State.AddMachine("quantal", state.JobHostUnits)
+	_, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, gc.ErrorMatches, `cannot add a new machine: model "testmodel" is dying`)
 }
 
@@ -929,7 +929,7 @@ func (s *StateSuite) TestAddMachinesModelDyingAfterInitial(c *gc.C) {
 		c.Assert(s.Model.Life(), gc.Equals, state.Alive)
 		c.Assert(s.Model.Destroy(state.DestroyModelParams{}), gc.IsNil)
 	}).Check()
-	_, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, gc.ErrorMatches, `cannot add a new machine: model "testmodel" is dying`)
 }
 
@@ -937,7 +937,7 @@ func (s *StateSuite) TestAddMachinesModelMigrating(c *gc.C) {
 	err := s.Model.SetMigrationMode(state.MigrationModeExporting)
 	c.Assert(err, jc.ErrorIsNil)
 	// Check that machines cannot be added if the model is initially Dying.
-	_, err = s.State.AddMachine("quantal", state.JobHostUnits)
+	_, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, gc.ErrorMatches, `cannot add a new machine: model "testmodel" is being migrated`)
 }
 
@@ -948,7 +948,7 @@ func (s *StateSuite) TestAddMachineExtraConstraints(c *gc.C) {
 	extraCons := constraints.MustParse("cores=4")
 	m, err := s.State.AddOneMachine(state.MachineTemplate{
 		DisplayName: "test-display-name",
-		Series:      "quantal",
+		Base:        state.UbuntuBase("12.10"),
 		Constraints: extraCons,
 		Jobs:        oneJob,
 		Nonce:       "nonce",
@@ -956,7 +956,7 @@ func (s *StateSuite) TestAddMachineExtraConstraints(c *gc.C) {
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	c.Assert(m.Jobs(), gc.DeepEquals, oneJob)
 	expectedCons := constraints.MustParse("cores=4 mem=4G")
 	mcons, err := m.Constraints()
@@ -976,7 +976,7 @@ func (s *StateSuite) TestAddMachinePlacementIgnoresModelConstraints(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
 	m, err := s.State.AddOneMachine(state.MachineTemplate{
 		DisplayName: "test-display-name",
-		Series:      "quantal",
+		Base:        state.UbuntuBase("12.10"),
 		Jobs:        oneJob,
 		Placement:   "theplacement",
 		Nonce:       "nonce",
@@ -984,7 +984,7 @@ func (s *StateSuite) TestAddMachinePlacementIgnoresModelConstraints(c *gc.C) {
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	c.Assert(m.Placement(), gc.Equals, "theplacement")
 	c.Assert(m.Jobs(), gc.DeepEquals, oneJob)
 	expectedCons := constraints.MustParse("")
@@ -1022,7 +1022,7 @@ func (s *StateSuite) TestAddMachineWithVolumes(c *gc.C) {
 	}
 
 	machineTemplate := state.MachineTemplate{
-		Series:                  "precise",
+		Base:                    state.UbuntuBase("12.10"),
 		Constraints:             cons,
 		HardwareCharacteristics: hc,
 		InstanceId:              "inst-id",
@@ -1084,17 +1084,17 @@ func (s *StateSuite) TestAddContainerToNewMachine(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
 
 	template := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   oneJob,
+		Base: state.UbuntuBase("12.10"),
+		Jobs: oneJob,
 	}
 	parentTemplate := state.MachineTemplate{
-		Series: "raring",
-		Jobs:   oneJob,
+		Base: state.UbuntuBase("20.04"),
+		Jobs: oneJob,
 	}
 	m, err := s.State.AddMachineInsideNewMachine(template, parentTemplate, instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0/lxd/0")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().DisplayString(), gc.Equals, "ubuntu@12.10")
 	c.Assert(m.ContainerType(), gc.Equals, instance.LXD)
 	mcons, err := m.Constraints()
 	c.Assert(err, jc.ErrorIsNil)
@@ -1104,7 +1104,7 @@ func (s *StateSuite) TestAddContainerToNewMachine(c *gc.C) {
 	m, err = s.State.Machine("0")
 	c.Assert(err, jc.ErrorIsNil)
 	s.assertMachineContainers(c, m, []string{"0/lxd/0"})
-	c.Assert(m.Series(), gc.Equals, "raring")
+	c.Assert(m.Base().DisplayString(), gc.Equals, "ubuntu@20.04")
 
 	m, err = s.State.Machine("0/lxd/0")
 	c.Assert(err, jc.ErrorIsNil)
@@ -1114,19 +1114,19 @@ func (s *StateSuite) TestAddContainerToNewMachine(c *gc.C) {
 
 func (s *StateSuite) TestAddContainerToExistingMachine(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
-	m0, err := s.State.AddMachine("quantal", oneJob...)
+	m0, err := s.State.AddMachine(state.UbuntuBase("12.10"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
-	m1, err := s.State.AddMachine("quantal", oneJob...)
+	m1, err := s.State.AddMachine(state.UbuntuBase("12.10"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Add first container.
 	m, err := s.State.AddMachineInsideMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}, "1", instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "1/lxd/0")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	c.Assert(m.ContainerType(), gc.Equals, instance.LXD)
 	mcons, err := m.Constraints()
 	c.Assert(err, jc.ErrorIsNil)
@@ -1142,12 +1142,12 @@ func (s *StateSuite) TestAddContainerToExistingMachine(c *gc.C) {
 
 	// Add second container.
 	m, err = s.State.AddMachineInsideMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}, "1", instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "1/lxd/1")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	c.Assert(m.ContainerType(), gc.Equals, instance.LXD)
 	c.Assert(m.Jobs(), gc.DeepEquals, oneJob)
 	s.assertMachineContainers(c, m1, []string{"1/lxd/0", "1/lxd/1"})
@@ -1155,14 +1155,14 @@ func (s *StateSuite) TestAddContainerToExistingMachine(c *gc.C) {
 
 func (s *StateSuite) TestAddContainerToMachineWithKnownSupportedContainers(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
-	host, err := s.State.AddMachine("quantal", oneJob...)
+	host, err := s.State.AddMachine(state.UbuntuBase("12.10"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
 	err = host.SetSupportedContainers([]instance.ContainerType{instance.KVM})
 	c.Assert(err, jc.ErrorIsNil)
 
 	m, err := s.State.AddMachineInsideMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}, "0", instance.KVM)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0/kvm/0")
@@ -1171,14 +1171,14 @@ func (s *StateSuite) TestAddContainerToMachineWithKnownSupportedContainers(c *gc
 
 func (s *StateSuite) TestAddInvalidContainerToMachineWithKnownSupportedContainers(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
-	host, err := s.State.AddMachine("quantal", oneJob...)
+	host, err := s.State.AddMachine(state.UbuntuBase("12.10"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
 	err = host.SetSupportedContainers([]instance.ContainerType{instance.KVM})
 	c.Assert(err, jc.ErrorIsNil)
 
 	_, err = s.State.AddMachineInsideMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}, "0", instance.LXD)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: machine 0 cannot host lxd containers")
 	s.assertMachineContainers(c, host, nil)
@@ -1186,14 +1186,14 @@ func (s *StateSuite) TestAddInvalidContainerToMachineWithKnownSupportedContainer
 
 func (s *StateSuite) TestAddContainerToMachineSupportingNoContainers(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
-	host, err := s.State.AddMachine("quantal", oneJob...)
+	host, err := s.State.AddMachine(state.UbuntuBase("12.10"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
 	err = host.SupportsNoContainers()
 	c.Assert(err, jc.ErrorIsNil)
 
 	_, err = s.State.AddMachineInsideMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}, "0", instance.LXD)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: machine 0 cannot host lxd containers")
 	s.assertMachineContainers(c, host, nil)
@@ -1201,14 +1201,14 @@ func (s *StateSuite) TestAddContainerToMachineSupportingNoContainers(c *gc.C) {
 
 func (s *StateSuite) TestAddContainerToMachineLockedForSeriesUpgrade(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
-	host, err := s.State.AddMachine("xenial", oneJob...)
+	host, err := s.State.AddMachine(state.UbuntuBase("12.10"), oneJob...)
 	c.Assert(err, jc.ErrorIsNil)
-	err = host.CreateUpgradeSeriesLock(nil, "bionic")
+	err = host.CreateUpgradeSeriesLock(nil, state.UbuntuBase("18.04"))
 	c.Assert(err, jc.ErrorIsNil)
 
 	_, err = s.State.AddMachineInsideMachine(state.MachineTemplate{
-		Series: "xenial",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}, "0", instance.LXD)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: machine 0 is locked for series upgrade")
 	s.assertMachineContainers(c, host, nil)
@@ -1216,13 +1216,13 @@ func (s *StateSuite) TestAddContainerToMachineLockedForSeriesUpgrade(c *gc.C) {
 
 func (s *StateSuite) TestInvalidAddMachineParams(c *gc.C) {
 	instIdTemplate := state.MachineTemplate{
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		Jobs:       []state.MachineJob{state.JobHostUnits},
 		InstanceId: "i-foo",
 	}
 	normalTemplate := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	_, err := s.State.AddMachineInsideMachine(instIdTemplate, "0", instance.LXD)
 	c.Check(err, gc.ErrorMatches, "cannot add a new machine: cannot specify instance id for a new container")
@@ -1237,7 +1237,7 @@ func (s *StateSuite) TestInvalidAddMachineParams(c *gc.C) {
 	c.Check(err, gc.ErrorMatches, "cannot add a new machine: cannot add a machine with an instance id and no nonce")
 
 	_, err = s.State.AddOneMachine(state.MachineTemplate{
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		Jobs:       []state.MachineJob{state.JobHostUnits, state.JobHostUnits},
 		InstanceId: "i-foo",
 		Nonce:      "nonce",
@@ -1248,22 +1248,22 @@ func (s *StateSuite) TestInvalidAddMachineParams(c *gc.C) {
 		Jobs: []state.MachineJob{state.JobHostUnits, state.JobHostUnits},
 	}
 	_, err = s.State.AddOneMachine(noSeriesTemplate)
-	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no series specified")
+	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no base specified")
 
 	_, err = s.State.AddMachineInsideNewMachine(noSeriesTemplate, normalTemplate, instance.LXD)
-	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no series specified")
+	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no base specified")
 
 	_, err = s.State.AddMachineInsideNewMachine(normalTemplate, noSeriesTemplate, instance.LXD)
-	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no series specified")
+	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no base specified")
 
 	_, err = s.State.AddMachineInsideMachine(noSeriesTemplate, "0", instance.LXD)
-	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no series specified")
+	c.Check(err, gc.ErrorMatches, "cannot add a new machine: no base specified")
 }
 
 func (s *StateSuite) TestAddContainerErrors(c *gc.C) {
 	template := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	_, err := s.State.AddMachineInsideMachine(template, "10", instance.LXD)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: machine 10 not found")
@@ -1272,22 +1272,22 @@ func (s *StateSuite) TestAddContainerErrors(c *gc.C) {
 }
 
 func (s *StateSuite) TestInjectMachineErrors(c *gc.C) {
-	injectMachine := func(series string, instanceId instance.Id, nonce string, jobs ...state.MachineJob) error {
+	injectMachine := func(base state.Base, instanceId instance.Id, nonce string, jobs ...state.MachineJob) error {
 		_, err := s.State.AddOneMachine(state.MachineTemplate{
-			Series:     series,
+			Base:       base,
 			Jobs:       jobs,
 			InstanceId: instanceId,
 			Nonce:      nonce,
 		})
 		return err
 	}
-	err := injectMachine("", "i-minvalid", agent.BootstrapNonce, state.JobHostUnits)
-	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: no series specified")
-	err = injectMachine("quantal", "", agent.BootstrapNonce, state.JobHostUnits)
+	err := injectMachine(state.Base{}, "i-minvalid", agent.BootstrapNonce, state.JobHostUnits)
+	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: no base specified")
+	err = injectMachine(state.UbuntuBase("12.10"), "", agent.BootstrapNonce, state.JobHostUnits)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: cannot specify a nonce without an instance id")
-	err = injectMachine("quantal", "i-minvalid", "", state.JobHostUnits)
+	err = injectMachine(state.UbuntuBase("12.10"), "i-minvalid", "", state.JobHostUnits)
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: cannot add a machine with an instance id and no nonce")
-	err = injectMachine("quantal", agent.BootstrapNonce, "i-mlazy")
+	err = injectMachine(state.UbuntuBase("12.10"), agent.BootstrapNonce, "i-mlazy")
 	c.Assert(err, gc.ErrorMatches, "cannot add a new machine: no jobs specified")
 }
 
@@ -1299,7 +1299,7 @@ func (s *StateSuite) TestInjectMachine(c *gc.C) {
 	source := "loveshack"
 	tags := []string{"foo", "bar"}
 	template := state.MachineTemplate{
-		Series:      "quantal",
+		Base:        state.UbuntuBase("12.10"),
 		Jobs:        []state.MachineJob{state.JobHostUnits, state.JobManageModel},
 		Constraints: cons,
 		InstanceId:  "i-mindustrious",
@@ -1332,7 +1332,7 @@ func (s *StateSuite) TestInjectMachine(c *gc.C) {
 func (s *StateSuite) TestAddContainerToInjectedMachine(c *gc.C) {
 	oneJob := []state.MachineJob{state.JobHostUnits}
 	template := state.MachineTemplate{
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		InstanceId: "i-mindustrious",
 		Nonce:      agent.BootstrapNonce,
 		Jobs:       []state.MachineJob{state.JobHostUnits, state.JobManageModel},
@@ -1342,13 +1342,13 @@ func (s *StateSuite) TestAddContainerToInjectedMachine(c *gc.C) {
 
 	// Add first container.
 	template = state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	m, err := s.State.AddMachineInsideMachine(template, "0", instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0/lxd/0")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	c.Assert(m.ContainerType(), gc.Equals, instance.LXD)
 	mcons, err := m.Constraints()
 	c.Assert(err, jc.ErrorIsNil)
@@ -1360,7 +1360,7 @@ func (s *StateSuite) TestAddContainerToInjectedMachine(c *gc.C) {
 	m, err = s.State.AddMachineInsideMachine(template, "0", instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.Id(), gc.Equals, "0/lxd/1")
-	c.Assert(m.Series(), gc.Equals, "quantal")
+	c.Assert(m.Base().String(), gc.Equals, "ubuntu@12.10/stable")
 	c.Assert(m.ContainerType(), gc.Equals, instance.LXD)
 	c.Assert(m.Jobs(), gc.DeepEquals, oneJob)
 	s.assertMachineContainers(c, m0, []string{"0/lxd/0", "0/lxd/1"})
@@ -1368,8 +1368,8 @@ func (s *StateSuite) TestAddContainerToInjectedMachine(c *gc.C) {
 
 func (s *StateSuite) TestAddMachineCanOnlyAddControllerForMachine0(c *gc.C) {
 	template := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobManageModel},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobManageModel},
 	}
 	// Check that we can add the bootstrap machine.
 	m, err := s.State.AddOneMachine(template)
@@ -1397,7 +1397,7 @@ func (s *StateSuite) TestAddMachineCanOnlyAddControllerForMachine0(c *gc.C) {
 }
 
 func (s *StateSuite) TestReadMachine(c *gc.C) {
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	expectedId := machine.Id()
 	machine, err = s.State.Machine(expectedId)
@@ -1427,7 +1427,7 @@ func (s *StateSuite) TestMachineIdLessThan(c *gc.C) {
 func (s *StateSuite) TestAllMachines(c *gc.C) {
 	numInserts := 42
 	for i := 0; i < numInserts; i++ {
-		m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+		m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 		c.Assert(err, jc.ErrorIsNil)
 		err = m.SetProvisioned(instance.Id(fmt.Sprintf("foo-%d", i)), "", "fake_nonce", nil)
 		c.Assert(err, jc.ErrorIsNil)
@@ -1450,11 +1450,11 @@ func (s *StateSuite) TestAllMachines(c *gc.C) {
 	}
 }
 
-func (s *StateSuite) TestMachineCountForSeries(c *gc.C) {
-	add_machine := func(series string) {
-		m, err := s.State.AddMachine(series, state.JobHostUnits)
+func (s *StateSuite) TestMachineCountForBase(c *gc.C) {
+	add_machine := func(base state.Base) {
+		m, err := s.State.AddMachine(base, state.JobHostUnits)
 		c.Check(err, jc.ErrorIsNil)
-		err = m.SetProvisioned(instance.Id(fmt.Sprintf("foo-%s", series)), "", "fake_nonce", nil)
+		err = m.SetProvisioned(instance.Id(fmt.Sprintf("foo-%s", base.String())), "", "fake_nonce", nil)
 		c.Check(err, jc.ErrorIsNil)
 		err = m.SetAgentVersion(version.MustParseBinary("7.8.9-ubuntu-amd64"))
 		c.Check(err, jc.ErrorIsNil)
@@ -1466,29 +1466,105 @@ func (s *StateSuite) TestMachineCountForSeries(c *gc.C) {
 		"win2008r2", "win2012", "win2012hv", "win2012hvr2", "win2012r2",
 		"win2016", "win2016hv", "win2019", "win7", "win8", "win81", "win10",
 	}
-	expectedWinResult := map[string]int{}
-	for _, winSeries := range windowsSeries {
-		add_machine(winSeries)
-		expectedWinResult[winSeries] = 1
+	windowsBases := make([]state.Base, len(windowsSeries))
+	for i, s := range windowsSeries {
+		windowsBases[i] = state.Base{OS: "windows", Channel: s}
 	}
-	add_machine("quantal")
+	expectedWinResult := map[string]int{}
+	for _, winBase := range windowsBases {
+		add_machine(winBase)
+		expectedWinResult[winBase.String()] = 1
+	}
+	add_machine(state.UbuntuBase("12.10"))
 	s.AssertMachineCount(c, len(windowsSeries)+1)
 
-	result, err := s.State.MachineCountForSeries(windowsSeries...)
+	result, err := s.State.MachineCountForBase(windowsBases...)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(result, gc.DeepEquals, expectedWinResult)
 
-	result, err = s.State.MachineCountForSeries(
-		"quantal", // count 1
-		"xenial",  // count 0
+	result, err = s.State.MachineCountForBase(
+		state.UbuntuBase("12.10"), // count 1
+		state.UbuntuBase("16.04"), // count 0
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, map[string]int{"quantal": 1})
+	c.Assert(result, gc.DeepEquals, map[string]int{"ubuntu@12.10": 1})
+}
+
+func (s *StateSuite) TestInferActiveRelations(c *gc.C) {
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
+	c.Assert(err, jc.ErrorIsNil)
+	wp := s.AddTestingApplication(c, "wp", s.AddTestingCharm(c, "wordpress"))
+	_, err = wp.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	ms := s.AddTestingApplication(c, "ms", s.AddTestingCharm(c, "mysql-alternative"))
+	_, err = ms.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+
+	eps, err := s.State.InferEndpoints("wp", "ms:prod")
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.State.AddRelation(eps...)
+	c.Assert(err, jc.ErrorIsNil)
+
+	relation, err := s.State.InferActiveRelation("wp", "ms")
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(relation, gc.Matches, "wp:db ms:prod")
+
+	relation, err = s.State.InferActiveRelation("wp:db", "ms:prod")
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(relation, gc.Matches, "wp:db ms:prod")
+
+	_, err = s.State.InferActiveRelation("wp", "ms:dev")
+	c.Assert(err, gc.ErrorMatches, `relation matching "wp ms:dev" not found`)
+}
+
+func (s *StateSuite) TestInferActiveRelationsNoRelations(c *gc.C) {
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
+	c.Assert(err, jc.ErrorIsNil)
+	wp := s.AddTestingApplication(c, "wp", s.AddTestingCharm(c, "wordpress"))
+	_, err = wp.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	ms := s.AddTestingApplication(c, "ms", s.AddTestingCharm(c, "mysql-alternative"))
+	_, err = ms.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+
+	_, err = s.State.InferActiveRelation("wp", "ms")
+	c.Assert(err, gc.ErrorMatches, `relation matching "wp ms" not found`)
+
+	_, err = s.State.InferActiveRelation("wp:db", "ms:prod")
+	c.Assert(err, gc.ErrorMatches, `relation matching "wp:db ms:prod" not found`)
+}
+
+func (s *StateSuite) TestInferActiveRelationsAmbiguous(c *gc.C) {
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
+	c.Assert(err, jc.ErrorIsNil)
+	wp := s.AddTestingApplication(c, "wp", s.AddTestingCharm(c, "wordpress-nolimit"))
+	_, err = wp.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	ms := s.AddTestingApplication(c, "ms", s.AddTestingCharm(c, "mysql-alternative"))
+	_, err = ms.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+
+	eps1, err := s.State.InferEndpoints("wp", "ms:prod")
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.State.AddRelation(eps1...)
+	c.Assert(err, jc.ErrorIsNil)
+
+	eps2, err := s.State.InferEndpoints("wp", "ms:dev")
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.State.AddRelation(eps2...)
+	c.Assert(err, jc.ErrorIsNil)
+
+	_, err = s.State.InferActiveRelation("wp", "ms")
+	c.Assert(err, gc.ErrorMatches, `ambiguous relation: "wp ms" could refer to "wp:db ms:prod"; "wp:db ms:dev"`)
+
+	relation, err := s.State.InferActiveRelation("wp", "ms:prod")
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(relation, gc.Matches, "wp:db ms:prod")
 }
 
 func (s *StateSuite) TestAllRelations(c *gc.C) {
 	const numRelations = 32
-	_, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	mysql := s.AddTestingApplication(c, "mysql", s.AddTestingCharm(c, "mysql"))
 	_, err = mysql.AddUnit(state.AddUnitParams{})
@@ -1516,7 +1592,7 @@ func (s *StateSuite) TestAllRelations(c *gc.C) {
 
 func (s *StateSuite) TestAliveRelationKeys(c *gc.C) {
 	const numRelations = 12
-	_, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	mysql := s.AddTestingApplication(c, "mysql", s.AddTestingCharm(c, "mysql"))
 	_, err = mysql.AddUnit(state.AddUnitParams{})
@@ -1620,14 +1696,33 @@ func (s *StateSuite) TestSaveCloudServiceChangeProviderId(c *gc.C) {
 
 func (s *StateSuite) TestAddApplication(c *gc.C) {
 	ch := s.AddTestingCharm(c, "dummy")
-	_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "haha/borken", Charm: ch})
+	_, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "haha/borken", Charm: ch,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "haha/borken": invalid name`)
 	_, err = s.State.Application("haha/borken")
 	c.Assert(err, gc.ErrorMatches, `"haha/borken" is not a valid application name`)
 
 	// set that a nil charm is handled correctly
-	_, err = s.State.AddApplication(state.AddApplicationArgs{Name: "umadbro"})
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name: "umadbro",
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "umadbro": charm is nil`)
+
+	// set that a nil charm origin is handled correctly
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name:  "umadbro",
+		Charm: ch,
+	})
+	c.Assert(err, gc.ErrorMatches, `cannot add application "umadbro": charm origin is nil`)
 
 	insettings := charm.Settings{"tuning": "optimized"}
 	inconfig, err := coreconfig.NewConfig(coreconfig.ConfigAttributes{"outlook": "good"}, sampleApplicationConfigSchema(), nil)
@@ -1642,6 +1737,10 @@ func (s *StateSuite) TestAddApplication(c *gc.C) {
 			CharmOrigin: &state.CharmOrigin{
 				ID:   "charmID",
 				Hash: "testing-hash",
+				Platform: &state.Platform{
+					OS:      "ubuntu",
+					Channel: "22.04/stable",
+				},
 			},
 		})
 	c.Assert(err, jc.ErrorIsNil)
@@ -1665,7 +1764,14 @@ func (s *StateSuite) TestAddApplication(c *gc.C) {
 	})
 
 	mysqlArch := arch.ARM64
-	mysql, err := s.State.AddApplication(state.AddApplicationArgs{Name: "mysql", Charm: ch, Constraints: constraints.Value{Arch: &mysqlArch}})
+	mysql, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "mysql", Charm: ch,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+		Constraints: constraints.Value{Arch: &mysqlArch}},
+	)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(mysql.Name(), gc.Equals, "mysql")
 	sInfo, err := mysql.Status()
@@ -1697,7 +1803,7 @@ func (s *StateSuite) TestAddApplicationFailCharmOriginIDOnly(c *gc.C) {
 	_, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name:        "testme",
 		Charm:       &state.Charm{},
-		CharmOrigin: &state.CharmOrigin{ID: "testing"},
+		CharmOrigin: &state.CharmOrigin{ID: "testing", Platform: &state.Platform{OS: "ubuntu", Channel: "22.04"}},
 	})
 	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
 }
@@ -1706,7 +1812,7 @@ func (s *StateSuite) TestAddApplicationFailCharmOriginHashOnly(c *gc.C) {
 	_, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name:        "testme",
 		Charm:       &state.Charm{},
-		CharmOrigin: &state.CharmOrigin{Hash: "testing"},
+		CharmOrigin: &state.CharmOrigin{Hash: "testing", Platform: &state.Platform{OS: "ubuntu", Channel: "22.04"}},
 	})
 	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
 }
@@ -1723,7 +1829,12 @@ func (s *StateSuite) TestAddCAASApplication(c *gc.C) {
 
 	gitlab, err := st.AddApplication(
 		state.AddApplicationArgs{
-			Name: "gitlab", Charm: ch, CharmConfig: insettings, ApplicationConfig: inconfig, NumUnits: 1,
+			Name: "gitlab", Charm: ch,
+			CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+				OS:      "ubuntu",
+				Channel: "22.04/stable",
+			}},
+			CharmConfig: insettings, ApplicationConfig: inconfig, NumUnits: 1,
 		})
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(gitlab.Name(), gc.Equals, "gitlab")
@@ -1790,6 +1901,10 @@ resources:
 	// of the same operating systems as the supported series.
 	cockroach, err := st.AddApplication(state.AddApplicationArgs{
 		Name: "mysql", Charm: ch, NumUnits: 1,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	units, err := cockroach.AllUnits()
@@ -1823,6 +1938,10 @@ resources:
 	// of the same operating systems as the supported series.
 	cockroach, err := st.AddApplication(state.AddApplicationArgs{
 		Name: "cockroach", Charm: ch, NumUnits: 1,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	units, err := cockroach.AllUnits()
@@ -1842,6 +1961,10 @@ resources:
 	ch = state.AddCustomCharmWithManifest(c, st, "cockroach", "metadata.yaml", charmDef, "focal", 1)
 	cockroach, err = st.AddApplication(state.AddApplicationArgs{
 		Name: "cockroach", Charm: ch, NumUnits: 1,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	units, err = cockroach.AllUnits()
@@ -1858,7 +1981,14 @@ func (s *StateSuite) TestAddCAASApplicationPlacementNotAllowed(c *gc.C) {
 
 	placement := []*instance.Placement{instance.MustParsePlacement("#:2")}
 	_, err := st.AddApplication(
-		state.AddApplicationArgs{Name: "gitlab", Charm: ch, Placement: placement})
+		state.AddApplicationArgs{
+			Name: "gitlab", Charm: ch,
+			CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+				OS:      "ubuntu",
+				Channel: "22.04/stable",
+			}},
+			Placement: placement,
+		})
 	c.Assert(err, gc.ErrorMatches, ".*"+regexp.QuoteMeta(`cannot add application "gitlab": placement directives on k8s models not valid`))
 }
 
@@ -1866,7 +1996,14 @@ func (s *StateSuite) TestAddApplicationWithNilCharmConfigValues(c *gc.C) {
 	ch := s.AddTestingCharm(c, "dummy")
 	insettings := charm.Settings{"tuning": nil}
 
-	wordpress, err := s.State.AddApplication(state.AddApplicationArgs{Name: "wordpress", Charm: ch, CharmConfig: insettings})
+	wordpress, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "wordpress", Charm: ch,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+		CharmConfig: insettings},
+	)
 	c.Assert(err, jc.ErrorIsNil)
 	outsettings, err := wordpress.CharmConfig(model.GenerationMaster)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1890,7 +2027,13 @@ func (s *StateSuite) TestAddApplicationModelDying(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	err = model.Destroy(state.DestroyModelParams{})
 	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s1": model "testmodel" is dying`)
 }
 
@@ -1899,7 +2042,13 @@ func (s *StateSuite) TestAddApplicationModelMigrating(c *gc.C) {
 	// Check that applications cannot be added if the model is initially Dying.
 	err := s.Model.SetMigrationMode(state.MigrationModeExporting)
 	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s1": model "testmodel" is being migrated`)
 }
 
@@ -1908,7 +2057,13 @@ func (s *StateSuite) TestAddApplicationSameRemoteExists(c *gc.C) {
 	_, err := s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
 		Name: "s1", SourceModel: s.Model.ModelTag()})
 	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s1": saas application with same name already exists`)
 }
 
@@ -1922,14 +2077,26 @@ func (s *StateSuite) TestAddApplicationRemoteAddedAfterInitial(c *gc.C) {
 			Name: "s1", SourceModel: s.Model.ModelTag()})
 		c.Assert(err, jc.ErrorIsNil)
 	}).Check()
-	_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s1": saas application with same name already exists`)
 }
 
 func (s *StateSuite) TestAddApplicationSameLocalExists(c *gc.C) {
 	charm := s.AddTestingCharm(c, "dummy")
 	s.AddTestingApplication(c, "s0", charm)
-	_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "s0", Charm: charm})
+	_, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s0", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s0": application already exists`)
 }
 
@@ -1941,7 +2108,13 @@ func (s *StateSuite) TestAddApplicationLocalAddedAfterInitial(c *gc.C) {
 	defer state.SetBeforeHooks(c, s.State, func() {
 		s.AddTestingApplication(c, "s1", charm)
 	}).Check()
-	_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s1": application already exists`)
 }
 
@@ -1954,7 +2127,13 @@ func (s *StateSuite) TestAddApplicationModelDyingAfterInitial(c *gc.C) {
 		c.Assert(s.Model.Life(), gc.Equals, state.Alive)
 		c.Assert(s.Model.Destroy(state.DestroyModelParams{}), gc.IsNil)
 	}).Check()
-	_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, gc.ErrorMatches, `cannot add application "s1": model "testmodel" is dying`)
 }
 
@@ -1969,6 +2148,10 @@ func (s *StateSuite) TestAddApplicationWithDefaultBindings(c *gc.C) {
 	app, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name:  "yoursql",
 		Charm: ch,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -2003,6 +2186,10 @@ func (s *StateSuite) TestAddApplicationWithSpecifiedBindings(c *gc.C) {
 	app, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name:  "yoursql",
 		Charm: ch,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
 		EndpointBindings: map[string]string{
 			"client":  clientSpace.Id(),
 			"cluster": dbSpace.Id(),
@@ -2069,8 +2256,12 @@ func (s *StateSuite) TestAddApplicationWithInvalidBindings(c *gc.C) {
 		c.Logf("test #%d: %s", i, test.about)
 
 		_, err := s.State.AddApplication(state.AddApplicationArgs{
-			Name:             "yoursql",
-			Charm:            charm,
+			Name:  "yoursql",
+			Charm: charm,
+			CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+				OS:      "ubuntu",
+				Channel: "22.04/stable",
+			}},
 			EndpointBindings: test.bindings,
 		})
 		c.Check(err, gc.ErrorMatches, `cannot add application "yoursql": `+test.expectedError)
@@ -2079,17 +2270,21 @@ func (s *StateSuite) TestAddApplicationWithInvalidBindings(c *gc.C) {
 }
 
 func (s *StateSuite) TestAddApplicationMachinePlacementInvalidSeries(c *gc.C) {
-	m, err := s.State.AddMachine("jammy", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 
 	charm := s.AddTestingCharm(c, "dummy")
 	_, err = s.State.AddApplication(state.AddApplicationArgs{
 		Name: "wordpress", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "12.04/stable",
+		}},
 		Placement: []*instance.Placement{
 			{instance.MachineScope, m.Id()},
 		},
 	})
-	c.Assert(err, gc.ErrorMatches, "cannot add application \"wordpress\": cannot deploy to machine .*: series does not match")
+	c.Assert(err, gc.ErrorMatches, "cannot add application \"wordpress\": cannot deploy to machine .*: base does not match.*")
 }
 
 func (s *StateSuite) TestAddApplicationIncompatibleOSWithSeriesInURL(c *gc.C) {
@@ -2098,18 +2293,26 @@ func (s *StateSuite) TestAddApplicationIncompatibleOSWithSeriesInURL(c *gc.C) {
 	// series only.
 	_, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name: "wordpress", Charm: charm,
-		Series: "centos7",
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "centos",
+			Channel: "7/stable",
+		}},
 	})
-	c.Assert(err, gc.ErrorMatches, `cannot add application "wordpress": series "centos7" \(OS \"CentOS"\) not supported by charm, supported series are "quantal"`)
+	c.Assert(err, gc.ErrorMatches, `cannot add application "wordpress": series "centos7" not supported by charm, supported series are "quantal"`)
 }
 
 func (s *StateSuite) TestAddApplicationCompatibleOSWithSeriesInURL(c *gc.C) {
 	charm := s.AddTestingCharm(c, "dummy")
 	// A charm with a series in its URL is implicitly supported by that
 	// series only.
-	_, err := s.State.AddApplication(state.AddApplicationArgs{
+	base, err := series.GetBaseFromSeries(charm.URL().Series)
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
 		Name: "wordpress", Charm: charm,
-		Series: charm.URL().Series,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      base.OS,
+			Channel: base.Channel.String(),
+		}},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -2119,7 +2322,10 @@ func (s *StateSuite) TestAddApplicationCompatibleOSWithNoExplicitSupportedSeries
 	charm := s.AddSeriesCharm(c, "dummy", "bionic")
 	_, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name: "wordpress", Charm: charm,
-		Series: "quantal",
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "12.10/stable",
+		}},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -2130,9 +2336,12 @@ func (s *StateSuite) TestAddApplicationOSIncompatibleWithSupportedSeries(c *gc.C
 	// of the same operating systems as the supported series.
 	_, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name: "wordpress", Charm: charm,
-		Series: "centos7",
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "centos",
+			Channel: "7/stable",
+		}},
 	})
-	c.Assert(err, gc.ErrorMatches, `cannot add application "wordpress": series "centos7" \(OS "CentOS"\) not supported by charm, supported series are "jammy, focal, bionic"`)
+	c.Assert(err, gc.ErrorMatches, `cannot add application "wordpress": series "centos7" not supported by charm, supported series are "jammy, focal, bionic"`)
 }
 
 func (s *StateSuite) TestAllApplications(c *gc.C) {
@@ -2142,13 +2351,25 @@ func (s *StateSuite) TestAllApplications(c *gc.C) {
 	c.Assert(len(applications), gc.Equals, 0)
 
 	// Check that after adding applications the result is ok.
-	_, err = s.State.AddApplication(state.AddApplicationArgs{Name: "wordpress", Charm: charm})
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name: "wordpress", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	applications, err = s.State.AllApplications()
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(len(applications), gc.Equals, 1)
 
-	_, err = s.State.AddApplication(state.AddApplicationArgs{Name: "mysql", Charm: charm})
+	_, err = s.State.AddApplication(state.AddApplicationArgs{
+		Name: "mysql", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	applications, err = s.State.AllApplications()
 	c.Assert(err, jc.ErrorIsNil)
@@ -2246,7 +2467,7 @@ var inferEndpointsTests = []struct {
 			{"ms", "wp"},
 			{"ms", "wp:db"},
 		},
-		err: `ambiguous relation: ".*" could refer to "wp:db ms:dev"; "wp:db ms:prod"`,
+		err: `ambiguous relation: ".*" could refer to "wp:db ms:dev"; "wp:db ms:prod"; "wp:db ms:test"`,
 	}, {
 		summary: "unambiguous provider/requirer relation",
 		inputs: [][]string{
@@ -2443,8 +2664,8 @@ func (s *StateSuite) TestWatchModelsBulkEvents(c *gc.C) {
 	// All except the removed model are reported in initial event.
 	w := s.State.WatchModels()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
-	wc.AssertChangeInSingleEvent(alive.UUID(), dying.UUID())
+	wc := statetesting.NewStringsWatcherC(c, w)
+	wc.AssertChange(alive.UUID(), dying.UUID())
 
 	// Progress dying to dead, alive to dying; and see changes reported.
 	err = app.Destroy()
@@ -2455,14 +2676,14 @@ func (s *StateSuite) TestWatchModelsBulkEvents(c *gc.C) {
 	c.Assert(alive.Refresh(), jc.ErrorIsNil)
 	c.Assert(alive.Life(), gc.Equals, state.Dying)
 	c.Assert(dying.Refresh(), jc.Satisfies, errors.IsNotFound)
-	wc.AssertChangeInSingleEvent(alive.UUID())
+	wc.AssertChange(alive.UUID())
 }
 
 func (s *StateSuite) TestWatchModelsLifecycle(c *gc.C) {
 	// Initial event reports the controller model.
 	w := s.State.WatchModelLives()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange(s.State.ModelUUID())
 	wc.AssertNoChange()
 
@@ -2511,7 +2732,7 @@ func (s *StateSuite) TestWatchApplicationsBulkEvents(c *gc.C) {
 	// All except gone are reported in initial event.
 	w := s.State.WatchApplications()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange(alive.Name(), dying.Name())
 	wc.AssertNoChange()
 
@@ -2529,7 +2750,7 @@ func (s *StateSuite) TestWatchApplicationsLifecycle(c *gc.C) {
 	// Initial event is empty when no applications.
 	w := s.State.WatchApplications()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -2577,11 +2798,11 @@ func (s *StateSuite) TestWatchApplicationsDiesOnStateClose(c *gc.C) {
 
 func (s *StateSuite) TestWatchMachinesBulkEvents(c *gc.C) {
 	// Alive machine...
-	alive, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	alive, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Dying machine...
-	dying, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	dying, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = dying.SetProvisioned(instance.Id("i-blah"), "", "fake-nonce", nil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -2589,13 +2810,13 @@ func (s *StateSuite) TestWatchMachinesBulkEvents(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Dead machine...
-	dead, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	dead, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = dead.EnsureDead()
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Gone machine.
-	gone, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	gone, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = gone.EnsureDead()
 	c.Assert(err, jc.ErrorIsNil)
@@ -2606,7 +2827,7 @@ func (s *StateSuite) TestWatchMachinesBulkEvents(c *gc.C) {
 	// All except gone machine are reported in initial event.
 	w := s.State.WatchModelMachines()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange(alive.Id(), dying.Id(), dead.Id())
 	wc.AssertNoChange()
 
@@ -2627,12 +2848,12 @@ func (s *StateSuite) TestWatchMachinesLifecycle(c *gc.C) {
 	// Initial event is empty when no machines.
 	w := s.State.WatchModelMachines()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
 	// Add a machine: reported.
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	wc.AssertChange("0")
 	wc.AssertNoChange()
@@ -2663,7 +2884,7 @@ func (s *StateSuite) TestWatchMachinesLifecycle(c *gc.C) {
 func (s *StateSuite) TestWatchMachinesIncludesOldMachines(c *gc.C) {
 	// Older versions of juju do not write the "containertype" field.
 	// This has caused machines to not be detected in the initial event.
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = s.machines.Update(
 		bson.D{{"_id", state.DocID(s.State, machine.Id())}},
@@ -2673,7 +2894,7 @@ func (s *StateSuite) TestWatchMachinesIncludesOldMachines(c *gc.C) {
 
 	w := s.State.WatchModelMachines()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange(machine.Id())
 	wc.AssertNoChange()
 }
@@ -2682,14 +2903,14 @@ func (s *StateSuite) TestWatchMachinesIgnoresContainers(c *gc.C) {
 	// Initial event is empty when no machines.
 	w := s.State.WatchModelMachines()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
 	// Add a machine: reported.
 	template := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	machines, err := s.State.AddMachines(template)
 	c.Assert(err, jc.ErrorIsNil)
@@ -2722,8 +2943,8 @@ func (s *StateSuite) TestWatchMachinesIgnoresContainers(c *gc.C) {
 func (s *StateSuite) TestWatchContainerLifecycle(c *gc.C) {
 	// Add a host machine.
 	template := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	machine, err := s.State.AddOneMachine(template)
 	c.Assert(err, jc.ErrorIsNil)
@@ -2737,11 +2958,11 @@ func (s *StateSuite) TestWatchContainerLifecycle(c *gc.C) {
 	wAll := machine.WatchAllContainers()
 	defer statetesting.AssertStop(c, wAll)
 
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
-	wcAll := statetesting.NewStringsWatcherC(c, s.State, wAll)
+	wcAll := statetesting.NewStringsWatcherC(c, wAll)
 	wcAll.AssertChange()
 	wcAll.AssertNoChange()
 
@@ -2777,10 +2998,10 @@ func (s *StateSuite) TestWatchContainerLifecycle(c *gc.C) {
 
 	w = machine.WatchContainers(instance.LXD)
 	defer statetesting.AssertStop(c, w)
-	wc = statetesting.NewStringsWatcherC(c, s.State, w)
+	wc = statetesting.NewStringsWatcherC(c, w)
 	wAll = machine.WatchAllContainers()
 	defer statetesting.AssertStop(c, wAll)
-	wcAll = statetesting.NewStringsWatcherC(c, s.State, wAll)
+	wcAll = statetesting.NewStringsWatcherC(c, wAll)
 	wc.AssertChange("0/lxd/0")
 	wc.AssertNoChange()
 	wcAll.AssertChange("0/kvm/0", "0/lxd/0")
@@ -2840,14 +3061,14 @@ func (s *StateSuite) TestWatchContainerLifecycle(c *gc.C) {
 
 func (s *StateSuite) TestWatchMachineHardwareCharacteristics(c *gc.C) {
 	// Add a machine: reported.
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	s.WaitForModelWatchersIdle(c, s.Model.UUID())
 	w := machine.WatchInstanceData()
 	defer statetesting.AssertStop(c, w)
 
 	// Initial event.
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	// Provision a machine: reported.
@@ -2867,7 +3088,7 @@ func (s *StateSuite) TestWatchControllerConfig(c *gc.C) {
 	defer statetesting.AssertStop(c, w)
 
 	// Initial event.
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	cfg, err := s.State.ControllerConfig()
@@ -3342,7 +3563,7 @@ func (s *StateSuite) TestWatchForModelConfigChanges(c *gc.C) {
 	w := s.Model.WatchForModelConfigChanges()
 	defer statetesting.AssertStop(c, w)
 
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	// Initially we get one change notification
 	wc.AssertOneChange()
 
@@ -3351,6 +3572,9 @@ func (s *StateSuite) TestWatchForModelConfigChanges(c *gc.C) {
 	newVersion.Minor++
 	err = statetesting.SetAgentVersion(s.State, newVersion)
 	c.Assert(err, jc.ErrorIsNil)
+
+	// TODO(quiescence): these two changes should be one event.
+	wc.AssertOneChange()
 
 	newerVersion := newVersion
 	newerVersion.Minor++
@@ -3368,7 +3592,7 @@ func (s *StateSuite) TestWatchForModelConfigControllerChanges(c *gc.C) {
 	w := s.Model.WatchForModelConfigChanges()
 	defer statetesting.AssertStop(c, w)
 
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 }
 
@@ -3376,7 +3600,7 @@ func (s *StateSuite) TestWatchCloudSpecChanges(c *gc.C) {
 	w := s.Model.WatchCloudSpecChanges()
 	defer statetesting.AssertStop(c, w)
 
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	// Initially we get one change notification
 	wc.AssertOneChange()
 
@@ -3387,6 +3611,8 @@ func (s *StateSuite) TestWatchCloudSpecChanges(c *gc.C) {
 	cloud.StorageEndpoint = "https://storage"
 	err = s.State.UpdateCloud(cloud)
 	c.Assert(err, jc.ErrorIsNil)
+	// TODO(quiescence): these two changes should be one event.
+	wc.AssertOneChange()
 	cloud.StorageEndpoint = "https://storage1"
 	err = s.State.UpdateCloud(cloud)
 	c.Assert(err, jc.ErrorIsNil)
@@ -3403,7 +3629,7 @@ func (s *StateSuite) TestAddAndGetEquivalence(c *gc.C) {
 	// before, so this testing at least ensures we're conscious
 	// about such changes.
 
-	m1, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m1, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	m2, err := s.State.Machine(m1.Id())
 	c.Assert(err, jc.ErrorIsNil)
@@ -3560,7 +3786,7 @@ var entityTypes = map[string]interface{}{
 
 func (s *StateSuite) TestFindEntity(c *gc.C) {
 	s.Factory.MakeUser(c, &factory.UserParams{Name: "eric"})
-	_, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	_, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	_, err = s.State.AddControllerNode()
 	c.Assert(err, jc.ErrorIsNil)
@@ -3618,7 +3844,7 @@ func (s *StateSuite) TestParseNilTagReturnsAnError(c *gc.C) {
 }
 
 func (s *StateSuite) TestParseMachineTag(c *gc.C) {
-	m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	coll, id, err := state.ConvertTagToCollectionNameAndId(s.State, m.Tag())
 	c.Assert(err, jc.ErrorIsNil)
@@ -3681,7 +3907,7 @@ func (s *StateSuite) TestWatchCleanups(c *gc.C) {
 	// Check initial event.
 	w := s.State.WatchCleanups()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	// Set up two relations for later use, check no events.
@@ -3707,6 +3933,8 @@ func (s *StateSuite) TestWatchCleanups(c *gc.C) {
 	// Handle that cleanup doc and create another, check one change.
 	err = s.State.Cleanup()
 	c.Assert(err, jc.ErrorIsNil)
+	// TODO(quiescence): these two changes should be one event.
+	wc.AssertOneChange()
 	err = relV.Destroy()
 	c.Assert(err, jc.ErrorIsNil)
 	wc.AssertOneChange()
@@ -3733,7 +3961,7 @@ func (s *StateSuite) TestWatchCleanupsBulk(c *gc.C) {
 	// Check initial event.
 	w := s.State.WatchCleanups()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	// Create two peer relations by creating their applications.
@@ -3748,6 +3976,8 @@ func (s *StateSuite) TestWatchCleanupsBulk(c *gc.C) {
 	// Destroy them both, check one change.
 	err = riak.Destroy()
 	c.Assert(err, jc.ErrorIsNil)
+	// TODO(quiescence): reimplement some quiescence on the cleanup watcher
+	wc.AssertOneChange()
 	err = allHooks.Destroy()
 	c.Assert(err, jc.ErrorIsNil)
 	wc.AssertOneChange()
@@ -3755,14 +3985,14 @@ func (s *StateSuite) TestWatchCleanupsBulk(c *gc.C) {
 	// Clean them both up, check one change.
 	err = s.State.Cleanup()
 	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertOneChange()
+	wc.AssertChanges(2)
 }
 
 func (s *StateSuite) TestWatchMinUnits(c *gc.C) {
 	// Check initial event.
 	w := s.State.WatchMinUnits()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -3858,7 +4088,7 @@ func (s *StateSuite) TestWatchSubnets(c *gc.C) {
 	}
 	w := s.State.WatchSubnets(filter)
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 
 	// Check initial event.
 	wc.AssertChange()
@@ -3916,7 +4146,7 @@ func (s *StateSuite) TestWatchRemoteRelationsIgnoresLocal(c *gc.C) {
 
 	w := s.State.WatchRemoteRelations()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	// Check initial event.
 	wc.AssertChange()
 	// No change for local relation.
@@ -3926,7 +4156,7 @@ func (s *StateSuite) TestWatchRemoteRelationsIgnoresLocal(c *gc.C) {
 func (s *StateSuite) TestWatchRemoteRelationsDestroyRelation(c *gc.C) {
 	w := s.State.WatchRemoteRelations()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 
 	_, _, rel := s.setupWatchRemoteRelations(c, wc)
 
@@ -3945,7 +4175,7 @@ func (s *StateSuite) TestWatchRemoteRelationsDestroyRelation(c *gc.C) {
 func (s *StateSuite) TestWatchRemoteRelationsDestroyRemoteApplication(c *gc.C) {
 	w := s.State.WatchRemoteRelations()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 
 	remoteApp, _, _ := s.setupWatchRemoteRelations(c, wc)
 
@@ -3964,7 +4194,7 @@ func (s *StateSuite) TestWatchRemoteRelationsDestroyRemoteApplication(c *gc.C) {
 func (s *StateSuite) TestWatchRemoteRelationsDestroyLocalApplication(c *gc.C) {
 	w := s.State.WatchRemoteRelations()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 
 	_, app, _ := s.setupWatchRemoteRelations(c, wc)
 
@@ -3999,17 +4229,17 @@ func (s *StateSuite) TestSetModelAgentVersionErrors(c *gc.C) {
 	// Add 4 machines: one with a different version, one with an
 	// empty version, one with the current version, and one with
 	// the new version.
-	machine0, err := s.State.AddMachine("series", state.JobHostUnits)
+	machine0, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine0.SetAgentVersion(version.MustParseBinary("9.9.9-ubuntu-amd64"))
 	c.Assert(err, jc.ErrorIsNil)
-	machine1, err := s.State.AddMachine("series", state.JobHostUnits)
+	machine1, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
-	machine2, err := s.State.AddMachine("series", state.JobHostUnits)
+	machine2, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine2.SetAgentVersion(version.MustParseBinary(stringVersion + "-ubuntu-amd64"))
 	c.Assert(err, jc.ErrorIsNil)
-	machine3, err := s.State.AddMachine("series", state.JobHostUnits)
+	machine3, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine3.SetAgentVersion(version.MustParseBinary("4.5.6-ubuntu-amd64"))
 	c.Assert(err, jc.ErrorIsNil)
@@ -4023,7 +4253,13 @@ func (s *StateSuite) TestSetModelAgentVersionErrors(c *gc.C) {
 	// Add a application and 4 units: one with a different version, one
 	// with an empty version, one with the current version, and one
 	// with the new version.
-	application, err := s.State.AddApplication(state.AddApplicationArgs{Name: "wordpress", Charm: s.AddTestingCharm(c, "wordpress")})
+	application, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "wordpress", Charm: s.AddTestingCharm(c, "wordpress"),
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	unit0, err := application.AddUnit(state.AddUnitParams{})
 	c.Assert(err, jc.ErrorIsNil)
@@ -4073,9 +4309,15 @@ func (s *StateSuite) prepareAgentVersionTests(c *gc.C, st *state.State) (*config
 	currentVersion := agentVersion.String()
 
 	// Add a machine and a unit with the current version.
-	machine, err := st.AddMachine("series", state.JobHostUnits)
+	machine, err := st.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
-	application, err := st.AddApplication(state.AddApplicationArgs{Name: "wordpress", Charm: s.AddTestingCharm(c, "wordpress")})
+	application, err := st.AddApplication(state.AddApplicationArgs{
+		Name: "wordpress", Charm: s.AddTestingCharm(c, "wordpress"),
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "12.10/stable",
+		}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	unit, err := application.AddUnit(state.AddUnitParams{})
 	c.Assert(err, jc.ErrorIsNil)
@@ -4114,7 +4356,7 @@ func (s *StateSuite) TestSetModelAgentVersionRetriesOnConfigChange(c *gc.C) {
 	// other than the version, and make sure it retries
 	// and passes.
 	defer state.SetBeforeHooks(c, s.State, func() {
-		s.changeEnviron(c, modelConfig, "default-series", "foo")
+		s.changeEnviron(c, modelConfig, "default-series", "focal")
 	}).Check()
 
 	// Change the agent-version and ensure it has changed.
@@ -4193,14 +4435,16 @@ func (s *StateSuite) TestSetModelAgentVersionExcessiveContention(c *gc.C) {
 
 	// Set a hook to change the config 3 times
 	// to test we return ErrExcessiveContention.
-	changeFuncs := []func(){
-		func() { s.changeEnviron(c, modelConfig, "default-series", "1") },
-		func() { s.changeEnviron(c, modelConfig, "default-series", "2") },
-		func() { s.changeEnviron(c, modelConfig, "default-series", "3") },
+	hooks := []jujutxn.TestHook{
+		{Before: func() { s.changeEnviron(c, modelConfig, "default-series", "focal") }},
+		{Before: func() { s.changeEnviron(c, modelConfig, "default-series", "jammy") }},
+		{Before: func() { s.changeEnviron(c, modelConfig, "default-series", "focal") }},
 	}
-	defer state.SetBeforeHooks(c, s.State, changeFuncs...).Check()
+
+	state.SetMaxTxnAttempts(c, s.State, 3)
+	defer state.SetTestHooks(c, s.State, hooks...).Check()
 	err := s.State.SetModelAgentVersion(version.MustParse("4.5.6"), nil, false)
-	c.Assert(errors.Cause(err), gc.Equals, txn.ErrExcessiveContention)
+	c.Assert(errors.Cause(err), gc.Equals, jujutxn.ErrExcessiveContention)
 	// Make sure the version remained the same.
 	assertAgentVersion(c, s.State, currentVersion, "released")
 }
@@ -4230,7 +4474,7 @@ func (s *StateSuite) TestSetModelAgentVersionFailsIfUpgrading(c *gc.C) {
 	agentVersion, ok := modelConfig.AgentVersion()
 	c.Assert(ok, jc.IsTrue)
 
-	machine, err := s.State.AddMachine("series", state.JobManageModel)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine.SetAgentVersion(version.MustParseBinary(agentVersion.String() + "-ubuntu-amd64"))
 	c.Assert(err, jc.ErrorIsNil)
@@ -4259,7 +4503,7 @@ func (s *StateSuite) TestSetModelAgentVersionFailsReportsCorrectError(c *gc.C) {
 	agentVersion, ok := modelConfig.AgentVersion()
 	c.Assert(ok, jc.IsTrue)
 
-	machine, err := s.State.AddMachine("series", state.JobManageModel)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine.SetAgentVersion(version.MustParseBinary("9.9.9-ubuntu-amd64"))
 	c.Assert(err, jc.ErrorIsNil)
@@ -4687,7 +4931,7 @@ type SetAdminMongoPasswordSuite struct {
 
 var _ = gc.Suite(&SetAdminMongoPasswordSuite{})
 
-func setAdminPassword(c *gc.C, inst *gitjujutesting.MgoInstance, owner names.UserTag, password string) {
+func setAdminPassword(c *gc.C, inst *mgotesting.MgoInstance, owner names.UserTag, password string) {
 	session, err := inst.Dial()
 	c.Assert(err, jc.ErrorIsNil)
 	defer session.Close()
@@ -4696,7 +4940,7 @@ func setAdminPassword(c *gc.C, inst *gitjujutesting.MgoInstance, owner names.Use
 }
 
 func (s *SetAdminMongoPasswordSuite) TestSetAdminMongoPassword(c *gc.C) {
-	inst := &gitjujutesting.MgoInstance{
+	inst := &mgotesting.MgoInstance{
 		EnableAuth:       true,
 		EnableReplicaSet: true,
 	}
@@ -4804,7 +5048,7 @@ func (s *StateSuite) TestWatchRelationIngressNetworks(c *gc.C) {
 	// Check initial event.
 	w := rel.WatchRelationIngressNetworks()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -4848,7 +5092,7 @@ func (s *StateSuite) TestWatchRelationIngressNetworksIgnoresEgress(c *gc.C) {
 	// Check initial event.
 	w := rel.WatchRelationIngressNetworks()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -4867,7 +5111,7 @@ func (s *StateSuite) TestWatchRelationEgressNetworks(c *gc.C) {
 	// Check initial event.
 	w := rel.WatchRelationEgressNetworks()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -4911,7 +5155,7 @@ func (s *StateSuite) TestWatchRelationEgressNetworksIgnoresIngress(c *gc.C) {
 	// Check initial event.
 	w := rel.WatchRelationEgressNetworks()
 	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -4927,10 +5171,11 @@ func (s *StateSuite) TestWatchRelationEgressNetworksIgnoresIngress(c *gc.C) {
 
 func (s *StateSuite) testOpenParams() state.OpenParams {
 	return state.OpenParams{
-		Clock:              clock.WallClock,
-		ControllerTag:      s.State.ControllerTag(),
-		ControllerModelTag: s.modelTag,
-		MongoSession:       s.Session,
+		Clock:               clock.WallClock,
+		ControllerTag:       s.State.ControllerTag(),
+		ControllerModelTag:  s.modelTag,
+		MongoSession:        s.Session,
+		WatcherPollInterval: 10 * time.Millisecond,
 	}
 }
 

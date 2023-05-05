@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 
 	jujucontroller "github.com/juju/juju/controller"
@@ -96,6 +96,20 @@ func (st *State) ControllerConfig() (jujucontroller.Config, error) {
 // so revert to their defaults). Only a subset of keys can be changed
 // after bootstrapping.
 func (st *State) UpdateControllerConfig(updateAttrs map[string]interface{}, removeAttrs []string) error {
+	fields, _, err := jujucontroller.ConfigSchema.ValidationSchema()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for k := range updateAttrs {
+		if field, ok := fields[k]; ok {
+			v, err := field.Coerce(updateAttrs[k], []string{k})
+			if err != nil {
+				return err
+			}
+			updateAttrs[k] = v
+		}
+	}
+
 	if err := st.checkValidControllerConfig(updateAttrs, removeAttrs); err != nil {
 		return errors.Trace(err)
 	}

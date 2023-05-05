@@ -29,6 +29,7 @@ var commonModelFacadeNames = set.NewStrings(
 	"CredentialValidator",
 	"CrossController",
 	"CrossModelRelations",
+	"CrossModelSecrets",
 	"EnvironUpgrader",
 	"ExternalControllerUpdater",
 	"FilesystemAttachmentsWatcher",
@@ -60,7 +61,11 @@ var commonModelFacadeNames = set.NewStrings(
 	"RetryStrategy",
 	"Secrets",
 	"SecretsManager",
-	"SecretsRotationWatcher",
+	"SecretsDrain",
+	"SecretBackendsManager",
+	"SecretBackendsRotateWatcher",
+	"SecretsRevisionWatcher",
+	"SecretsTriggerWatcher",
 	"Singular",
 	"StatusHistory",
 	"Storage",
@@ -71,6 +76,7 @@ var commonModelFacadeNames = set.NewStrings(
 	"Upgrader",
 	"VolumeAttachmentsWatcher",
 	"RemoteRelationWatcher",
+	"SSHClient",
 )
 
 // caasModelFacadeNames lists facades that are only used with CAAS
@@ -89,7 +95,7 @@ var caasModelFacadeNames = set.NewStrings(
 	// For sidecar applications.
 	"CAASApplication",
 	"CAASApplicationProvisioner",
-	"CAASFirewallerEmbedded", // TODO(juju3): rename to CAASFirewallerSidecar
+	"CAASFirewallerSidecar",
 )
 
 func caasModelFacadesOnly(facadeName, _ string) error {

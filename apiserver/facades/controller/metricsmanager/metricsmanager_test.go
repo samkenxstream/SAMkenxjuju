@@ -44,7 +44,7 @@ func (s *metricsManagerSuite) SetUpTest(c *gc.C) {
 	manager, err := metricsmanager.NewMetricsManagerAPI(s.State, nil, s.authorizer, s.StatePool, s.clock)
 	c.Assert(err, jc.ErrorIsNil)
 	s.metricsmanager = manager
-	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered"})
+	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:amd64/quantal/metered"})
 	meteredApplication := s.Factory.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 	s.unit = s.Factory.MakeUnit(c, &factory.UnitParams{Application: meteredApplication, SetCharmURL: true})
 }
@@ -225,10 +225,10 @@ func (s *metricsManagerSuite) TestAddJujuMachineMetrics(c *gc.C) {
 	err := s.State.SetSLA("essential", "bob", []byte("sla"))
 	c.Assert(err, jc.ErrorIsNil)
 	// Create two additional ubuntu machines, in addition to the one created in setup.
-	s.Factory.MakeMachine(c, &factory.MachineParams{Series: "jammy"})
-	s.Factory.MakeMachine(c, &factory.MachineParams{Series: "focal"})
-	s.Factory.MakeMachine(c, &factory.MachineParams{Series: "centos7"})
-	s.Factory.MakeMachine(c, &factory.MachineParams{Series: "redox"})
+	s.Factory.MakeMachine(c, &factory.MachineParams{Base: state.UbuntuBase("22.04")})
+	s.Factory.MakeMachine(c, &factory.MachineParams{Base: state.UbuntuBase("20.04")})
+	s.Factory.MakeMachine(c, &factory.MachineParams{Base: state.Base{OS: "centos", Channel: "7"}})
+	s.Factory.MakeMachine(c, &factory.MachineParams{Base: state.Base{OS: "zzzz", Channel: "redux"}})
 	err = s.metricsmanager.AddJujuMachineMetrics()
 	c.Assert(err, jc.ErrorIsNil)
 	metrics, err := s.State.MetricsToSend(10)
@@ -250,7 +250,7 @@ func (s *metricsManagerSuite) TestAddJujuMachineMetrics(c *gc.C) {
 		Value: "3",
 		Time:  t,
 	}, {
-		Key:   "juju-unknown-machines",
+		Key:   "juju-zzzz-machines",
 		Value: "1",
 		Time:  t,
 	}})

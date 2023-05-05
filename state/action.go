@@ -11,11 +11,11 @@ import (
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 
 	stateerrors "github.com/juju/juju/state/errors"
 )
@@ -596,7 +596,7 @@ func newActionDoc(mb modelBackend, operationID string, receiverTag names.Tag,
 	}
 	actionId := strconv.Itoa(id)
 	actionLogger.Debugf("newActionDoc name: '%s', receiver: '%s', actionId: '%s'", actionName, receiverTag, actionId)
-	modelUUID := mb.modelUUID()
+	modelUUID := mb.ModelUUID()
 	return actionDoc{
 			DocId:          mb.docID(actionId),
 			ModelUUID:      modelUUID,

@@ -4,11 +4,11 @@
 package jujuc_test
 
 import (
-	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
@@ -23,7 +23,6 @@ import (
 
 type registerSuite struct {
 	testing.IsolationSuite
-	hctx mocks.MockContext
 }
 
 var _ = gc.Suite(&registerSuite{})
@@ -124,7 +123,7 @@ func (s *registerSuite) TestRunError(c *gc.C) {
 func setupMetadata(c *gc.C) *cmd.Context {
 	dir := c.MkDir()
 	path := filepath.Join(dir, "metadata.yaml")
-	err := ioutil.WriteFile(path, []byte(metadataContents), 0660)
+	err := os.WriteFile(path, []byte(metadataContents), 0660)
 	c.Assert(err, jc.ErrorIsNil)
 	ctx := cmdtesting.Context(c)
 	ctx.Dir = dir

@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 )
 
@@ -257,8 +257,9 @@ func (st *State) AddModelMetrics(batch ModelBatchParam) (*MetricBatch, error) {
 
 // AllMetricBatches returns all metric batches currently stored in state.
 // TODO (tasdomas): this method is currently only used in the uniter worker test -
-//                  it needs to be modified to restrict the scope of the values it
-//                  returns if it is to be used outside of tests.
+//
+//	it needs to be modified to restrict the scope of the values it
+//	returns if it is to be used outside of tests.
 func (st *State) AllMetricBatches() ([]MetricBatch, error) {
 	c, closer := st.db().GetCollection(metricsC)
 	defer closer()

@@ -42,7 +42,7 @@ func (s *CmdRelationSuite) TestAddRelationSuccessOnAlreadyExists(c *gc.C) {
 	c.Check(cmdtesting.Stderr(context), jc.Contains, `ERROR cannot add relation "wordpress:db mysql:server"
 relation wordpress:db mysql:server (already exists): 
 
-Use 'juju status --integrations' to view the current integrations.
+Use 'juju status --relations' to view the current relations.
 `)
 }
 
@@ -52,5 +52,5 @@ func (s *CmdRelationSuite) TestRemoveRelationSuccess(c *gc.C) {
 }
 
 func (s *CmdRelationSuite) TestRemoveRelationFail(c *gc.C) {
-	runCommandExpectFailure(c, "remove-relation", `relation "wordpress:db mysql:server" not found`, s.apps...)
+	runCommandExpectFailure(c, "remove-relation", `ERROR relation matching "wordpress mysql" not found (not found)`, s.apps...)
 }

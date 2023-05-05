@@ -27,7 +27,7 @@ wait_for() {
 		sleep "${SHORT_TIMEOUT}"
 
 		elapsed=$(date -u +%s)-$start_time
-		if [[ "${elapsed}" -ge ${timeout} ]]; then
+		if [[ ${elapsed} -ge ${timeout} ]]; then
 			echo "[-] $(red 'timed out waiting for')" "$(red "${name}")"
 			exit 1
 		fi
@@ -70,13 +70,19 @@ idle_subordinate_condition() {
 }
 
 active_condition() {
-	local name app_index unit_index
+	local name app_index
 
 	name=${1}
 	app_index=${2:-0}
-	unit_index=${3:-0}
 
 	echo ".applications | select(.[\"$name\"] | .[\"application-status\"] | .current == \"active\") | keys[$app_index]"
+}
+
+# not_idle_list should be used where you expect an arbitrary list of applications whose agent-status are not in idle state,
+# ideally applications in a bundle, this helps the tests to avoid being overly specific to a given number of applications.
+# e.g. wait_for 0 "$(not_idle_list) | length" 1800
+not_idle_list() {
+	echo '[.applications[] | select((.units[] | .["juju-status"].current != "idle") or (.units[] | .["workload-status"].current == "error"))]'
 }
 
 # workload_status gets the workload-status object for the unit - use
@@ -251,7 +257,7 @@ wait_for_model() {
 # wait_for_systemd_service_files_to_appear <unit_name>
 #
 # example:
-# wait_for_systemd_service_files_to_appear "ubuntu-lite/0"
+# wait_for_systemd_service_files_to_appear "ubuntu/0"
 # ```
 wait_for_systemd_service_files_to_appear() {
 	local unit
@@ -278,4 +284,38 @@ wait_for_systemd_service_files_to_appear() {
 	# shellcheck disable=SC2046,SC2005
 	echo $(red "Timed out waiting for the systemd unit files for ${unit} to appear")
 	exit 1
+}
+
+# wait_for_storage is like wait_for but for storage formats. Used to wait for a certain condition in charm storage.
+wait_for_storage() {
+	local name query timeout
+
+	name=${1}
+	query=${2}
+	timeout=${3:-600} # default timeout: 600s = 10m
+
+	attempt=0
+	start_time="$(date -u +%s)"
+	# shellcheck disable=SC2046,SC2143
+	until [[ "$(juju storage --format=json 2>/dev/null | jq "${query}" | grep "${name}")" ]]; do
+		echo "[+] (attempt ${attempt}) polling status for" "${query} => ${name}"
+		juju storage 2>&1 | sed 's/^/    | /g'
+		sleep "${SHORT_TIMEOUT}"
+
+		elapsed=$(date -u +%s)-$start_time
+		if [[ ${elapsed} -ge ${timeout} ]]; then
+			echo "[-] $(red 'timed out waiting for')" "$(red "${name}")"
+			exit 1
+		fi
+
+		attempt=$((attempt + 1))
+	done
+
+	if [[ ${attempt} -gt 0 ]]; then
+		echo "[+] $(green 'Completed polling status for')" "$(green "${name}")"
+		juju storage 2>&1 | sed 's/^/    | /g'
+		# Although juju reports as an idle condition, some charms require a
+		# breathe period to ensure things have actually settled.
+		sleep "${SHORT_TIMEOUT}"
+	fi
 }

@@ -1,12 +1,11 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package snap manages installing and running snaps.
 package snap
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,7 +238,7 @@ func (s Service) ConfigOverride() error {
 	}
 
 	unitOptions := systemd.ServiceLimits(s.conf)
-	data, err := ioutil.ReadAll(systemd.UnitSerialize(unitOptions))
+	data, err := io.ReadAll(systemd.UnitSerialize(unitOptions))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -249,7 +248,7 @@ func (s Service) ConfigOverride() error {
 		if err := os.MkdirAll(overridesDir, 0755); err != nil {
 			return errors.Trace(err)
 		}
-		if err := ioutil.WriteFile(filepath.Join(overridesDir, "overrides.conf"), data, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(overridesDir, "overrides.conf"), data, 0644); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -270,12 +269,12 @@ func (s Service) StartCommands() ([]string, error) {
 // status returns an interpreted output from the `snap services` command.
 // For example, this output from `snap services juju-db.daemon`
 //
-//     Service                                Startup  Current
-//     juju-db.daemon                         enabled  inactive
+//	Service                                Startup  Current
+//	juju-db.daemon                         enabled  inactive
 //
 // returns this output from status
 //
-//     (true, true, false, nil)
+//	(true, true, false, nil)
 func (s *Service) status() (isInstalled, enabledAtStartup, isCurrentlyActive bool, err error) {
 	out, err := s.runCommand("services", s.Name())
 	if err != nil {

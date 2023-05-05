@@ -8,7 +8,6 @@ import (
 	stdcontext "context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,15 +19,17 @@ import (
 	"github.com/juju/clock/testclock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
+	mgotesting "github.com/juju/mgo/v3/testing"
+	jujuos "github.com/juju/os/v2"
 	"github.com/juju/os/v2/series"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
 	"github.com/juju/utils/v3/arch"
 	"github.com/juju/version/v2"
+
 	gc "gopkg.in/check.v1"
 	k8scmd "k8s.io/client-go/tools/clientcmd"
 
@@ -37,7 +38,7 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/model"
-	jujuos "github.com/juju/juju/core/os"
+	coreos "github.com/juju/juju/core/os"
 	jujuseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/bootstrap"
@@ -53,7 +54,6 @@ import (
 	toolstesting "github.com/juju/juju/environs/tools/testing"
 	"github.com/juju/juju/juju/keys"
 	"github.com/juju/juju/juju/osenv"
-	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/jujuclient"
 	"github.com/juju/juju/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/provider/dummy"
@@ -68,7 +68,7 @@ import (
 
 type BootstrapSuite struct {
 	coretesting.FakeJujuXDGDataHomeSuite
-	testing.MgoSuite
+	mgotesting.MgoSuite
 	envtesting.ToolsFixture
 	store *jujuclient.MemStore
 	tw    loggo.TestWriter
@@ -96,6 +96,12 @@ func (s *BootstrapSuite) SetUpSuite(c *gc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpSuite(c)
 	s.MgoSuite.SetUpSuite(c)
 	s.PatchValue(&keys.JujuPublicKey, sstesting.SignedMetadataPublicKey)
+	s.PatchValue(
+		&jujuseries.LocalSeriesVersionInfo,
+		func() (jujuos.OSType, map[string]series.SeriesVersionInfo, error) {
+			return jujuos.Ubuntu, nil, nil
+		},
+	)
 }
 
 func (s *BootstrapSuite) SetUpTest(c *gc.C) {
@@ -108,8 +114,8 @@ func (s *BootstrapSuite) SetUpTest(c *gc.C) {
 	// override this.
 	s.PatchValue(&jujuversion.Current, v100u64.Number)
 	s.PatchValue(&arch.HostArch, func() string { return v100u64.Arch })
-	s.PatchValue(&series.HostSeries, func() (string, error) { return "bionic", nil })
-	s.PatchValue(&jujuos.HostOS, func() jujuos.OSType { return jujuos.Ubuntu })
+	s.PatchValue(&series.HostSeries, func() (string, error) { return "jammy", nil })
+	s.PatchValue(&coreos.HostOS, func() coreos.OSType { return coreos.Ubuntu })
 	s.PatchValue(&jujuseries.UbuntuDistroInfo, "/path/notexists")
 
 	// Ensure KUBECONFIG doesn't interfere with tests.
@@ -123,7 +129,7 @@ func (s *BootstrapSuite) SetUpTest(c *gc.C) {
 
 	// NOTE(axw) we cannot patch BundleTools here, as the "gc.C" argument
 	// is invalidated once this method returns.
-	s.PatchValue(&envtools.BundleTools, func(bool, io.Writer, *version.Number) (version.Binary, bool, string, error) {
+	s.PatchValue(&envtools.BundleTools, func(bool, io.Writer, func(version.Number) version.Number) (version.Binary, version.Number, bool, string, error) {
 		panic("tests must call setupAutoUploadTest or otherwise patch envtools.BundleTools")
 	})
 
@@ -176,16 +182,10 @@ func (s *BootstrapSuite) TestRunTests(c *gc.C) {
 	}
 }
 
-// defaultSupportedJujuSeries is used to return canned information about what
-// juju supports in terms of the release cycle
-// see juju/core/series and documentation https://www.ubuntu.com/about/release-cycle
-var defaultSupportedJujuSeries = set.NewStrings("jammy", "focal", "bionic", jujutesting.KubernetesSeriesName)
-
 type bootstrapTest struct {
 	info string
 	// binary version string used to set jujuversion.Current
 	version   string
-	sync      bool
 	args      []string
 	err       string
 	silentErr bool
@@ -203,9 +203,6 @@ type bootstrapTest struct {
 func (s *BootstrapSuite) patchVersionAndSeries(c *gc.C, hostSeries string) {
 	resetJujuXDGDataHome(c)
 	s.PatchValue(&series.HostSeries, func() (string, error) { return hostSeries, nil })
-	s.PatchValue(&supportedJujuSeries, func(time.Time, string, string) (set.Strings, error) {
-		return set.NewStrings(hostSeries).Union(defaultSupportedJujuSeries), nil
-	})
 	s.patchVersion(c)
 }
 
@@ -221,7 +218,7 @@ func (s *BootstrapSuite) patchVersion(c *gc.C) {
 func (s *BootstrapSuite) run(c *gc.C, test bootstrapTest) testing.Restorer {
 	// Create home with dummy provider and remove all
 	// of its envtools.
-	s.setupAutoUploadTest(c, "1.0.0", "bionic")
+	s.setupAutoUploadTest(c, "1.0.0", "jammy")
 	dummy.Reset(c)
 	s.tw.Clear()
 
@@ -239,7 +236,7 @@ func (s *BootstrapSuite) run(c *gc.C, test bootstrapTest) testing.Restorer {
 			uploadVers := version.MustParseBinary(test.upload)
 			bootstrapVersion.Number = uploadVers.Number
 		}
-		restore = restore.Add(testing.PatchValue(&envtools.BundleTools, toolstesting.GetMockBundleTools(c, &bootstrapVersion.Number)))
+		restore = restore.Add(testing.PatchValue(&envtools.BundleTools, toolstesting.GetMockBundleTools(bootstrapVersion.Number)))
 	}
 
 	if test.hostArch != "" {
@@ -252,7 +249,7 @@ func (s *BootstrapSuite) run(c *gc.C, test bootstrapTest) testing.Restorer {
 	// Run command and check for uploads.
 	args := append([]string{
 		cloudName, controllerName,
-		"--config", "default-series=bionic",
+		"--config", "default-series=jammy",
 	}, test.args...)
 	opc, errc := cmdtest.RunCommandWithDummyProvider(cmdtesting.Context(c), s.newBootstrapCommand(), args...)
 	var err error
@@ -324,7 +321,8 @@ func (s *BootstrapSuite) run(c *gc.C, test bootstrapTest) testing.Restorer {
 	expected := map[string]interface{}{
 		"name":            bootstrap.ControllerModelName,
 		"type":            "dummy",
-		"default-series":  "bionic",
+		"default-base":    "ubuntu@22.04/stable",
+		"default-series":  "jammy",
 		"authorized-keys": "public auth key\n",
 		// Dummy provider defaults
 		"broken":     "",
@@ -465,11 +463,6 @@ var bootstrapTests = []bootstrapTest{{
 	args: []string{"--storage-pool", "name=test"},
 	err:  `storage pool requires a type`,
 }}
-
-func (s *BootstrapSuite) TestRunModelLoggingOutputChecksFlag(c *gc.C) {
-	_, err := cmdtesting.RunCommand(c, s.newBootstrapCommand(), "dummy", "my-controller", "--config", "logging-output=syslog")
-	c.Check(err, gc.ErrorMatches, `cannot set "logging-output" without setting the "logging-output" feature flag`)
-}
 
 func (s *BootstrapSuite) TestRunCloudNameUnknown(c *gc.C) {
 	_, err := cmdtesting.RunCommand(c, s.newBootstrapCommand(), "unknown", "my-controller")
@@ -705,7 +698,7 @@ func (s *BootstrapSuite) TestBootstrapDefaultConfigStripsProcessedAttributes(c *
 	})
 
 	fakeSSHFile := filepath.Join(c.MkDir(), "ssh")
-	err := ioutil.WriteFile(fakeSSHFile, []byte("ssh-key"), 0600)
+	err := os.WriteFile(fakeSSHFile, []byte("ssh-key"), 0600)
 	c.Assert(err, jc.ErrorIsNil)
 	cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(),
@@ -750,7 +743,7 @@ func (s *BootstrapSuite) TestBootstrapDefaultConfigStripsInheritedAttributes(c *
 	})
 
 	fakeSSHFile := filepath.Join(c.MkDir(), "ssh")
-	err := ioutil.WriteFile(fakeSSHFile, []byte("ssh-key"), 0600)
+	err := os.WriteFile(fakeSSHFile, []byte("ssh-key"), 0600)
 	c.Assert(err, jc.ErrorIsNil)
 	cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(),
@@ -1178,9 +1171,11 @@ func (s *BootstrapSuite) TestBootstrapAlreadyExists(c *gc.C) {
 
 func (s *BootstrapSuite) TestInvalidLocalSource(c *gc.C) {
 	s.PatchValue(&jujuversion.Current, version.MustParse("1.2.0"))
-	s.PatchValue(&envtools.BundleTools, func(bool, io.Writer, *version.Number) (version.Binary, bool, string, error) {
-		return version.Binary{}, false, "", errors.New("no agent binaries for you")
-	})
+	s.PatchValue(&envtools.BundleTools,
+		func(bool, io.Writer, func(localBinaryVersion version.Number) version.Number) (version.Binary, version.Number, bool, string, error) {
+			return version.Binary{}, version.Number{}, false, "", errors.New("no agent binaries for you")
+		},
+	)
 	s.PatchValue(&envtools.DefaultBaseURL, c.MkDir())
 	resetJujuXDGDataHome(c)
 
@@ -1225,7 +1220,8 @@ func createImageMetadata(c *gc.C) (string, []*imagemetadata.ImageMetadata) {
 	sourceStor, err := filestorage.NewFileStorageWriter(sourceDir)
 	c.Assert(err, jc.ErrorIsNil)
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
-	err = imagemetadata.MergeAndWriteMetadata(ss, "jammy", im, cloudSpec, sourceStor)
+	base := jujuseries.MustParseBaseFromString("ubuntu@22.04")
+	err = imagemetadata.MergeAndWriteMetadata(ss, base, im, cloudSpec, sourceStor)
 	c.Assert(err, jc.ErrorIsNil)
 	return sourceDir, im
 }
@@ -1244,6 +1240,24 @@ func (s *BootstrapSuite) TestBootstrapCalledWithMetadataDir(c *gc.C) {
 		"--metadata-source", sourceDir, "--constraints", "mem=4G",
 		"dummy-cloud/region-1", "devcontroller",
 		"--config", "default-series=jammy",
+	)
+	c.Assert(bootstrapFuncs.args.MetadataDir, gc.Equals, sourceDir)
+}
+
+func (s *BootstrapSuite) TestBootstrapCalledWitBase(c *gc.C) {
+	sourceDir, _ := createImageMetadata(c)
+	resetJujuXDGDataHome(c)
+
+	var bootstrapFuncs fakeBootstrapFuncs
+	s.PatchValue(&getBootstrapFuncs, func() BootstrapInterface {
+		return &bootstrapFuncs
+	})
+
+	cmdtesting.RunCommand(
+		c, s.newBootstrapCommand(),
+		"--metadata-source", sourceDir, "--constraints", "mem=4G",
+		"dummy-cloud/region-1", "devcontroller",
+		"--config", "default-base=ubuntu@22.04",
 	)
 	c.Assert(bootstrapFuncs.args.MetadataDir, gc.Equals, sourceDir)
 }
@@ -1276,6 +1290,36 @@ func (s *BootstrapSuite) TestBootstrapWithVersionNumber(c *gc.C) {
 
 func (s *BootstrapSuite) TestBootstrapWithBinaryVersionNumber(c *gc.C) {
 	s.checkBootstrapWithVersion(c, "2.3.4-jammy-ppc64", "2.3.4")
+}
+
+func (s *BootstrapSuite) checkBootstrapBaseWithVersion(c *gc.C, vers, expect string) {
+	resetJujuXDGDataHome(c)
+
+	var bootstrapFuncs fakeBootstrapFuncs
+	s.PatchValue(&getBootstrapFuncs, func() BootstrapInterface {
+		return &bootstrapFuncs
+	})
+
+	num := jujuversion.Current
+	num.Major = 2
+	num.Minor = 3
+	s.PatchValue(&jujuversion.Current, num)
+	cmdtesting.RunCommand(
+		c, s.newBootstrapCommand(),
+		"--agent-version", vers,
+		"dummy-cloud/region-1", "devcontroller",
+		"--config", "default-base=ubuntu@22.04",
+	)
+	c.Assert(bootstrapFuncs.args.AgentVersion, gc.NotNil)
+	c.Assert(*bootstrapFuncs.args.AgentVersion, gc.Equals, version.MustParse(expect))
+}
+
+func (s *BootstrapSuite) TestBootstrapBaseWithVersionNumber(c *gc.C) {
+	s.checkBootstrapBaseWithVersion(c, "2.3.4", "2.3.4")
+}
+
+func (s *BootstrapSuite) TestBootstrapBaseWithBinaryVersionNumber(c *gc.C) {
+	s.checkBootstrapBaseWithVersion(c, "2.3.4-jammy-ppc64", "2.3.4")
 }
 
 func (s *BootstrapSuite) TestBootstrapWithAutoUpgrade(c *gc.C) {
@@ -1330,7 +1374,7 @@ func (s *BootstrapSuite) TestAutoSyncLocalSource(c *gc.C) {
 }
 
 func (s *BootstrapSuite) TestInteractiveBootstrap(c *gc.C) {
-	s.setupAutoUploadTest(c, "1.8.3", "focal")
+	s.setupAutoUploadTest(c, "1.8.3", "jammy")
 
 	command := s.newBootstrapCommand()
 	err := cmdtesting.InitCommand(command, nil)
@@ -1359,7 +1403,7 @@ my-dummy-cloud
 func (s *BootstrapSuite) setupAutoUploadTest(c *gc.C, vers, ser string) {
 	patchedVersion := version.MustParse(vers)
 	patchedVersion.Build = 1
-	s.PatchValue(&envtools.BundleTools, toolstesting.GetMockBundleTools(c, &patchedVersion))
+	s.PatchValue(&envtools.BundleTools, toolstesting.GetMockBundleTools(patchedVersion))
 	sourceDir := createToolsSource(c, vAll)
 	s.PatchValue(&envtools.DefaultBaseURL, sourceDir)
 
@@ -1369,9 +1413,6 @@ func (s *BootstrapSuite) setupAutoUploadTest(c *gc.C, vers, ser string) {
 	// so we can test that an upload is forced.
 	s.PatchValue(&jujuversion.Current, version.MustParse(vers))
 	s.PatchValue(&series.HostSeries, func() (string, error) { return ser, nil })
-	s.PatchValue(&supportedJujuSeries, func(time.Time, string, string) (set.Strings, error) {
-		return set.NewStrings(ser).Union(defaultSupportedJujuSeries), nil
-	})
 
 	// Create home with dummy provider and remove all
 	// of its envtools.
@@ -1401,11 +1442,11 @@ func (s *BootstrapSuite) TestAutoUploadAfterFailedSync(c *gc.C) {
 }
 
 func (s *BootstrapSuite) TestMissingToolsError(c *gc.C) {
-	s.setupAutoUploadTest(c, "1.8.3", "bionic")
+	s.setupAutoUploadTest(c, "1.8.3", "jammy")
 
 	_, err := cmdtesting.RunCommand(c, s.newBootstrapCommand(),
 		"dummy-cloud/region-1", "devcontroller",
-		"--config", "default-series=bionic", "--agent-version=1.8.4",
+		"--config", "default-series=jammy", "--agent-version=1.8.4",
 	)
 	c.Assert(err, gc.Equals, cmd.ErrSilent)
 	c.Check(s.tw.Log(), jc.LogMatches, []jc.SimpleMessage{{
@@ -1415,17 +1456,19 @@ func (s *BootstrapSuite) TestMissingToolsError(c *gc.C) {
 }
 
 func (s *BootstrapSuite) TestMissingToolsUploadFailedError(c *gc.C) {
-	BuildAgentTarballAlwaysFails := func(build bool, forceVersion *version.Number, stream string) (*sync.BuiltAgent, error) {
+	BuildAgentTarballAlwaysFails := func(
+		bool, string, func(version.Number) version.Number,
+	) (*sync.BuiltAgent, error) {
 		return nil, errors.New("an error")
 	}
 
-	s.setupAutoUploadTest(c, "1.7.3", "bionic")
+	s.setupAutoUploadTest(c, "1.7.3", "jammy")
 	s.PatchValue(&sync.BuildAgentTarball, BuildAgentTarballAlwaysFails)
 
 	ctx, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(),
 		"dummy-cloud/region-1", "devcontroller",
-		"--config", "default-series=bionic",
+		"--config", "default-series=jammy",
 		"--config", "agent-stream=proposed",
 		"--auto-upgrade", "--agent-version=1.7.3",
 	)
@@ -1443,7 +1486,7 @@ No packaged binary found, preparing local Juju agent binary
 }
 
 func (s *BootstrapSuite) TestBootstrapDestroy(c *gc.C) {
-	s.setupAutoUploadTest(c, "1.7.3", "groovy")
+	s.setupAutoUploadTest(c, "1.7.3", "jammy")
 
 	opc, errc := cmdtest.RunCommandWithDummyProvider(
 		cmdtesting.Context(c), s.newBootstrapCommand(),
@@ -1482,7 +1525,7 @@ func (s *BootstrapSuite) TestBootstrapDestroy(c *gc.C) {
 }
 
 func (s *BootstrapSuite) TestBootstrapKeepBroken(c *gc.C) {
-	s.setupAutoUploadTest(c, "1.7.3", "groovy")
+	s.setupAutoUploadTest(c, "1.7.3", "jammy")
 
 	ctx := cmdtesting.Context(c)
 	opc, errc := cmdtest.RunCommandWithDummyProvider(ctx, s.newBootstrapCommand(),
@@ -1531,20 +1574,20 @@ func (s *BootstrapSuite) TestBootstrapProviderNoRegionDetection(c *gc.C) {
 }
 
 func (s *BootstrapSuite) TestBootstrapProviderNoRegions(c *gc.C) {
-	s.setupAutoUploadTest(c, "1.8.3", "bionic")
+	s.setupAutoUploadTest(c, "1.8.3", "focal")
 	ctx, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "no-cloud-regions", "ctrl",
-		"--config", "default-series=bionic",
+		"--config", "default-series=focal",
 	)
 	c.Check(cmdtesting.Stderr(ctx), gc.Matches, "Creating Juju controller \"ctrl\" on no-cloud-regions(.|\n)*")
 	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *BootstrapSuite) TestBootstrapCloudNoRegions(c *gc.C) {
-	s.setupAutoUploadTest(c, "1.8.3", "bionic")
+	s.setupAutoUploadTest(c, "1.8.3", "jammy")
 	ctx, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "dummy-cloud-without-regions", "ctrl",
-		"--config", "default-series=bionic",
+		"--config", "default-series=focal",
 	)
 	c.Check(cmdtesting.Stderr(ctx), gc.Matches, "Creating Juju controller \"ctrl\" on dummy-cloud-without-regions(.|\n)*")
 	c.Assert(err, jc.ErrorIsNil)
@@ -1554,7 +1597,7 @@ func (s *BootstrapSuite) TestBootstrapCloudNoRegionsOneSpecified(c *gc.C) {
 	resetJujuXDGDataHome(c)
 	ctx, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "dummy-cloud-without-regions/my-region", "ctrl",
-		"--config", "default-series=bionic",
+		"--config", "default-series=jammy",
 	)
 	c.Check(cmdtesting.Stderr(ctx), gc.Equals, "")
 	c.Assert(err, gc.ErrorMatches, `region "my-region" for cloud "dummy-cloud-without-regions" not valid`)
@@ -1574,50 +1617,62 @@ func (s *BootstrapSuite) TestBootstrapProviderManyDetectedCredentials(c *gc.C) {
 
 func (s *BootstrapSuite) TestBootstrapWithBootstrapSeries(c *gc.C) {
 	s.patchVersionAndSeries(c, "jammy")
-	ctx, err := cmdtesting.RunCommand(
+	_, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "no-cloud-regions", "ctrl", "--bootstrap-series", "spock",
 	)
-	c.Check(cmdtesting.Stderr(ctx), gc.Matches, "Creating Juju controller \"ctrl\" on no-cloud-regions(.|\n)*")
-	c.Assert(err, gc.ErrorMatches, cmd.ErrSilent.Error())
-	c.Check(s.tw.Log(), jc.LogMatches, []jc.SimpleMessage{
-		{loggo.ERROR, "failed to bootstrap model: series \"spock\" not valid"},
-		{loggo.DEBUG, "(error details.*)"},
-	})
+	c.Assert(err, gc.ErrorMatches, `cannot determine base for series "spock"`)
+}
+
+func (s *BootstrapSuite) TestBootstrapWithDeprecatedSeries(c *gc.C) {
+	s.setupAutoUploadTest(c, "1.8.3", "jammy")
+	_, err := cmdtesting.RunCommand(
+		c, s.newBootstrapCommand(), "dummy-cloud-without-regions", "ctrl",
+		"--config", "default-series=bionic",
+	)
+	c.Assert(err, gc.ErrorMatches, `base "ubuntu@18.04" not supported`)
 }
 
 func (s *BootstrapSuite) TestBootstrapWithNoBootstrapSeriesUsesFallbackButStillFails(c *gc.C) {
 	s.patchVersionAndSeries(c, "jammy")
-	ctx, err := cmdtesting.RunCommand(
+	_, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "no-cloud-regions", "ctrl", "--config", "default-series=spock",
 	)
-	c.Check(cmdtesting.Stderr(ctx), gc.Matches, "Creating Juju controller \"ctrl\" on no-cloud-regions(.|\n)*")
-	c.Assert(err, gc.ErrorMatches, cmd.ErrSilent.Error())
-	c.Check(s.tw.Log(), jc.LogMatches, []jc.SimpleMessage{
-		{loggo.ERROR, "failed to bootstrap model: series \"spock\" not valid"},
-		{loggo.DEBUG, "(error details.*)"},
-	})
+	c.Assert(err, gc.ErrorMatches, `series "spock" not valid`)
 }
 
 func (s *BootstrapSuite) TestBootstrapWithBootstrapSeriesDoesNotUseFallbackButStillFails(c *gc.C) {
 	s.patchVersionAndSeries(c, "jammy")
-	ctx, err := cmdtesting.RunCommand(
+	_, err := cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "no-cloud-regions", "ctrl",
 		"--bootstrap-series", "spock",
 		"--config", "default-series=kirk",
 	)
-	c.Check(cmdtesting.Stderr(ctx), gc.Matches, "Creating Juju controller \"ctrl\" on no-cloud-regions(.|\n)*")
-	c.Assert(err, gc.ErrorMatches, cmd.ErrSilent.Error())
-	c.Check(s.tw.Log(), jc.LogMatches, []jc.SimpleMessage{
-		{loggo.ERROR, "failed to bootstrap model: series \"spock\" not valid"},
-		{loggo.DEBUG, "(error details.*)"},
-	})
+	c.Assert(err, gc.ErrorMatches, `cannot determine base for series "spock"`)
+}
+
+func (s *BootstrapSuite) TestBootstrapBaseWithNoBootstrapSeriesUsesFallbackButStillFails(c *gc.C) {
+	s.patchVersionAndSeries(c, "jammy")
+	_, err := cmdtesting.RunCommand(
+		c, s.newBootstrapCommand(), "no-cloud-regions", "ctrl", "--config", "default-base=spock",
+	)
+	c.Assert(err, gc.ErrorMatches, `invalid default base "spock": expected base string to contain os and channel separated by '@'`)
+}
+
+func (s *BootstrapSuite) TestBootstrapBaseWithBootstrapSeriesDoesNotUseFallbackButStillFails(c *gc.C) {
+	s.patchVersionAndSeries(c, "jammy")
+	_, err := cmdtesting.RunCommand(
+		c, s.newBootstrapCommand(), "no-cloud-regions", "ctrl",
+		"--bootstrap-base", "spock",
+		"--config", "default-base=kirk",
+	)
+	c.Assert(err, gc.ErrorMatches, `base "spock" not valid`)
 }
 
 func (s *BootstrapSuite) TestBootstrapProviderFileCredential(c *gc.C) {
 	dummyProvider, err := environs.Provider("dummy")
 	c.Assert(err, jc.ErrorIsNil)
 
-	tmpFile, err := ioutil.TempFile("", "juju-bootstrap-test")
+	tmpFile, err := os.CreateTemp("", "juju-bootstrap-test")
 	c.Assert(err, jc.ErrorIsNil)
 	defer func() {
 		tmpFile.Close()
@@ -1626,7 +1681,7 @@ func (s *BootstrapSuite) TestBootstrapProviderFileCredential(c *gc.C) {
 	}()
 
 	contents := []byte("{something: special}\n")
-	err = ioutil.WriteFile(tmpFile.Name(), contents, 0644)
+	err = os.WriteFile(tmpFile.Name(), contents, 0644)
 	c.Assert(err, jc.ErrorIsNil)
 
 	unfinalizedCredential := cloud.NewEmptyCredential()
@@ -1638,10 +1693,10 @@ func (s *BootstrapSuite) TestBootstrapProviderFileCredential(c *gc.C) {
 		&finalizedCredential}
 	environs.RegisterProvider("file-credentials", fp)
 
-	s.setupAutoUploadTest(c, "1.8.3", "bionic")
+	s.setupAutoUploadTest(c, "1.8.3", "focal")
 	_, err = cmdtesting.RunCommand(
 		c, s.newBootstrapCommand(), "file-credentials", "ctrl",
-		"--config", "default-series=bionic",
+		"--config", "default-series=focal",
 	)
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -1833,7 +1888,7 @@ func (s *BootstrapSuite) TestBootstrapProviderCaseInsensitiveRegionCheck(c *gc.C
 func (s *BootstrapSuite) TestBootstrapConfigFile(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile := filepath.Join(tmpdir, "config.yaml")
-	err := ioutil.WriteFile(configFile, []byte("controller: not-a-bool\n"), 0644)
+	err := os.WriteFile(configFile, []byte("controller: not-a-bool\n"), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 
 	s.patchVersionAndSeries(c, "jammy")
@@ -1847,12 +1902,12 @@ func (s *BootstrapSuite) TestBootstrapConfigFile(c *gc.C) {
 func (s *BootstrapSuite) TestBootstrapMultipleConfigFiles(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile1 := filepath.Join(tmpdir, "config-1.yaml")
-	err := ioutil.WriteFile(configFile1, []byte(
+	err := os.WriteFile(configFile1, []byte(
 		"controller: not-a-bool\nbroken: Bootstrap\n",
 	), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 	configFile2 := filepath.Join(tmpdir, "config-2.yaml")
-	err = ioutil.WriteFile(configFile2, []byte(
+	err = os.WriteFile(configFile2, []byte(
 		"controller: false\n",
 	), 0644)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1876,7 +1931,7 @@ func (s *BootstrapSuite) TestBootstrapMultipleConfigFiles(c *gc.C) {
 func (s *BootstrapSuite) TestBootstrapConfigFileAndAdHoc(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile := filepath.Join(tmpdir, "config.yaml")
-	err := ioutil.WriteFile(configFile, []byte("controller: not-a-bool\n"), 0644)
+	err := os.WriteFile(configFile, []byte("controller: not-a-bool\n"), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 
 	s.setupAutoUploadTest(c, "1.8.3", "jammy")
@@ -2059,18 +2114,23 @@ eu-west-1
 eu-west-2
 eu-west-3
 eu-central-1
+eu-central-2
 eu-north-1
 eu-south-1
+eu-south-2
 af-south-1
 ap-east-1
 ap-south-1
+ap-south-2
 ap-southeast-1
 ap-southeast-2
 ap-southeast-3
+ap-southeast-4
 ap-northeast-1
 ap-northeast-2
 ap-northeast-3
 me-south-1
+me-central-1
 sa-east-1
 `[1:])
 }
@@ -2079,7 +2139,7 @@ func (s *BootstrapSuite) TestBootstrapInvalidRegion(c *gc.C) {
 	resetJujuXDGDataHome(c)
 	ctx, err := cmdtesting.RunCommand(c, s.newBootstrapCommand(), "aws/eu-west")
 	c.Assert(err, gc.ErrorMatches, `region "eu-west" for cloud "aws" not valid`)
-	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, "Available cloud regions are af-south-1, ap-east-1, ap-northeast-1, ap-northeast-2, ap-northeast-3, ap-south-1, ap-southeast-1, ap-southeast-2, ap-southeast-3, ca-central-1, eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-2, eu-west-3, me-south-1, sa-east-1, us-east-1, us-east-2, us-west-1, us-west-2\n")
+	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, "Available cloud regions are af-south-1, ap-east-1, ap-northeast-1, ap-northeast-2, ap-northeast-3, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ca-central-1, eu-central-1, eu-central-2, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-2, eu-west-3, me-central-1, me-south-1, sa-east-1, us-east-1, us-east-2, us-west-1, us-west-2\n")
 	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, ``)
 }
 
@@ -2148,9 +2208,9 @@ func (s *BootstrapSuite) TestBootstrapWithLocalControllerCharm(c *gc.C) {
 	}
 }
 
-func (s *BootstrapSuite) TestBootstrapInvalidControllerCharmRisk(c *gc.C) {
-	_, err := cmdtesting.RunCommand(c, s.newBootstrapCommand(), "--controller-charm-risk", "foo")
-	c.Assert(err, gc.ErrorMatches, `controller charm risk "foo" not valid`)
+func (s *BootstrapSuite) TestBootstrapInvalidControllerCharmChannel(c *gc.C) {
+	_, err := cmdtesting.RunCommand(c, s.newBootstrapCommand(), "--controller-charm-channel", "3.0/foo")
+	c.Assert(err, gc.ErrorMatches, `controller charm channel "3.0/foo" not valid`)
 }
 
 func (s *BootstrapSuite) TestBootstrapSetsControllerOnBase(c *gc.C) {
@@ -2159,7 +2219,7 @@ func (s *BootstrapSuite) TestBootstrapSetsControllerOnBase(c *gc.C) {
 	// this, the concurrent bootstraps fail.
 	// See https://pad.lv/1604223
 
-	s.setupAutoUploadTest(c, "1.8.3", "bionic")
+	s.setupAutoUploadTest(c, "1.8.3", "jammy")
 
 	const controllerName = "dev"
 
@@ -2252,7 +2312,7 @@ func createToolsSource(c *gc.C, versions []version.Binary) string {
 // resetJujuXDGDataHome restores an new, clean Juju home environment without tools.
 func resetJujuXDGDataHome(c *gc.C) {
 	cloudsPath := cloud.JujuPersonalCloudsPath()
-	err := ioutil.WriteFile(cloudsPath, []byte(`
+	err := os.WriteFile(cloudsPath, []byte(`
 clouds:
     dummy-cloud:
         type: dummy

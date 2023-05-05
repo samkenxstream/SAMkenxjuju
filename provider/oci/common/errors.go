@@ -5,7 +5,7 @@ package common
 
 import (
 	"github.com/juju/collections/set"
-	ociCommon "github.com/oracle/oci-go-sdk/v47/common"
+	ociCommon "github.com/oracle/oci-go-sdk/v65/common"
 
 	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/provider/common"
@@ -55,7 +55,8 @@ func IsAuthorisationFailure(err error) bool {
 }
 
 // HandleCredentialError marks the current credentials as invalid internally
-//  if Oracle believes that they are expired
+//
+//	if Oracle believes that they are expired
 func HandleCredentialError(err error, ctx context.ProviderCallContext) {
 	common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
 }

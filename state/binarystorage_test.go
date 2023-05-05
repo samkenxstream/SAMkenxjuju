@@ -5,15 +5,15 @@ package state_test
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"strings"
 
-	"github.com/juju/blobstore/v2"
+	"github.com/juju/blobstore/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
 	gc "gopkg.in/check.v1"
@@ -185,7 +185,7 @@ func (s *binaryStorageSuite) TestToolsStorageLayered(c *gc.C) {
 		c.Assert(err, jc.ErrorIsNil)
 		c.Assert(rc, gc.NotNil)
 		defer rc.Close()
-		data, err := ioutil.ReadAll(rc)
+		data, err := io.ReadAll(rc)
 		c.Assert(err, jc.ErrorIsNil)
 		c.Assert(string(data), gc.Equals, contents)
 	}

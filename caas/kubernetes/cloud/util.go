@@ -4,7 +4,7 @@
 package cloud
 
 import (
-	"io/ioutil"
+	"os"
 
 	"github.com/juju/errors"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -19,10 +19,10 @@ func dataOrFile(data []byte, fileName string) ([]byte, error) {
 	} else if fileName == "" {
 		return []byte{}, nil
 	}
-	return ioutil.ReadFile(fileName)
+	return os.ReadFile(fileName)
 }
 
-//PickCOntextByClusterName finds the first available context in the supplied
+// PickCOntextByClusterName finds the first available context in the supplied
 // kube config that is using the clusterName. If not context's are found then
 // a not found error is return with an empty context name.
 func PickContextByClusterName(
@@ -46,6 +46,6 @@ func stringOrFile(data string, fileName string) (string, error) {
 	} else if fileName == "" {
 		return "", nil
 	}
-	d, err := ioutil.ReadFile(fileName)
+	d, err := os.ReadFile(fileName)
 	return string(d), err
 }

@@ -2,9 +2,6 @@
 // Copyright 2015 Cloudbase Solutions SRL
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package cloudinit implements a way of creating
-// a cloud-init configuration file.
-// See https://help.ubuntu.com/community/CloudInit.
 package cloudinit
 
 import (
@@ -18,7 +15,6 @@ import (
 
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/os"
-	"github.com/juju/juju/core/series"
 	jujupackaging "github.com/juju/juju/packaging"
 )
 
@@ -33,11 +29,12 @@ type CloudConfig interface {
 	// If the attribute has not been previously set, no error occurs.
 	UnsetAttr(string)
 
-	// GetSeries returns the series this CloudConfig was made for.
-	GetSeries() string
+	// GetOS returns the os this CloudConfig was made for.
+	GetOS() string
 
 	// CloudConfig also contains all the smaller interfaces for config
 	// management:
+
 	UsersConfig
 	SystemUpdateConfig
 	SystemUpgradeConfig
@@ -370,14 +367,6 @@ type AdvancedPackagingConfig interface {
 	//TODO(bogdanteleaga): this might be the same as the exported proxy setting up above, need
 	//to investigate how they're used
 	updateProxySettings(PackageManagerProxyConfig) error
-
-	// RequiresCloudArchiveCloudTools determines whether the cloudconfig
-	// requires the configuration of the cloud archive depending on its series.
-	RequiresCloudArchiveCloudTools() bool
-
-	// AddCloudArchiveCloudTools configures the cloudconfig to set up the cloud
-	// archive if it is required (eg: LTS'es).
-	AddCloudArchiveCloudTools()
 }
 
 type User struct {
@@ -394,7 +383,7 @@ type User struct {
 	SSHAuthorizedKeys string
 
 	// Sudo directives to add.
-	Sudo []string
+	Sudo string
 }
 
 // UsersConfig is the interface for managing user additions
@@ -419,65 +408,58 @@ type NetworkingConfig interface {
 	AddNetworkConfig(interfaces corenetwork.InterfaceInfos) error
 }
 
+func WithDisableNetplanMACMatch(cfg *cloudConfig) {
+	cfg.omitNetplanHWAddrMatch = true
+}
+
 // New returns a new Config with no options set.
-func New(ser string) (CloudConfig, error) {
-	seriesos, err := series.GetOSFromSeries(ser)
-	if err != nil {
-		return nil, err
+func New(osname string, opts ...func(*cloudConfig)) (CloudConfig, error) {
+	osType := os.OSTypeForName(osname)
+	r, _ := shell.NewRenderer("bash")
+
+	cfg := &cloudConfig{
+		osName:   osname,
+		renderer: r,
+		attrs:    make(map[string]interface{}),
 	}
-	switch seriesos {
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	switch osType {
 	case os.Ubuntu:
-		renderer, _ := shell.NewRenderer("bash")
-		return &ubuntuCloudConfig{
-			&cloudConfig{
-				series: ser,
-				paccmder: map[jujupackaging.PackageManagerName]commands.PackageCommander{
-					jujupackaging.AptPackageManager:  commands.NewAptPackageCommander(),
-					jujupackaging.SnapPackageManager: commands.NewSnapPackageCommander(),
-				},
-				pacconfer: map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
-					jujupackaging.AptPackageManager: config.NewAptPackagingConfigurer(ser),
-				},
-				renderer: renderer,
-				attrs:    make(map[string]interface{}),
-			},
-		}, nil
+		cfg.paccmder = map[jujupackaging.PackageManagerName]commands.PackageCommander{
+			jujupackaging.AptPackageManager:  commands.NewAptPackageCommander(),
+			jujupackaging.SnapPackageManager: commands.NewSnapPackageCommander(),
+		}
+		cfg.pacconfer = map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
+			jujupackaging.AptPackageManager: config.NewAptPackagingConfigurer(osname),
+		}
+		return &ubuntuCloudConfig{cfg}, nil
 	case os.CentOS:
-		renderer, _ := shell.NewRenderer("bash")
+		cfg.paccmder = map[jujupackaging.PackageManagerName]commands.PackageCommander{
+			jujupackaging.YumPackageManager: commands.NewYumPackageCommander(),
+		}
+		cfg.pacconfer = map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
+			jujupackaging.YumPackageManager: config.NewYumPackagingConfigurer("centos7"),
+		}
 		return &centOSCloudConfig{
-			cloudConfig: &cloudConfig{
-				series: ser,
-				paccmder: map[jujupackaging.PackageManagerName]commands.PackageCommander{
-					jujupackaging.YumPackageManager: commands.NewYumPackageCommander(),
-				},
-				pacconfer: map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
-					jujupackaging.YumPackageManager: config.NewYumPackagingConfigurer(ser),
-				},
-				renderer: renderer,
-				attrs:    make(map[string]interface{}),
-			},
-			helper: centOSHelper{},
+			cloudConfig: cfg,
+			helper:      centOSHelper{},
 		}, nil
 	case os.OpenSUSE:
-		renderer, _ := shell.NewRenderer("bash")
+		cfg.paccmder = map[jujupackaging.PackageManagerName]commands.PackageCommander{
+			jujupackaging.ZypperPackageManager: commands.NewZypperPackageCommander(),
+		}
+		cfg.pacconfer = map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
+			jujupackaging.ZypperPackageManager: config.NewZypperPackagingConfigurer(osname),
+		}
 		return &centOSCloudConfig{
-			cloudConfig: &cloudConfig{
-				series: ser,
-				paccmder: map[jujupackaging.PackageManagerName]commands.PackageCommander{
-					jujupackaging.ZypperPackageManager: commands.NewZypperPackageCommander(),
-				},
-				pacconfer: map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
-					jujupackaging.ZypperPackageManager: config.NewZypperPackagingConfigurer(ser),
-				},
-				renderer: renderer,
-				attrs:    make(map[string]interface{}),
-			},
-			helper: openSUSEHelper{
-				paccmder: commands.NewZypperPackageCommander(),
-			},
+			cloudConfig: cfg,
+			helper:      openSUSEHelper{paccmder: commands.NewZypperPackageCommander()},
 		}, nil
 	default:
-		return nil, errors.NotFoundf("cloudconfig for series %q", ser)
+		return nil, errors.NotFoundf("cloudconfig for os %q", osname)
 	}
 }
 

@@ -15,13 +15,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
 	"github.com/juju/names/v4"
 	"github.com/kr/pretty"
 	"gopkg.in/tomb.v2"
@@ -411,7 +411,7 @@ func (st *State) WatchApplicationCharms() StringsWatcher {
 
 // WatchUnits notifies when units change.
 func (st *State) WatchUnits() StringsWatcher {
-	return newLifecycleWatcher(st, unitsC, nil, isLocalID(st), nil)
+	return newCollectionWatcher(st, colWCfg{col: unitsC})
 }
 
 // WatchMachines notifies when machines change.
@@ -494,8 +494,8 @@ func (a *Application) WatchRelations() StringsWatcher {
 
 // WatchRelations returns a StringsWatcher that notifies of changes to the
 // lifecycles of relations involving a.
-func (s *RemoteApplication) WatchRelations() StringsWatcher {
-	return watchApplicationRelations(s.st, s.doc.Name)
+func (a *RemoteApplication) WatchRelations() StringsWatcher {
+	return watchApplicationRelations(a.st, a.doc.Name)
 }
 
 func watchApplicationRelations(backend modelBackend, applicationName string) StringsWatcher {
@@ -572,9 +572,11 @@ func (w *modelMachineStartTimeWatcher) loop() error {
 	defer func() { _ = docWatcher.Stop() }()
 
 	var (
-		timer           = w.clk.NewTimer(w.quiesceInterval)
-		timerArmed      = true
-		unprocessedDocs = make(set.Strings)
+		timer      = w.clk.NewTimer(w.quiesceInterval)
+		timerArmed = true
+		// unprocessedDocs is a list of document IDs that need to be processed
+		// with a deadline they must be sent by.
+		unprocessedDocs = make(map[string]time.Time)
 		outCh           chan []string
 		changeSet       []string
 	)
@@ -602,9 +604,14 @@ func (w *modelMachineStartTimeWatcher) loop() error {
 			}
 			for _, docID := range changes {
 				// filter out doc IDs that correspond to containers
-				if !strings.ContainsRune(docID, '/') {
-					unprocessedDocs.Add(w.backend.docID(docID))
+				if strings.ContainsRune(docID, '/') {
+					continue
 				}
+				id := w.backend.docID(docID)
+				if _, ok := unprocessedDocs[id]; ok {
+					continue
+				}
+				unprocessedDocs[id] = w.clk.Now().Add(w.quiesceInterval)
 			}
 
 			// Restart the timer if currently stopped.
@@ -618,8 +625,27 @@ func (w *modelMachineStartTimeWatcher) loop() error {
 				continue // nothing to process
 			}
 
-			changedIDs, err := w.processChanges(unprocessedDocs)
-			unprocessedDocs = make(set.Strings)
+			visible := make(set.Strings)
+			now := w.clk.Now()
+			var next time.Time
+			hasNext := false
+			for k, due := range unprocessedDocs {
+				if due.After(now) {
+					if !hasNext || due.Before(next) {
+						hasNext = true
+						next = due
+					}
+					continue
+				}
+				delete(unprocessedDocs, k)
+				visible.Add(k)
+			}
+			if hasNext {
+				_ = timer.Reset(next.Sub(now))
+				timerArmed = true
+			}
+
+			changedIDs, err := w.processChanges(visible)
 			if err != nil {
 				return err
 			} else if changedIDs.IsEmpty() {
@@ -2384,6 +2410,7 @@ func (w *docWatcher) loop(docKeys []docKey) error {
 		return tomb.ErrDying
 	}
 	out := w.out
+	n := 1
 	for {
 		select {
 		case <-w.tomb.Dying():
@@ -2394,9 +2421,15 @@ func (w *docWatcher) loop(docKeys []docKey) error {
 			if _, ok := collect(ch, in, w.tomb.Dying()); !ok {
 				return tomb.ErrDying
 			}
+			// TODO(quiescence): reimplement quiescence
+			// increment the number of notifications to send.
+			n++
 			out = w.out
 		case out <- struct{}{}:
-			out = nil
+			n--
+			if n == 0 {
+				out = nil
+			}
 		}
 	}
 }
@@ -2909,6 +2942,8 @@ func (w *collectionWatcher) loop() error {
 			}
 			if len(changes) > 0 {
 				out = w.sink
+			} else {
+				out = nil
 			}
 		case out <- changes:
 			changes = []string{}

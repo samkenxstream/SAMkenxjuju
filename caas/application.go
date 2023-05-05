@@ -43,9 +43,6 @@ type Application interface {
 	// Service returns the service associated with the application.
 	Service() (*Service, error)
 
-	// Upgrade upgrades the app to the specified version.
-	Upgrade(version.Number) error
-
 	ServiceInterface
 }
 
@@ -100,6 +97,13 @@ type ApplicationConfig struct {
 
 	// Containers is the list of containers that make up the container (excluding uniter and init containers).
 	Containers map[string]ContainerConfig
+
+	// ExistingContainers is a list of names for containers which will be added
+	// to the application pod spec outside the ApplicationPodSpec method.
+	// These containers will be added to the JUJU_CONTAINER_NAMES env variable
+	// in the charm container, but we will not create new container specs for
+	// them, as they are assumed to already exist.
+	ExistingContainers []string
 
 	// IntroductionSecret
 	IntroductionSecret string

@@ -49,6 +49,7 @@ func (s *AddRemoteRelationSuiteNewAPI) TestAddRelationToOneRemoteApplication(c *
 			},
 			ApplicationAlias: "applicationname2",
 			Macaroon:         s.mac,
+			AuthToken:        "auth-token",
 			ControllerInfo: &crossmodel.ControllerInfo{
 				ControllerTag: testing.ControllerTag,
 				Addrs:         []string{"192.168.1.0"},
@@ -70,6 +71,7 @@ func (s *AddRemoteRelationSuiteNewAPI) TestAddRelationAnyRemoteApplication(c *gc
 			},
 			ApplicationAlias: "applicationname2",
 			Macaroon:         s.mac,
+			AuthToken:        "auth-token",
 			ControllerInfo: &crossmodel.ControllerInfo{
 				ControllerTag: testing.ControllerTag,
 				Addrs:         []string{"192.168.1.0"},
@@ -167,7 +169,7 @@ func (s *AddRelationValidationSuite) assertInvalidEndpoint(c *gc.C, endpoint, ms
 	c.Assert(err, gc.ErrorMatches, msg)
 }
 
-// baseAddRemoteRelationSuite contains common functionality for add-relation cmd tests
+// baseAddRemoteRelationSuite contains common functionality for integrate cmd tests
 // that mock out api client.
 type baseAddRemoteRelationSuite struct {
 	jujutesting.RepoSuite
@@ -206,11 +208,11 @@ func (s *baseAddRemoteRelationSuite) assertFailAddRelationTwoRemoteApplications(
 	c.Assert(err, gc.ErrorMatches, "providing more than one remote endpoints not supported")
 }
 
-// mockAddRelationAPI contains a stub api used for add-relation cmd tests.
+// mockAddRelationAPI contains a stub api used for integrate cmd tests.
 type mockAddRelationAPI struct {
 	jtesting.Stub
 
-	// addRelation can be defined by tests to test different add-relation outcomes.
+	// addRelation can be defined by tests to test different integrate outcomes.
 	addRelation func(endpoints, viaCidrs []string) (*params.AddRelationResults, error)
 
 	mac *macaroon.Macaroon
@@ -238,7 +240,8 @@ func (m *mockAddRelationAPI) GetConsumeDetails(url string) (params.ConsumeOfferD
 			OfferName: "hosted-mysql",
 			OfferURL:  "bob/prod.hosted-mysql",
 		},
-		Macaroon: m.mac,
+		Macaroon:  m.mac,
+		AuthToken: "auth-token",
 		ControllerInfo: &params.ExternalControllerInfo{
 			ControllerTag: testing.ControllerTag.String(),
 			Addrs:         []string{"192.168.1.0"},

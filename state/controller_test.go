@@ -4,10 +4,12 @@
 package state_test
 
 import (
+	"time"
+
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	gitjujutesting "github.com/juju/testing"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
@@ -40,12 +42,12 @@ func (s *ControllerSuite) TestControllerAndModelConfigInitialisation(c *gc.C) {
 		controller.AutocertDNSNameKey,
 		controller.CAASImageRepo,
 		controller.CAASOperatorImagePath,
-		controller.CharmStoreURL,
 		controller.ControllerAPIPort,
 		controller.ControllerName,
 		controller.Features,
 		controller.IdentityURL,
 		controller.IdentityPublicKey,
+		controller.LoginTokenRefreshURL,
 		controller.JujuDBSnapChannel,
 		controller.JujuHASpace,
 		controller.JujuManagementSpace,
@@ -61,13 +63,13 @@ func (s *ControllerSuite) TestControllerAndModelConfigInitialisation(c *gc.C) {
 		controller.PublicDNSAddress,
 		controller.MaxCharmStateSize,
 		controller.MaxAgentStateSize,
-		controller.NonSyncedWritesToRaftLog,
-		controller.BatchRaftFSM,
 		controller.MigrationMinionWaitMax,
 		controller.AgentLogfileMaxBackups,
 		controller.AgentLogfileMaxSize,
 		controller.ControllerResourceDownloadLimit,
 		controller.ApplicationResourceDownloadLimit,
+		controller.QueryTracingEnabled,
+		controller.QueryTracingThreshold,
 	)
 	for _, controllerAttr := range controller.ControllerOnlyConfigAttributes {
 		v, ok := controllerSettings.Get(controllerAttr)
@@ -95,7 +97,7 @@ func (s *ControllerSuite) TestControllerConfig(c *gc.C) {
 
 func (s *ControllerSuite) TestPing(c *gc.C) {
 	c.Assert(s.Controller.Ping(), gc.IsNil)
-	gitjujutesting.MgoServer.Restart()
+	mgotesting.MgoServer.Restart()
 	c.Assert(s.Controller.Ping(), gc.NotNil)
 }
 
@@ -110,7 +112,9 @@ func (s *ControllerSuite) TestUpdateControllerConfig(c *gc.C) {
 	err = s.State.UpdateControllerConfig(map[string]interface{}{
 		controller.AuditingEnabled:     true,
 		controller.AuditLogCaptureArgs: false,
+		controller.AuditLogMaxBackups:  "10",
 		controller.PublicDNSAddress:    "controller.test.com:1234",
+		controller.APIPortOpenDelay:    "100ms",
 	}, nil)
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -119,7 +123,9 @@ func (s *ControllerSuite) TestUpdateControllerConfig(c *gc.C) {
 
 	c.Assert(newCfg.AuditingEnabled(), gc.Equals, true)
 	c.Assert(newCfg.AuditLogCaptureArgs(), gc.Equals, false)
+	c.Assert(newCfg.AuditLogMaxBackups(), gc.Equals, 10)
 	c.Assert(newCfg.PublicDNSAddress(), gc.Equals, "controller.test.com:1234")
+	c.Assert(newCfg.APIPortOpenDelay(), gc.Equals, 100*time.Millisecond)
 }
 
 func (s *ControllerSuite) TestUpdateControllerConfigRemoveYieldsDefaults(c *gc.C) {
@@ -183,7 +189,7 @@ func (s *ControllerSuite) TestUpdateControllerConfigRejectsSpaceWithoutAddresses
 	_, err := s.State.AddSpace("mgmt-space", "", nil, false)
 	c.Assert(err, jc.ErrorIsNil)
 
-	m, err := s.State.AddMachine("quantal", state.JobManageModel, state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel, state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(m.SetMachineAddresses(network.NewSpaceAddress("192.168.9.9")), jc.ErrorIsNil)
 
@@ -198,7 +204,7 @@ func (s *ControllerSuite) TestUpdateControllerConfigAcceptsSpaceWithAddresses(c 
 	sp, err := s.State.AddSpace("mgmt-space", "", nil, false)
 	c.Assert(err, jc.ErrorIsNil)
 
-	m, err := s.State.AddMachine("quantal", state.JobManageModel, state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel, state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 
 	addr := network.NewSpaceAddress("192.168.9.9")
@@ -227,9 +233,9 @@ func (s *ControllerSuite) TestControllerInfo(c *gc.C) {
 }
 
 func (s *ControllerSuite) TestSetMachineAddressesControllerCharm(c *gc.C) {
-	controller, err := s.State.AddMachine("quantal", state.JobManageModel, state.JobHostUnits)
+	controller, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel, state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
-	worker, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	worker, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 
 	controllerApp := s.AddTestingApplication(c, "controller", s.AddTestingCharm(c, "juju-controller"))

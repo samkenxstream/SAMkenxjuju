@@ -6,11 +6,11 @@ package deployer
 import (
 	"strconv"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/resources"
 	resourcecmd "github.com/juju/juju/cmd/juju/resource"
 	"github.com/juju/juju/cmd/modelcmd"
@@ -20,7 +20,6 @@ import (
 type DeployResourcesFunc func(
 	applicationID string,
 	chID resources.CharmID,
-	csMac *macaroon.Macaroon,
 	filesAndRevisions map[string]string,
 	resources map[string]charmresource.Meta,
 	conn base.APICallCloser,
@@ -33,8 +32,8 @@ type DeployResourcesFunc func(
 func DeployResources(
 	applicationID string,
 	chID resources.CharmID,
-	csMac *macaroon.Macaroon,
 	filesAndRevisions map[string]string,
+	// for refresh, current resources are added here.
 	res map[string]charmresource.Meta,
 	conn base.APICallCloser,
 	filesystem modelcmd.Filesystem,
@@ -62,14 +61,13 @@ func DeployResources(
 	}
 
 	ids, err = resourcecmd.DeployResources(resourcecmd.DeployResourcesArgs{
-		ApplicationID:      applicationID,
-		CharmID:            chID,
-		CharmStoreMacaroon: csMac,
-		ResourceValues:     filenames,
-		Revisions:          revisions,
-		ResourcesMeta:      res,
-		Client:             &deployClient{apiClient},
-		Filesystem:         filesystem,
+		ApplicationID:  applicationID,
+		CharmID:        chID,
+		ResourceValues: filenames,
+		Revisions:      revisions,
+		ResourcesMeta:  res,
+		Client:         &deployClient{apiClient},
+		Filesystem:     filesystem,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -82,11 +80,55 @@ type deployClient struct {
 }
 
 // AddPendingResources adds pending metadata for store-based resources.
-func (cl *deployClient) AddPendingResources(applicationID string, chID resources.CharmID, csMac *macaroon.Macaroon, res []charmresource.Resource) ([]string, error) {
+func (cl *deployClient) AddPendingResources(applicationID string, chID resources.CharmID, res []charmresource.Resource) ([]string, error) {
 	return cl.Client.AddPendingResources(resources.AddPendingResourcesArgs{
-		ApplicationID:      applicationID,
-		CharmID:            chID,
-		CharmStoreMacaroon: csMac,
-		Resources:          res,
+		ApplicationID: applicationID,
+		CharmID:       chID,
+		Resources:     res,
 	})
+}
+
+type UploadExistingPendingResourcesFunc func(appName string,
+	pendingResources []application.PendingResourceUpload,
+	conn base.APICallCloser,
+	filesystem modelcmd.Filesystem) error
+
+// UploadExistingPendingResources uploads local resources. Used
+// after DeployFromRepository, where the resources have been added
+// to the controller.
+// Called after AddApplication so no pending resource IDs are
+// necessary, see juju attach for more examples.
+func UploadExistingPendingResources(
+	appName string,
+	pendingResources []application.PendingResourceUpload,
+	conn base.APICallCloser,
+	filesystem modelcmd.Filesystem) error {
+
+	if pendingResources == nil {
+		return nil
+	}
+	resourceApiClient, err := resources.NewClient(conn)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for _, pendingResUpload := range pendingResources {
+		t, typeParseErr := charmresource.ParseType(pendingResUpload.Type)
+		if typeParseErr != nil {
+			return errors.Annotatef(typeParseErr, "invalid type %v for pending resource %v",
+				pendingResUpload.Type, pendingResUpload.Name)
+		}
+
+		r, openResErr := resourcecmd.OpenResource(pendingResUpload.Filename, t, filesystem.Open)
+		if openResErr != nil {
+			return errors.Annotatef(openResErr, "unable to open resource %v", pendingResUpload.Name)
+		}
+
+		uploadErr := resourceApiClient.Upload(appName,
+			pendingResUpload.Name, pendingResUpload.Filename, "", r)
+
+		if uploadErr != nil {
+			return errors.Trace(uploadErr)
+		}
+	}
+	return nil
 }

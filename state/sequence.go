@@ -7,8 +7,8 @@ import (
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
 )
 
 type sequenceDoc struct {
@@ -28,7 +28,7 @@ func sequence(mb modelBackend, name string) (int, error) {
 		Update: bson.M{
 			"$set": bson.M{
 				"name":       name,
-				"model-uuid": mb.modelUUID(),
+				"model-uuid": mb.ModelUUID(),
 			},
 			"$inc": bson.M{"counter": 1},
 		},
@@ -67,7 +67,7 @@ func resetSequence(mb modelBackend, name string) error {
 func sequenceWithMin(mb modelBackend, name string, minVal int) (int, error) {
 	sequences, closer := mb.db().GetRawCollection(sequenceC)
 	defer closer()
-	updater := newDbSeqUpdater(sequences, mb.modelUUID(), name)
+	updater := newDbSeqUpdater(sequences, mb.ModelUUID(), name)
 	return updateSeqWithMin(updater, minVal)
 }
 

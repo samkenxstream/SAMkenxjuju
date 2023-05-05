@@ -4,7 +4,6 @@
 package featuretests
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,6 +27,7 @@ import (
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/watchertest"
 	"github.com/juju/juju/juju/sockets"
+	_ "github.com/juju/juju/secrets/provider/all"
 	"github.com/juju/juju/state"
 	coretesting "github.com/juju/juju/testing"
 	"github.com/juju/juju/testing/factory"
@@ -102,7 +102,7 @@ func (s *CAASOperatorSuite) primeOperator(c *gc.C, app *state.Application) {
 	}
 	data, err := info.Marshal()
 	c.Assert(err, jc.ErrorIsNil)
-	err = ioutil.WriteFile(file, data, 0644)
+	err = os.WriteFile(file, data, 0644)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -191,6 +191,7 @@ var (
 		"hook-retry-strategy",
 		"operator",
 		"proxy-config-updater",
+		"secret-drain-worker",
 	}
 )
 
@@ -232,7 +233,7 @@ func (s *CAASOperatorSuite) TestWorkers(c *gc.C) {
 
 	matcher := agenttest.NewWorkerMatcher(c, tracker, a.Tag().String(),
 		append(alwaysCAASWorkers, notMigratingCAASWorkers...))
-	agenttest.WaitMatch(c, matcher.Check, coretesting.LongWait, s.BackingState.StartSync)
+	agenttest.WaitMatch(c, matcher.Check, coretesting.LongWait)
 }
 
 type mockContainerStartWatcher struct{}

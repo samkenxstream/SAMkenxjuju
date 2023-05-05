@@ -9,15 +9,15 @@ import (
 	"sort"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
 
@@ -75,8 +75,8 @@ type unitDoc struct {
 	DocID                  string `bson:"_id"`
 	Name                   string `bson:"name"`
 	ModelUUID              string `bson:"model-uuid"`
+	Base                   Base   `bson:"base"`
 	Application            string
-	Series                 string
 	CharmURL               *string
 	Principal              string
 	Subordinates           []string
@@ -120,7 +120,11 @@ func (u *Unit) ContainerInfo() (CloudContainer, error) {
 // ShouldBeAssigned returns whether the unit should be assigned to a machine.
 // IAAS models require units to be assigned.
 func (u *Unit) ShouldBeAssigned() bool {
-	return u.modelType != ModelTypeCAAS
+	return !u.isCaas()
+}
+
+func (u *Unit) isCaas() bool {
+	return u.modelType == ModelTypeCAAS
 }
 
 // IsSidecar returns true when using new CAAS charms in sidecar mode.
@@ -159,9 +163,9 @@ func (u *Unit) ApplicationName() string {
 	return u.doc.Application
 }
 
-// Series returns the deployed charm's series.
-func (u *Unit) Series() string {
-	return u.doc.Series
+// Base returns the deployed charm's base.
+func (u *Unit) Base() Base {
+	return u.doc.Base
 }
 
 // String returns the unit as string.
@@ -577,6 +581,9 @@ func (op *DestroyUnitOperation) Done(err error) error {
 		}
 		op.AddError(errors.Errorf("force erase unit's %q history proceeded despite encountering ERROR %v", op.unit.globalKey(), err))
 	}
+	if err := op.deleteSecrets(); err != nil {
+		logger.Errorf("cannot delete secrets for unit %q: %v", op.unit, err)
+	}
 	return nil
 }
 
@@ -599,6 +606,20 @@ func (op *DestroyUnitOperation) eraseHistory() error {
 		if op.FatalError(one) {
 			return one
 		}
+	}
+	return nil
+}
+
+func (op *DestroyUnitOperation) deleteSecrets() error {
+	ownedURIs, err := op.unit.st.referencedSecrets(op.unit.Tag(), "owner-tag")
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if _, err := op.unit.st.deleteSecrets(ownedURIs); err != nil {
+		return errors.Annotatef(err, "deleting owned secrets for %q", op.unit.Name())
+	}
+	if err := op.unit.st.RemoveSecretConsumer(op.unit.Tag()); err != nil {
+		return errors.Annotatef(err, "deleting secret consumer records for %q", op.unit.Name())
 	}
 	return nil
 }
@@ -1049,7 +1070,7 @@ func (op *RemoveUnitOperation) removeOps() (ops []txn.Op, err error) {
 	// EnsureDead does not require that it already be Dying, so this is the
 	// only point at which we can safely backstop lp:1233457 and mitigate
 	// the impact of unit agent bugs that leave relation scopes occupied).
-	relations, err := applicationRelations(op.unit.st, op.unit.doc.Application)
+	relations, err := matchingRelations(op.unit.st, op.unit.doc.Application)
 	if op.FatalError(err) {
 		return nil, err
 	} else {
@@ -1120,7 +1141,7 @@ type relationPredicate func(ru *RelationUnit) (bool, error)
 
 // relations implements RelationsJoined and RelationsInScope.
 func (u *Unit) relations(predicate relationPredicate) ([]*Relation, error) {
-	candidates, err := applicationRelations(u.st, u.doc.Application)
+	candidates, err := matchingRelations(u.st, u.doc.Application)
 	if err != nil {
 		return nil, err
 	}
@@ -1365,6 +1386,7 @@ func (u *Unit) StatusHistory(filter status.StatusHistoryFilter) ([]status.Status
 		db:        u.st.db(),
 		globalKey: u.globalKey(),
 		filter:    filter,
+		clock:     u.st.clock(),
 	}
 	return statusHistory(args)
 }
@@ -1439,12 +1461,32 @@ func (u *Unit) SetStatus(unitStatus status.StatusInfo) error {
 }
 
 // OpenedPortRanges returns a UnitPortRanges object that can be used to query
+// and/or mutate the port ranges opened by the unit.
+func (u *Unit) OpenedPortRanges() (UnitPortRanges, error) {
+	if u.ShouldBeAssigned() {
+		return u.openedPortRangesForIAAS()
+	}
+	isSidecar, err := u.IsSidecar()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if u.isCaas() && !isSidecar {
+		return nil, errors.NotSupportedf("open/close ports for %q", u.ApplicationName())
+	}
+	return u.openedPortRangesForSidecar()
+}
+
+func (u *Unit) openedPortRangesForSidecar() (UnitPortRanges, error) {
+	return getUnitPortRanges(u.st, u.ApplicationName(), u.Name())
+}
+
+// openedPortRangesForIAAS returns a UnitPortRanges object that can be used to query
 // and/or mutate the port ranges opened by the unit on the machine it is
 // assigned to.
 //
 // Calls to OpenPortRanges will return back an error if the unit is not assigned
 // to a machine.
-func (u *Unit) OpenedPortRanges() (UnitPortRanges, error) {
+func (u *Unit) openedPortRangesForIAAS() (UnitPortRanges, error) {
 	machineID, err := u.AssignedMachineId()
 	if err != nil {
 		return nil, errors.Annotatef(err, "cannot retrieve ports for unit %q", u.Name())
@@ -1679,7 +1721,7 @@ func (u *Unit) assignToMachineOps(m *Machine, unused bool) ([]txn.Op, error) {
 		return nil, errors.Trace(err)
 	}
 	if err := validateUnitMachineAssignment(
-		m, u.doc.Series, u.doc.Principal != "", storagePools,
+		m, u.doc.Base, u.doc.Principal != "", storagePools,
 	); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1737,7 +1779,7 @@ func (u *Unit) assignToMachineOps(m *Machine, unused bool) ([]txn.Op, error) {
 // to a specified machine.
 func validateUnitMachineAssignment(
 	m *Machine,
-	series string,
+	base Base,
 	isSubordinate bool,
 	storagePools set.Strings,
 ) (err error) {
@@ -1747,8 +1789,8 @@ func validateUnitMachineAssignment(
 	if isSubordinate {
 		return fmt.Errorf("unit is a subordinate")
 	}
-	if series != m.doc.Series {
-		return fmt.Errorf("series does not match")
+	if !base.compatibleWith(m.doc.Base) {
+		return fmt.Errorf("base does not match: unit has %q, machine has %q", base.DisplayString(), m.doc.Base.DisplayString())
 	}
 	canHost := false
 	for _, j := range m.doc.Jobs {
@@ -2088,7 +2130,7 @@ func (u *Unit) AssignToNewMachineOrContainer() (err error) {
 			}
 		}
 		template := MachineTemplate{
-			Series:      u.doc.Series,
+			Base:        u.doc.Base,
 			Constraints: *cons,
 			Jobs:        []MachineJob{JobHostUnits},
 		}
@@ -2146,7 +2188,7 @@ func (u *Unit) assignToNewMachine(placement string) error {
 			return nil, errors.Trace(err)
 		}
 		template := MachineTemplate{
-			Series:                u.doc.Series,
+			Base:                  u.doc.Base,
 			Constraints:           *cons,
 			Jobs:                  []MachineJob{JobHostUnits},
 			Placement:             placement,
@@ -2225,11 +2267,11 @@ func unitStorageParams(u *Unit) (*storageParams, error) {
 		}
 		storageInstances = append(storageInstances, storage)
 	}
-	return storageParamsForUnit(sb, storageInstances, u.UnitTag(), u.Series(), ch.Meta())
+	return storageParamsForUnit(sb, storageInstances, u.UnitTag(), u.Base(), ch.Meta())
 }
 
 func storageParamsForUnit(
-	sb *storageBackend, storageInstances []*storageInstance, tag names.UnitTag, series string, chMeta *charm.Meta,
+	sb *storageBackend, storageInstances []*storageInstance, tag names.UnitTag, base Base, chMeta *charm.Meta,
 ) (*storageParams, error) {
 
 	var volumes []HostVolumeParams
@@ -2238,7 +2280,7 @@ func storageParamsForUnit(
 	filesystemAttachments := make(map[names.FilesystemTag]FilesystemAttachmentParams)
 	for _, storage := range storageInstances {
 		storageParams, err := storageParamsForStorageInstance(
-			sb, chMeta, tag, series, storage,
+			sb, chMeta, base.OS, storage,
 		)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -2270,8 +2312,7 @@ func storageParamsForUnit(
 func storageParamsForStorageInstance(
 	sb *storageBackend,
 	charmMeta *charm.Meta,
-	unit names.UnitTag,
-	series string,
+	osName string,
 	storage *storageInstance,
 ) (*storageParams, error) {
 
@@ -2284,7 +2325,7 @@ func storageParamsForStorageInstance(
 
 	switch storage.Kind() {
 	case StorageKindFilesystem:
-		location, err := FilesystemMountPoint(charmStorage, storage.StorageTag(), series)
+		location, err := FilesystemMountPoint(charmStorage, storage.StorageTag(), osName)
 		if err != nil {
 			return nil, errors.Annotatef(
 				err, "getting filesystem mount point for storage %s",
@@ -2473,7 +2514,7 @@ func (u *Unit) findCleanMachineQuery(requireEmpty bool, cons *constraints.Value)
 
 	terms := bson.D{
 		{"life", Alive},
-		{"series", u.doc.Series},
+		{"base", u.doc.Base},
 		{"jobs", []MachineJob{JobHostUnits}},
 		{"clean", true},
 		{"machineid", bson.D{{"$nin", omitMachineIds}}},
@@ -2520,6 +2561,15 @@ func (u *Unit) findCleanMachineQuery(requireEmpty bool, cons *constraints.Value)
 	}
 	if cons.HasZones() {
 		suitableTerms = append(suitableTerms, bson.DocElem{"availzone", bson.D{{"$in", *cons.Zones}}})
+	}
+	// VirtType is orthogonal to the containertype, i.e. an LXC container can
+	// be a container or a virtual machine. Once KVM is removed, we can drop
+	// the containertype and rely just on the virt-type.
+	if cons.HasVirtType() {
+		suitableTerms = append(suitableTerms, bson.DocElem{"virttype", *cons.VirtType})
+	}
+	if cons.HasImageID() {
+		suitableTerms = append(suitableTerms, bson.DocElem{"imageid", *cons.ImageID})
 	}
 	if len(suitableTerms) > 0 {
 		instanceDataCollection, iCloser := db.GetCollection(instanceDataC)
@@ -2991,11 +3041,12 @@ func (g *HistoryGetter) StatusHistory(filter status.StatusHistoryFilter) ([]stat
 		db:        g.st.db(),
 		globalKey: g.globalKey,
 		filter:    filter,
+		clock:     g.st.clock(),
 	}
 	return statusHistory(args)
 }
 
-// UpgradeSeriesStatus returns the upgrade status of the units assigned machine.
+// UpgradeSeriesStatus returns the upgrade status of the unit's assigned machine.
 func (u *Unit) UpgradeSeriesStatus() (model.UpgradeSeriesStatus, string, error) {
 	mID, err := u.AssignedMachineId()
 	if err != nil {
@@ -3019,7 +3070,7 @@ func (u *Unit) UpgradeSeriesStatus() (model.UpgradeSeriesStatus, string, error) 
 		return "", "", errors.NotFoundf("unit %q of machine %q", u.Name(), mID)
 	}
 
-	return sts.Status, lock.ToSeries, nil
+	return sts.Status, lock.ToBase, nil
 }
 
 // SetUpgradeSeriesStatus sets the upgrade status of the units assigned machine.

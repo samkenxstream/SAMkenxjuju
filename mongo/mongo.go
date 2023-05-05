@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -17,9 +16,9 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v3"
 	"github.com/juju/os/v2/series"
-	"github.com/juju/replicaset/v2"
+	"github.com/juju/replicaset/v3"
 	"github.com/juju/utils/v3"
 
 	"github.com/juju/juju/core/network"
@@ -405,7 +404,7 @@ func mongoSnapService(dataDir, configDir, snapChannel string) (MongoSnapService,
 
 	// If we're installing a local snap, then provide an absolute path
 	// as a snap <name>. snap install <name> will then do the Right Thing (TM).
-	files, err := ioutil.ReadDir(path.Join(dataDir, "snap"))
+	files, err := os.ReadDir(path.Join(dataDir, "snap"))
 	if err == nil {
 		for _, fullFileName := range files {
 			_, fileName := path.Split(fullFileName.Name())

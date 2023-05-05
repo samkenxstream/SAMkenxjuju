@@ -1,7 +1,6 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package feature package defines the names of the current feature flags.
 package feature
 
 // TODO (anastasiamac 2015-03-02)
@@ -35,12 +34,6 @@ const Generations = "generations"
 // RawK8sSpec indicates that it's allowed to set k8s spec using raw yaml format.
 const RawK8sSpec = "raw-k8s-spec"
 
-// Secrets enables the secrets feature.
-const Secrets = "secrets"
-
-// RaftAPILeases will switch all lease store management transport, currently
-// handled by Pubsub to facade API interaction.
-const RaftAPILeases = "raft-api-leases"
-
-// LoggingOutput enables the ability to configure different logging backends.
-const LoggingOutput = "logging-output"
+// ServerSideCharmDeploy indicates that server side deploy of repository charms
+// will be done.
+const ServerSideCharmDeploy = "server-side-charm-deploy"

@@ -19,9 +19,12 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/retry"
 	"github.com/juju/utils/v3"
+	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/container/lxd"
+	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/utils/proxy"
@@ -33,7 +36,7 @@ import (
 // Server defines an interface of all localized methods that the environment
 // and provider utilizes.
 type Server interface {
-	FindImage(string, string, []lxd.ServerSpec, bool, environs.StatusCallbackFunc) (lxd.SourcedImage, error)
+	FindImage(series.Base, string, instance.VirtType, []lxd.ServerSpec, bool, environs.StatusCallbackFunc) (lxd.SourcedImage, error)
 	GetServer() (server *lxdapi.Server, ETag string, err error)
 	ServerVersion() string
 	GetConnectionInfo() (info *lxdclient.ConnectionInfo, err error)
@@ -82,8 +85,8 @@ type Server interface {
 	HasExtension(extension string) (exists bool)
 	GetNetworks() ([]lxdapi.Network, error)
 	GetNetworkState(name string) (*lxdapi.NetworkState, error)
-	GetContainer(name string) (*lxdapi.Container, string, error)
-	GetContainerState(name string) (*lxdapi.ContainerState, string, error)
+	GetInstance(name string) (*lxdapi.Instance, string, error)
+	GetInstanceState(name string) (*lxdapi.InstanceState, string, error)
 
 	// UseProject ensures that this server will use the input project.
 	// See: https://linuxcontainers.org/lxd/docs/master/projects.
@@ -129,6 +132,10 @@ func (interfaceAddress) InterfaceAddress(interfaceName string) (string, error) {
 	return utils.GetAddressForInterface(interfaceName)
 }
 
+// NewHTTPClientFunc is responsible for generating a new http client every time
+// it is called.
+type NewHTTPClientFunc func() *http.Client
+
 type serverFactory struct {
 	newLocalServerFunc  func() (Server, error)
 	newRemoteServerFunc func(lxd.ServerSpec) (Server, error)
@@ -137,11 +144,14 @@ type serverFactory struct {
 	interfaceAddress    InterfaceAddress
 	clock               clock.Clock
 	mutex               sync.Mutex
-	httpClient          *http.Client
+	newHTTPClientFunc   NewHTTPClientFunc
 }
 
 // NewServerFactory creates a new ServerFactory with sane defaults.
-func NewServerFactory(httpClient *http.Client) ServerFactory {
+// A NewHTTPClientFunc is taken as an argument to address LP2003135. Previously
+// we reused the same http client for all LXD connections. This can't happen
+// as the LXD client code modifies the HTTP server.
+func NewServerFactory(newHttpFn NewHTTPClientFunc) ServerFactory {
 	return &serverFactory{
 		newLocalServerFunc: func() (Server, error) {
 			return lxd.NewLocalServer()
@@ -149,8 +159,8 @@ func NewServerFactory(httpClient *http.Client) ServerFactory {
 		newRemoteServerFunc: func(spec lxd.ServerSpec) (Server, error) {
 			return lxd.NewRemoteServer(spec)
 		},
-		interfaceAddress: interfaceAddress{},
-		httpClient:       httpClient,
+		interfaceAddress:  interfaceAddress{},
+		newHTTPClientFunc: newHttpFn,
 	}
 }
 
@@ -208,7 +218,7 @@ func (s *serverFactory) RemoteServer(spec environscloudspec.CloudSpec) (Server, 
 
 	serverSpec := lxd.NewServerSpec(spec.Endpoint, serverCert, clientCert).
 		WithProxy(proxy.DefaultConfig.GetProxy).
-		WithHTTPClient(s.httpClient)
+		WithHTTPClient(s.newHTTPClientFunc())
 
 	svr, err := s.newRemoteServerFunc(serverSpec)
 	if err == nil {
@@ -235,7 +245,7 @@ func (s *serverFactory) InsecureRemoteServer(spec environscloudspec.CloudSpec) (
 	serverSpec := lxd.NewInsecureServerSpec(spec.Endpoint).
 		WithClientCertificate(clientCert).
 		WithSkipGetServer(true).
-		WithHTTPClient(s.httpClient)
+		WithHTTPClient(s.newHTTPClientFunc())
 
 	svr, err := s.newRemoteServerFunc(serverSpec)
 	return svr, errors.Trace(err)
@@ -349,16 +359,13 @@ func (s *serverFactory) validateServer(svr Server) error {
 		}
 	}
 
-	// One final request, to make sure we grab the server information for
-	// validating the api version
-	serverInfo, _, err := svr.GetServer()
-	if err != nil {
+	apiVersion := svr.ServerVersion()
+	err := ValidateAPIVersion(apiVersion)
+	if errors.Is(err, errors.NotSupported) {
 		return errors.Trace(err)
 	}
-
-	apiVersion := serverInfo.APIVersion
-	if msg, ok := isSupportedAPIVersion(apiVersion); !ok {
-		logger.Warningf(msg)
+	if err != nil {
+		logger.Warningf(err.Error())
 		logger.Warningf("trying to use unsupported LXD API version %q", apiVersion)
 	} else {
 		logger.Tracef("using LXD API version %q", apiVersion)
@@ -374,23 +381,39 @@ func (s *serverFactory) Clock() clock.Clock {
 	return s.clock
 }
 
-// isSupportedAPIVersion defines what API versions we support.
-func isSupportedAPIVersion(version string) (msg string, ok bool) {
-	versionParts := strings.Split(version, ".")
+// parseAPIVersion parses the LXD API version string.
+func parseAPIVersion(s string) (version.Number, error) {
+	versionParts := strings.Split(s, ".")
 	if len(versionParts) < 2 {
-		return fmt.Sprintf("LXD API version %q: expected format <major>.<minor>", version), false
+		return version.Zero, errors.NewNotValid(nil, fmt.Sprintf("LXD API version %q: expected format <major>.<minor>", s))
 	}
-
 	major, err := strconv.Atoi(versionParts[0])
 	if err != nil {
-		return fmt.Sprintf("LXD API version %q: unexpected major number: %v", version, err), false
+		return version.Zero, errors.NotValidf("major version number  %v", versionParts[0])
 	}
-
-	if major < 1 {
-		return fmt.Sprintf("LXD API version %q: expected major version 1 or later", version), false
+	minor, err := strconv.Atoi(versionParts[1])
+	if err != nil {
+		return version.Zero, errors.NotValidf("minor version number  %v", versionParts[1])
 	}
+	return version.Number{Major: major, Minor: minor}, nil
+}
 
-	return "", true
+// minLXDVersion defines the min version of LXD we support.
+var minLXDVersion = version.Number{Major: 5, Minor: 0}
+
+// ValidateAPIVersion validates the LXD version.
+func ValidateAPIVersion(version string) error {
+	ver, err := parseAPIVersion(version)
+	if err != nil {
+		return err
+	}
+	logger.Tracef("current LXD version %q, min LXD version %q", ver, minLXDVersion)
+	if ver.Compare(minLXDVersion) < 0 {
+		return errors.NewNotSupported(nil,
+			fmt.Sprintf("LXD version has to be at least %q, but current version is only %q", minLXDVersion, ver),
+		)
+	}
+	return nil
 }
 
 func getMessageFromErr(err error) (bool, string) {

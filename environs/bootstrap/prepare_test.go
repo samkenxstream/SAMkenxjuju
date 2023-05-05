@@ -98,8 +98,8 @@ func (s *PrepareSuite) assertPrepare(c *gc.C, skipVerify bool) {
 			controller.SetNUMAControlPolicyKey: true,
 		},
 		Config: map[string]interface{}{
-			"default-series":            "jammy",
 			"firewall-mode":             "instance",
+			"secret-backend":            "auto",
 			"ssl-hostname-verification": true,
 			"logging-config":            "<root>=INFO",
 			"secret":                    "pork",

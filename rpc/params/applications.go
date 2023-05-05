@@ -37,8 +37,7 @@ type CharmOrigin struct {
 	Branch   *string `json:"branch,omitempty"`
 
 	Architecture string `json:"architecture,omitempty"`
-	OS           string `json:"os,omitempty"`
-	Series       string `json:"series,omitempty"`
+	Base         Base   `json:"base,omitempty"`
 
 	// InstanceKey is a unique string associated with the application. To
 	// assist with keeping KPI data in charmhub, it must be the same for every
@@ -51,7 +50,6 @@ type CharmOrigin struct {
 // call.
 type ApplicationDeploy struct {
 	ApplicationName  string                         `json:"application"`
-	Series           string                         `json:"series"`
 	CharmURL         string                         `json:"charm-url"`
 	CharmOrigin      *CharmOrigin                   `json:"charm-origin,omitempty"`
 	Channel          string                         `json:"channel"`
@@ -74,7 +72,7 @@ type ApplicationUpdate struct {
 	ApplicationName string             `json:"application"`
 	CharmURL        string             `json:"charm-url"`
 	ForceCharmURL   bool               `json:"force-charm-url"`
-	ForceSeries     bool               `json:"force-series"`
+	ForceBase       bool               `json:"force-base"`
 	Force           bool               `json:"force"`
 	MinUnits        *int               `json:"min-units,omitempty"`
 	SettingsStrings map[string]string  `json:"settings,omitempty"` // Takes precedence over yaml entries if both are present.
@@ -121,9 +119,9 @@ type ApplicationSetCharm struct {
 	// ForceUnits forces the upgrade on units in an error state.
 	ForceUnits bool `json:"force-units"`
 
-	// ForceSeries forces the use of the charm even if it doesn't match the
+	// ForceBase forces the use of the charm even if it doesn't match the
 	// series of the unit.
-	ForceSeries bool `json:"force-series"`
+	ForceBase bool `json:"force-base"`
 
 	// ResourceIDs is a map of resource names to resource IDs to activate during
 	// the upgrade.
@@ -206,7 +204,7 @@ type ApplicationGetResults struct {
 	CharmConfig       map[string]interface{} `json:"config"`
 	ApplicationConfig map[string]interface{} `json:"application-config,omitempty"`
 	Constraints       constraints.Value      `json:"constraints"`
-	Series            string                 `json:"series"`
+	Base              Base                   `json:"base"`
 	Channel           string                 `json:"channel"`
 	EndpointBindings  map[string]string      `json:"endpoint-bindings,omitempty"`
 }
@@ -296,8 +294,34 @@ type ApplicationDestroy struct {
 
 // DestroyApplicationsParams holds bulk parameters for the
 // Application.DestroyApplication call.
+type DestroyApplicationsParamsV15 struct {
+	Applications []DestroyApplicationParamsV15 `json:"applications"`
+}
+
+// DestroyApplicationsParams holds bulk parameters for the
+// Application.DestroyApplication call.
 type DestroyApplicationsParams struct {
 	Applications []DestroyApplicationParams `json:"applications"`
+}
+
+// DestroyApplicationParamsV15 holds parameters for the
+// Application.DestroyApplication call on the v15 facade.
+type DestroyApplicationParamsV15 struct {
+	// ApplicationTag holds the tag of the application to destroy.
+	ApplicationTag string `json:"application-tag"`
+
+	// DestroyStorage controls whether or not storage attached to
+	// units of the application should be destroyed.
+	DestroyStorage bool `json:"destroy-storage,omitempty"`
+
+	// Force controls whether or not the destruction of an application
+	// will be forced, i.e. ignore operational errors.
+	Force bool `json:"force"`
+
+	// MaxWait specifies the amount of time that each step in application removal
+	// will wait before forcing the next step to kick-off. This parameter
+	// only makes sense in combination with 'force' set to 'true'.
+	MaxWait *time.Duration `json:"max-wait,omitempty"`
 }
 
 // DestroyApplicationParams holds parameters for the
@@ -318,6 +342,10 @@ type DestroyApplicationParams struct {
 	// will wait before forcing the next step to kick-off. This parameter
 	// only makes sense in combination with 'force' set to 'true'.
 	MaxWait *time.Duration `json:"max-wait,omitempty"`
+
+	// DryRun specifies whether this should perform this destroy
+	// action or just return what this action will destroy
+	DryRun bool `json:"dry-run,omitempty"`
 }
 
 // DestroyConsumedApplicationsParams holds bulk parameters for the
@@ -434,7 +462,7 @@ type ScaleApplicationInfo struct {
 type ApplicationResult struct {
 	Tag              string                     `json:"tag"`
 	Charm            string                     `json:"charm,omitempty"`
-	Series           string                     `json:"series,omitempty"`
+	Base             Base                       `json:"base,omitempty"`
 	Channel          string                     `json:"channel,omitempty"`
 	Constraints      constraints.Value          `json:"constraints,omitempty"`
 	Principal        bool                       `json:"principal"`
@@ -516,4 +544,140 @@ type ExposeInfoResult struct {
 	// with pre 2.9 clients, if this field is empty, all opened ports
 	// for the application will be exposed to 0.0.0.0/0.
 	ExposedEndpoints map[string]ExposedEndpoint `json:"exposed-endpoints,omitempty"`
+}
+
+// DeployFromRepositoryArgs holds arguments for multiple charms
+// to be deployed.
+type DeployFromRepositoryArgs struct {
+	Args []DeployFromRepositoryArg
+}
+
+// DeployFromRepositoryArg is all data required to deploy a
+// charm from a repository.
+type DeployFromRepositoryArg struct {
+	// CharmName is a string identifying the name of the thing to deploy.
+	// Required.
+	CharmName string
+
+	// ApplicationName is the name to give the application. Optional. By
+	// default, the charm name and the application name will be the same.
+	ApplicationName string
+
+	// AttachStorage contains IDs of existing storage that should be
+	// attached to the application unit that will be deployed. This
+	// may be non-empty only if NumUnits is 1.
+	AttachStorage []string
+
+	// Base describes the OS base intended to be used by the charm.
+	Base *Base `json:"base,omitempty"`
+
+	// Channel is the channel in the repository to deploy from.
+	// This is an optional value. Required if revision is provided.
+	// Defaults to “stable” if not defined nor required.
+	Channel *string `json:"channel,omitempty"`
+
+	// ConfigYAML is a string that overrides the default config.yml.
+	ConfigYAML string
+
+	// Cons contains constraints on where units of this application
+	// may be placed.
+	Cons constraints.Value
+
+	// Devices contains Constraints specifying how devices should be
+	// handled.
+	Devices map[string]devices.Constraints
+
+	// DryRun just shows what the deploy would do, including finding the
+	// charm; determining version, channel and base to use; validation
+	// of the config. Does not actually download or deploy the charm.
+	DryRun bool
+
+	// EndpointBindings
+	EndpointBindings map[string]string `json:"endpoint-bindings,omitempty"`
+
+	// Force can be set to true to bypass any checks for charm-specific
+	// requirements ("assumes" sections in charm metadata, supported series,
+	// LXD profile allow list)
+	Force bool `json:"force,omitempty"`
+
+	// NumUnits is the number of units to deploy. Defaults to 1 if no
+	// value provided. Synonymous with scale for kubernetes charms.
+	NumUnits *int `json:"num-units,omitempty"`
+
+	// Placement directives define on which machines the unit(s) must be
+	// created.
+	Placement []*instance.Placement
+
+	// Revision is the charm revision number. Requires the channel
+	// be explicitly set.
+	Revision *int `json:"revision,omitempty"`
+
+	// Resources is a collection of resource names for the
+	// application, with the value being the revision of the
+	// resource to use if default revision is not desired.
+	Resources map[string]string `json:"resources,omitempty"`
+
+	// Storage contains Constraints specifying how storage should be
+	// handled.
+	Storage map[string]storage.Constraints
+
+	//  Trust allows charm to run hooks that require access credentials
+	Trust bool
+}
+
+type DeployFromRepositoryResults struct {
+	Results []DeployFromRepositoryResult
+}
+
+// DeployFromRepositoryResult contains the result of deploying
+// a repository charm.
+type DeployFromRepositoryResult struct {
+	// Errors holds errors accumulated during validation of
+	// deployment, or errors during deployment
+	Errors []*Error
+
+	// Info
+	Info DeployFromRepositoryInfo
+
+	// PendingResourceUploads returns a collection of data
+	// required to upload a specific resource for this charm.
+	// Deploy will validate the resource request against the
+	// charm, but not the upload data. Only resources indicated
+	// as local upload will be included. They have already been
+	// added as Pending.
+	PendingResourceUploads []*PendingResourceUpload
+}
+
+// DeployFromRepositoryInfo describes the charm deployed.
+type DeployFromRepositoryInfo struct {
+	// Architecture is the architecture used to deploy the charm.
+	Architecture string `json:"architecture"`
+	// Base is the base used to deploy the charm.
+	Base Base `json:"base,omitempty"`
+	// Channel is a string representation of the channel used to
+	// deploy the charm.
+	Channel string `json:"channel"`
+	// EffectiveChannel is the channel actually deployed from as determined
+	// by the charmhub response.
+	EffectiveChannel *string `json:"effective-channel,omitempty"`
+	// Is the name of the application deployed. This may vary from
+	// the charm name provided if differs in the metadata.yaml and
+	// no provided on the cli.
+	Name string `json:"name"`
+	// Revision is the revision of the charm deployed.
+	Revision int `json:"revision"`
+}
+
+// PendingResourceUpload holds data required to upload a
+// local resource if required.
+type PendingResourceUpload struct {
+	// Name is the name of the resource.
+	Name string
+
+	// Filename is the name of the file as it exists on disk.
+	// Sometimes referred to as the path.
+	Filename string
+
+	// Type of the resource, a string matching one of the resource.Type
+	Type string
 }

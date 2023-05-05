@@ -4,9 +4,7 @@
 package network_test
 
 import (
-	"io/ioutil"
 	"net"
-	"path/filepath"
 
 	"github.com/juju/collections/set"
 	jc "github.com/juju/testing/checkers"
@@ -17,9 +15,7 @@ import (
 	"github.com/juju/juju/testing"
 )
 
-type InterfaceInfoSuite struct {
-	info corenetwork.InterfaceInfos
-}
+type InterfaceInfoSuite struct{}
 
 var _ = gc.Suite(&InterfaceInfoSuite{})
 
@@ -112,59 +108,32 @@ type NetworkSuite struct {
 var _ = gc.Suite(&NetworkSuite{})
 
 func (s *NetworkSuite) TestFilterBridgeAddresses(c *gc.C) {
-	lxcFakeNetConfig := filepath.Join(c.MkDir(), "lxc-net")
-	// We create an LXC bridge named "foobar", and then put 10.0.3.1,
-	// 10.0.3.4 and 10.0.3.5/24 on that bridge.
-	// We also put 10.0.4.1 and 10.0.5.1/24 onto whatever bridge LXD is
-	// configured to use.
-	// And 192.168.122.1 on virbr0
-	netConf := []byte(`
-  # comments ignored
-LXC_BR= ignored
-LXC_ADDR = "fooo"
- LXC_BRIDGE = " foobar " # detected, spaces stripped
-anything else ignored
-LXC_BRIDGE="ignored"`[1:])
-	err := ioutil.WriteFile(lxcFakeNetConfig, netConf, 0644)
-	c.Assert(err, jc.ErrorIsNil)
-	s.PatchValue(&network.InterfaceByNameAddrs, func(name string) ([]net.Addr, error) {
-		if name == "foobar" {
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(10, 0, 3, 1)},
-				&net.IPAddr{IP: net.IPv4(10, 0, 3, 4)},
-				// Try a CIDR 10.0.3.5/24 as well.
-				&net.IPNet{IP: net.IPv4(10, 0, 3, 5), Mask: net.IPv4Mask(255, 255, 255, 0)},
-			}, nil
-		} else if name == network.DefaultLXDBridge {
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(10, 0, 4, 1)},
-				// Try a CIDR 10.0.5.1/24 as well.
-				&net.IPNet{IP: net.IPv4(10, 0, 5, 1), Mask: net.IPv4Mask(255, 255, 255, 0)},
+	s.PatchValue(&network.AddressesForInterfaceName, func(name string) ([]string, error) {
+		if name == network.DefaultLXDBridge {
+			return []string{
+				"10.0.4.1",
+				"10.0.5.1/24",
 			}, nil
 		} else if name == network.DefaultKVMBridge {
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(192, 168, 122, 1)},
+			return []string{
+				"192.168.122.1",
 			}, nil
 		}
 		c.Fatalf("unknown bridge name: %q", name)
 		return nil, nil
 	})
-	s.PatchValue(&network.LXCNetDefaultConfig, lxcFakeNetConfig)
 
 	inputAddresses := corenetwork.NewMachineAddresses([]string{
 		"127.0.0.1",
 		"2001:db8::1",
 		"10.0.0.1",
-		"10.0.3.1",      // filtered (directly as IP)
-		"10.0.3.3",      // filtered (by the 10.0.3.5/24 CIDR)
-		"10.0.3.5",      // filtered (directly)
-		"10.0.3.4",      // filtered (directly)
 		"10.0.4.1",      // filtered (directly from LXD bridge)
 		"10.0.5.10",     // filtered (from LXD bridge, 10.0.5.1/24)
 		"10.0.6.10",     // unfiltered
 		"192.168.122.1", // filtered (from virbr0 bridge, 192.168.122.1)
 		"192.168.123.42",
-		"localhost", // unfiltered because it isn't an IP address
+		"localhost",    // unfiltered because it isn't an IP address
+		"252.16.134.1", // unfiltered Class E reserved address, used by Fan.
 	}).AsProviderAddresses()
 	filteredAddresses := corenetwork.NewMachineAddresses([]string{
 		"127.0.0.1",
@@ -173,6 +142,7 @@ LXC_BRIDGE="ignored"`[1:])
 		"10.0.6.10",
 		"192.168.123.42",
 		"localhost",
+		"252.16.134.1",
 	}).AsProviderAddresses()
 	c.Assert(network.FilterBridgeAddresses(inputAddresses), jc.DeepEquals, filteredAddresses)
 }

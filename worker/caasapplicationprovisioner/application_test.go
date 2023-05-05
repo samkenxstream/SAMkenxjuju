@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/clock"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
@@ -26,6 +26,7 @@ import (
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/watchertest"
@@ -62,13 +63,14 @@ type testCase struct {
 	brokerApp  *caasmocks.MockApplication
 	unitFacade *mocks.MockCAASUnitProvisionerFacade
 
-	appScaleChan     chan struct{}
-	notifyReady      chan struct{}
-	appStateChan     chan struct{}
-	appChan          chan struct{}
-	appReplicasChan  chan struct{}
-	appTrustHashChan chan []string
-	unitsChan        chan []string
+	appScaleChan         chan struct{}
+	notifyReady          chan struct{}
+	appStateChan         chan struct{}
+	appChan              chan struct{}
+	appReplicasChan      chan struct{}
+	appTrustHashChan     chan []string
+	unitsChan            chan []string
+	provisioningInfoChan chan struct{}
 }
 
 func (s *ApplicationWorkerSuite) getWorker(c *gc.C, name string) (func(...*gomock.Call) worker.Worker, testCase, *gomock.Controller) {
@@ -107,9 +109,9 @@ func (s *ApplicationWorkerSuite) getWorker(c *gc.C, name string) (func(...*gomoc
 		},
 	}
 	s.appProvisioningInfo = api.ProvisioningInfo{
-		Series: "focal",
+		Base: series.MakeDefaultBase("ubuntu", "20.04"),
 		CharmURL: &charm.URL{
-			Schema:   "cs",
+			Schema:   "ch",
 			Name:     "test",
 			Revision: -1,
 		},
@@ -129,6 +131,7 @@ func (s *ApplicationWorkerSuite) getWorker(c *gc.C, name string) (func(...*gomoc
 	tc.appReplicasChan = make(chan struct{}, 1)
 	tc.appTrustHashChan = make(chan []string, 1)
 	tc.unitsChan = make(chan []string, 1)
+	tc.provisioningInfoChan = make(chan struct{}, 1)
 
 	startFunc := func(additionalAssertCalls ...*gomock.Call) worker.Worker {
 		config := caasapplicationprovisioner.AppWorkerConfig{
@@ -164,9 +167,9 @@ func (s *ApplicationWorkerSuite) getWorker(c *gc.C, name string) (func(...*gomoc
 			tc.facade.EXPECT().WatchUnits(name).Return(watchertest.NewMockStringsWatcher(tc.unitsChan), nil),
 			// Initial run - Ensure() for the application.
 			tc.facade.EXPECT().Life(name).Return(life.Alive, nil),
-			tc.facade.EXPECT().WatchApplication(name).Return(watchertest.NewMockNotifyWatcher(tc.appStateChan), nil),
+			tc.facade.EXPECT().WatchProvisioningInfo(name).Return(watchertest.NewMockNotifyWatcher(tc.provisioningInfoChan), nil),
 			tc.facade.EXPECT().ProvisioningInfo(name).Return(s.appProvisioningInfo, nil),
-			tc.facade.EXPECT().CharmInfo("cs:test").Return(s.appCharmInfo, nil),
+			tc.facade.EXPECT().CharmInfo("ch:test").Return(s.appCharmInfo, nil),
 			tc.brokerApp.EXPECT().Exists().Return(caas.DeploymentState{}, nil),
 			tc.facade.EXPECT().ApplicationOCIResources(name).Return(s.ociResources, nil),
 		)
@@ -371,7 +374,7 @@ func (s *ApplicationWorkerSuite) assertWorker(c *gc.C, name string) {
 		tc.facade.EXPECT().ProvisioningInfo(name).DoAndReturn(func(string) (api.ProvisioningInfo, error) {
 			return s.appProvisioningInfo, nil
 		}),
-		tc.facade.EXPECT().CharmInfo("cs:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
+		tc.facade.EXPECT().CharmInfo("ch:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
 			return s.appCharmInfo, nil
 		}),
 		tc.brokerApp.EXPECT().Exists().DoAndReturn(func() (caas.DeploymentState, error) {
@@ -482,8 +485,10 @@ func (s *ApplicationWorkerSuite) assertWorker(c *gc.C, name string) {
 		steps := []func(){
 			// Test replica changes.
 			func() { tc.appReplicasChan <- struct{}{} },
+
 			// Test app state changes.
-			func() { tc.appStateChan <- struct{}{} },
+			func() { tc.provisioningInfoChan <- struct{}{} },
+
 			// Test app changes from cloud.
 			func() { tc.appChan <- struct{}{} },
 			// Test Notify - dying.
@@ -681,7 +686,7 @@ func (s *ApplicationWorkerSuite) TestRefreshApplicationStatusNewUnitsAllocating(
 		tc.facade.EXPECT().ProvisioningInfo("test").DoAndReturn(func(string) (api.ProvisioningInfo, error) {
 			return s.appProvisioningInfo, nil
 		}),
-		tc.facade.EXPECT().CharmInfo("cs:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
+		tc.facade.EXPECT().CharmInfo("ch:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
 			return s.appCharmInfo, nil
 		}),
 		tc.brokerApp.EXPECT().Exists().DoAndReturn(func() (caas.DeploymentState, error) {
@@ -701,7 +706,7 @@ func (s *ApplicationWorkerSuite) TestRefreshApplicationStatusNewUnitsAllocating(
 			c.Assert(len(unitsAPIResultSingleActive), gc.DeepEquals, 1)
 			return unitsAPIResultSingleActive, nil
 		}),
-		tc.facade.EXPECT().SetOperatorStatus("test", status.Waiting, "waiting for units settled down", nil).
+		tc.facade.EXPECT().SetOperatorStatus("test", status.Waiting, "waiting for units to settle down", nil).
 			DoAndReturn(func(string, status.Status, string, map[string]interface{}) error {
 				close(done)
 				return nil
@@ -723,7 +728,7 @@ func (s *ApplicationWorkerSuite) TestRefreshApplicationStatusAllUnitsAreSettled(
 		tc.facade.EXPECT().ProvisioningInfo("test").DoAndReturn(func(string) (api.ProvisioningInfo, error) {
 			return s.appProvisioningInfo, nil
 		}),
-		tc.facade.EXPECT().CharmInfo("cs:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
+		tc.facade.EXPECT().CharmInfo("ch:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
 			return s.appCharmInfo, nil
 		}),
 		tc.brokerApp.EXPECT().Exists().DoAndReturn(func() (caas.DeploymentState, error) {
@@ -765,7 +770,7 @@ func (s *ApplicationWorkerSuite) TestRefreshApplicationStatusTransitionFromWaiti
 		tc.facade.EXPECT().ProvisioningInfo("test").DoAndReturn(func(string) (api.ProvisioningInfo, error) {
 			return s.appProvisioningInfo, nil
 		}),
-		tc.facade.EXPECT().CharmInfo("cs:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
+		tc.facade.EXPECT().CharmInfo("ch:test").DoAndReturn(func(string) (*charmscommon.CharmInfo, error) {
 			return s.appCharmInfo, nil
 		}),
 		tc.brokerApp.EXPECT().Exists().DoAndReturn(func() (caas.DeploymentState, error) {
@@ -786,7 +791,7 @@ func (s *ApplicationWorkerSuite) TestRefreshApplicationStatusTransitionFromWaiti
 			c.Assert(len(unitsAPIResultPartialActive), gc.DeepEquals, 3)
 			return unitsAPIResultPartialActive, nil
 		}),
-		tc.facade.EXPECT().SetOperatorStatus("test", status.Waiting, "waiting for units settled down", nil).
+		tc.facade.EXPECT().SetOperatorStatus("test", status.Waiting, "waiting for units to settle down", nil).
 			DoAndReturn(func(string, status.Status, string, map[string]interface{}) error {
 				err := tc.clock.WaitAdvance(10*time.Second, coretesting.ShortWait, 2)
 				c.Assert(err, jc.ErrorIsNil)

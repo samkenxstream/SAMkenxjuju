@@ -7,11 +7,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/testing"
@@ -38,11 +37,12 @@ type mockState struct {
 	testing.Stub
 
 	common.APIAddressAccessor
-	model              *mockModel
-	applicationWatcher *mockStringsWatcher
-	app                *mockApplication
-	resource           *mockResources
-	operatorRepo       string
+	model                   *mockModel
+	applicationWatcher      *mockStringsWatcher
+	app                     *mockApplication
+	resource                *mockResources
+	operatorRepo            string
+	controllerConfigWatcher *statetesting.MockNotifyWatcher
 }
 
 func newMockState() *mockState {
@@ -51,6 +51,11 @@ func newMockState() *mockState {
 	}
 	st.model = &mockModel{state: st}
 	return st
+}
+
+func (st *mockState) WatchControllerConfig() state.NotifyWatcher {
+	st.MethodCall(st, "WatchControllerConfig")
+	return st.controllerConfigWatcher
 }
 
 func (st *mockState) WatchApplications() state.StringsWatcher {
@@ -112,7 +117,7 @@ type mockResources struct {
 
 func (m *mockResources) OpenResource(applicationID string, name string) (resources.Resource, io.ReadCloser, error) {
 	out, err := json.Marshal(m.resource)
-	return resources.Resource{}, ioutil.NopCloser(bytes.NewBuffer(out)), err
+	return resources.Resource{}, io.NopCloser(bytes.NewBuffer(out)), err
 }
 
 type mockStorageRegistry struct {
@@ -138,7 +143,8 @@ func (m *mockStoragePoolManager) Get(name string) (*storage.Config, error) {
 
 type mockModel struct {
 	testing.Stub
-	state *mockState
+	state              *mockState
+	modelConfigChanges *statetesting.MockNotifyWatcher
 }
 
 func (m *mockModel) UUID() string {
@@ -179,13 +185,18 @@ func (m *mockModel) Containers(providerIds ...string) ([]state.CloudContainer, e
 	return containers, nil
 }
 
+func (m *mockModel) WatchForModelConfigChanges() state.NotifyWatcher {
+	m.MethodCall(m, "WatchForModelConfigChanges")
+	return m.modelConfigChanges
+}
+
 type mockApplication struct {
 	testing.Stub
 	state.Authenticator
 	life                 state.Life
 	tag                  names.Tag
 	password             string
-	series               string
+	base                 state.Base
 	charm                caasapplicationprovisioner.Charm
 	units                []*mockUnit
 	constraints          constraints.Value
@@ -196,6 +207,13 @@ type mockApplication struct {
 	scale                int
 	unitsWatcher         *statetesting.MockStringsWatcher
 	unitsChanges         chan []string
+	watcher              *statetesting.MockNotifyWatcher
+	charmPending         bool
+}
+
+func (a *mockApplication) CharmPendingToBeDownloaded() bool {
+	a.MethodCall(a, "CharmPendingToBeDownloaded")
+	return a.charmPending
 }
 
 func (a *mockApplication) Tag() names.Tag {
@@ -271,9 +289,9 @@ func (a *mockApplication) Name() string {
 	return a.tag.Id()
 }
 
-func (a *mockApplication) Series() string {
-	a.MethodCall(a, "Series")
-	return a.series
+func (a *mockApplication) Base() state.Base {
+	a.MethodCall(a, "Base")
+	return a.base
 }
 
 func (a *mockApplication) SetOperatorStatus(statusInfo status.StatusInfo) error {
@@ -315,6 +333,11 @@ func (a *mockApplication) ClearResources() error {
 func (a *mockApplication) WatchUnits() state.StringsWatcher {
 	a.MethodCall(a, "WatchUnits")
 	return a.unitsWatcher
+}
+
+func (a *mockApplication) Watch() state.NotifyWatcher {
+	a.MethodCall(a, "Watch")
+	return a.watcher
 }
 
 type mockCharm struct {

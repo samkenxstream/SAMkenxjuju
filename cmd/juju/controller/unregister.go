@@ -27,8 +27,9 @@ func NewUnregisterCommand(store jujuclient.ClientStore) cmd.Command {
 // unregisterCommand removes a Juju controller from the local store.
 type unregisterCommand struct {
 	modelcmd.CommandBase
+	modelcmd.DestroyConfirmationCommandBase
+
 	controllerName string
-	assumeYes      bool
 	store          jujuclient.ClientStore
 }
 
@@ -38,30 +39,32 @@ command does not destroy the controller.  In order to regain access to an
 unregistered controller, it will need to be added again using the juju register
 command.
 
-Examples:
+`
 
+const usageUnregisterExamples = `
     juju unregister my-controller
-
-See also:
-    destroy-controller
-    kill-controller
-    register`
+`
 
 // Info implements Command.Info
 // `unregister` may seem generic as a command, but aligns with `register`.
 func (c *unregisterCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "unregister",
-		Args:    "<controller name>",
-		Purpose: "Unregisters a Juju controller.",
-		Doc:     usageUnregisterDetails,
+		Name:     "unregister",
+		Args:     "<controller name>",
+		Purpose:  "Unregisters a Juju controller.",
+		Doc:      usageUnregisterDetails,
+		Examples: usageUnregisterExamples,
+		SeeAlso: []string{
+			"destroy-controller",
+			"kill-controller",
+			"register",
+		},
 	})
 }
 
 // SetFlags implements Command.SetFlags.
 func (c *unregisterCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.BoolVar(&c.assumeYes, "y", false, "Do not prompt for confirmation")
-	f.BoolVar(&c.assumeYes, "yes", false, "")
+	c.DestroyConfirmationCommandBase.SetFlags(f)
 }
 
 // SetClientStore implements Command.SetClientStore.
@@ -81,8 +84,9 @@ func (c *unregisterCommand) Init(args []string) error {
 	}
 
 	if err := cmd.CheckEmpty(args); err != nil {
-		return err
+		return errors.Trace(err)
 	}
+
 	return nil
 }
 
@@ -90,8 +94,7 @@ var unregisterMsg = `
 This command will remove connection information for controller %q.
 Doing so will prevent you from accessing this controller until
 you register it again.
-
-Continue [y/N]?`[1:]
+`[1:]
 
 func (c *unregisterCommand) Run(ctx *cmd.Context) error {
 
@@ -100,10 +103,9 @@ func (c *unregisterCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	if !c.assumeYes {
-		fmt.Fprintf(ctx.Stdout, unregisterMsg, c.controllerName)
-
-		if err := jujucmd.UserConfirmYes(ctx); err != nil {
+	if c.DestroyConfirmationCommandBase.NeedsConfirmation() {
+		fmt.Fprintf(ctx.Stderr, unregisterMsg, c.controllerName)
+		if err := jujucmd.UserConfirmName(c.controllerName, "controller", ctx); err != nil {
 			return errors.Annotate(err, "unregistering controller")
 		}
 	}

@@ -4,6 +4,8 @@
 package agentconfigupdater_test
 
 import (
+	"time"
+
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
 	"github.com/juju/pubsub/v2"
@@ -138,8 +140,10 @@ func (s *AgentConfigUpdaterSuite) TestCentralHubMissing(c *gc.C) {
 				result := response.(*params.ControllerConfigResult)
 				*result = params.ControllerConfigResult{
 					Config: map[string]interface{}{
-						"mongo-memory-profile": "default",
-						"juju-db-snap-channel": controller.DefaultJujuDBSnapChannel,
+						"mongo-memory-profile":    "default",
+						"juju-db-snap-channel":    controller.DefaultJujuDBSnapChannel,
+						"query-tracing-enabled":   controller.DefaultQueryTracingEnabled,
+						"query-tracing-threshold": controller.DefaultQueryTracingThreshold,
 					},
 				}
 			default:
@@ -223,8 +227,10 @@ func (s *AgentConfigUpdaterSuite) startManifold(c *gc.C, a agent.Agent, mockAPIP
 				result := response.(*params.ControllerConfigResult)
 				*result = params.ControllerConfigResult{
 					Config: map[string]interface{}{
-						"mongo-memory-profile": "default",
-						"juju-db-snap-channel": controller.DefaultJujuDBSnapChannel,
+						"mongo-memory-profile":    "default",
+						"juju-db-snap-channel":    controller.DefaultJujuDBSnapChannel,
+						"query-tracing-enabled":   controller.DefaultQueryTracingEnabled,
+						"query-tracing-threshold": controller.DefaultQueryTracingThreshold,
 					},
 				}
 			default:
@@ -355,11 +361,11 @@ type mockConfig struct {
 	snapChannel    string
 	snapChannelSet bool
 
-	nonSyncedWritesToRaftLog    bool
-	nonSyncedWritesToRaftLogSet bool
+	queryTracingEnabled    bool
+	queryTracingEnabledSet bool
 
-	batchRaftFSM    bool
-	batchRaftFSMSet bool
+	queryTracingThreshold    time.Duration
+	queryTracingThresholdSet bool
 }
 
 func (mc *mockConfig) Tag() names.Tag {
@@ -406,22 +412,25 @@ func (mc *mockConfig) SetJujuDBSnapChannel(snapChannel string) {
 	mc.snapChannelSet = true
 }
 
-func (mc *mockConfig) NonSyncedWritesToRaftLog() bool {
-	return mc.nonSyncedWritesToRaftLog
+func (mc *mockConfig) QueryTracingEnabled() bool {
+	return mc.queryTracingEnabled
 }
 
-func (mc *mockConfig) SetNonSyncedWritesToRaftLog(nonSynced bool) {
-	mc.nonSyncedWritesToRaftLog = nonSynced
-	mc.nonSyncedWritesToRaftLogSet = true
+func (mc *mockConfig) SetQueryTracingEnabled(enabled bool) {
+	mc.queryTracingEnabled = enabled
+	mc.queryTracingEnabledSet = true
 }
 
-func (mc *mockConfig) BatchRaftFSM() bool {
-	return mc.batchRaftFSM
+func (mc *mockConfig) QueryTracingThreshold() time.Duration {
+	if mc.queryTracingThreshold == 0 {
+		return controller.DefaultQueryTracingThreshold
+	}
+	return mc.queryTracingThreshold
 }
 
-func (mc *mockConfig) SetBatchRaftFSM(batchRaftFSM bool) {
-	mc.batchRaftFSM = batchRaftFSM
-	mc.batchRaftFSMSet = true
+func (mc *mockConfig) SetQueryTracingThreshold(threshold time.Duration) {
+	mc.queryTracingThreshold = threshold
+	mc.queryTracingThresholdSet = true
 }
 
 func (mc *mockConfig) LogDir() string {

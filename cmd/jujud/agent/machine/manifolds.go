@@ -27,11 +27,9 @@ import (
 	"github.com/juju/juju/cmd/jujud/agent/engine"
 	containerbroker "github.com/juju/juju/container/broker"
 	"github.com/juju/juju/container/lxd"
+	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/core/raft/queue"
-	"github.com/juju/juju/core/raftlease"
-	"github.com/juju/juju/pubsub/lease"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/upgrades"
 	proxyconfig "github.com/juju/juju/utils/proxy"
@@ -49,23 +47,26 @@ import (
 	"github.com/juju/juju/worker/caasupgrader"
 	"github.com/juju/juju/worker/centralhub"
 	"github.com/juju/juju/worker/certupdater"
+	"github.com/juju/juju/worker/changestream"
 	"github.com/juju/juju/worker/common"
 	lxdbroker "github.com/juju/juju/worker/containerbroker"
 	"github.com/juju/juju/worker/controllerport"
 	"github.com/juju/juju/worker/credentialvalidator"
+	"github.com/juju/juju/worker/dbaccessor"
 	"github.com/juju/juju/worker/deployer"
 	"github.com/juju/juju/worker/diskmanager"
 	"github.com/juju/juju/worker/externalcontrollerupdater"
 	"github.com/juju/juju/worker/fanconfigurer"
+	"github.com/juju/juju/worker/filenotifywatcher"
 	"github.com/juju/juju/worker/fortress"
 	"github.com/juju/juju/worker/gate"
-	"github.com/juju/juju/worker/globalclockupdater"
 	"github.com/juju/juju/worker/hostkeyreporter"
 	"github.com/juju/juju/worker/httpserver"
 	"github.com/juju/juju/worker/httpserverargs"
 	"github.com/juju/juju/worker/identityfilewriter"
 	"github.com/juju/juju/worker/instancemutater"
 	leasemanager "github.com/juju/juju/worker/lease/manifold"
+	"github.com/juju/juju/worker/leaseexpiry"
 	"github.com/juju/juju/worker/logger"
 	"github.com/juju/juju/worker/logsender"
 	"github.com/juju/juju/worker/machineactions"
@@ -77,34 +78,23 @@ import (
 	"github.com/juju/juju/worker/multiwatcher"
 	"github.com/juju/juju/worker/peergrouper"
 	prworker "github.com/juju/juju/worker/presence"
+	"github.com/juju/juju/worker/provisioner"
 	"github.com/juju/juju/worker/proxyupdater"
 	psworker "github.com/juju/juju/worker/pubsub"
-	"github.com/juju/juju/worker/raft"
-	"github.com/juju/juju/worker/raft/raftbackstop"
-	"github.com/juju/juju/worker/raft/raftclusterer"
-	"github.com/juju/juju/worker/raft/raftflag"
-	"github.com/juju/juju/worker/raft/raftforwarder"
-	"github.com/juju/juju/worker/raft/rafttransport"
 	"github.com/juju/juju/worker/reboot"
-	"github.com/juju/juju/worker/resumer"
+	"github.com/juju/juju/worker/secretbackendrotate"
 	"github.com/juju/juju/worker/singular"
 	workerstate "github.com/juju/juju/worker/state"
 	"github.com/juju/juju/worker/stateconfigwatcher"
+	"github.com/juju/juju/worker/stateconverter"
 	"github.com/juju/juju/worker/storageprovisioner"
 	"github.com/juju/juju/worker/syslogger"
 	"github.com/juju/juju/worker/terminationworker"
 	"github.com/juju/juju/worker/toolsversionchecker"
-	"github.com/juju/juju/worker/txnpruner"
 	"github.com/juju/juju/worker/upgradedatabase"
 	"github.com/juju/juju/worker/upgrader"
 	"github.com/juju/juju/worker/upgradeseries"
 	"github.com/juju/juju/worker/upgradesteps"
-)
-
-const (
-	// globalClockUpdaterUpdateInterval is the interval between
-	// global clock updates.
-	globalClockUpdaterUpdateInterval = 1 * time.Second
 )
 
 // ManifoldsConfig allows specialisation of the result of Manifolds.
@@ -156,10 +146,9 @@ type ManifoldsConfig struct {
 	// use to establish a connection to state.
 	OpenStateForUpgrade func() (*state.StatePool, error)
 
-	// StartAPIWorkers is passed to the apiworkers manifold. It starts
-	// workers which rely on an API connection (which have not yet
-	// been converted to work directly with the dependency engine).
-	StartAPIWorkers func(api.Connection) (worker.Worker, error)
+	// MachineStartup is passed to the machine manifold. It does
+	// machine setup work which relies on an API connection.
+	MachineStartup func(api.Connection, Logger) error
 
 	// PreUpgradeSteps is a function that is used by the upgradesteps
 	// worker to ensure that conditions are OK for an upgrade to
@@ -262,20 +251,6 @@ type ManifoldsConfig struct {
 	// context for the unit.
 	SetupLogging func(*loggo.Context, coreagent.Config)
 
-	// LeaseFSM represents the internal finite state machine for lease
-	// management.
-	LeaseFSM *raftlease.FSM
-
-	// RaftOpQueue represents a way to apply operations on to the raft
-	// instance from the API. The RaftQueue exists outside the dependency
-	// engine to prevent a circular dependency that can not be solved. By
-	// allowing back pressure on a client callee, we can allow for serialized
-	// operations upon the raft leader.
-	// If the queue becomes stalled there is no way to bounce this without
-	// restarting the agent itself. The same architecture is also applied to
-	// pubsub. Monitoring might be useful to detect this in the future.
-	RaftOpQueue *queue.OpQueue
-
 	// DependencyEngineMetrics creates a set of metrics for a model, so it's
 	// possible to know the lifecycle of the workers in the dependency engine.
 	DependencyEngineMetrics modelworkermanager.ModelMetrics
@@ -346,7 +321,7 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 
 		// Each machine agent has a flag manifold/worker which
 		// reports whether or not the agent is a controller.
-		isControllerFlagName: isControllerFlagManifold(),
+		isControllerFlagName: isControllerFlagManifold(true),
 
 		// The stateconfigwatcher manifold watches the machine agent's
 		// configuration and reports if state serving info is
@@ -565,20 +540,6 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			Logger:            loggo.GetLogger("juju.worker.migrationminion"),
 		}),
 
-		// We ensure the lease clock is updated monotonically and at a rate
-		// no faster than real time.
-		// This worker will only ever be running on the Raft leader node.
-		leaseClockUpdaterName: ifRaftLeader(globalclockupdater.Manifold(globalclockupdater.ManifoldConfig{
-			RaftName:       raftName,
-			StateName:      stateName,
-			Clock:          config.Clock,
-			FSM:            config.LeaseFSM,
-			NewWorker:      globalclockupdater.NewWorker,
-			NewTarget:      globalclockupdater.NewTarget,
-			UpdateInterval: globalClockUpdaterUpdateInterval,
-			Logger:         loggo.GetLogger("juju.worker.globalclockupdater.raft"),
-		})),
-
 		// Each controller machine runs a singular worker which will
 		// attempt to claim responsibility for running certain workers
 		// that must not be run concurrently by multiple agents.
@@ -599,15 +560,6 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			APICallerName:  apiCallerName,
 			CentralHubName: centralHubName,
 			Logger:         loggo.GetLogger("juju.worker.agentconfigupdater"),
-		})),
-
-		// The apiworkers manifold starts workers which rely on the
-		// machine agent's API connection but have not been converted
-		// to work directly under the dependency engine. It waits for
-		// upgrades to be finished before starting these workers.
-		apiWorkersName: ifNotMigrating(APIWorkersManifold(APIWorkersConfig{
-			APICallerName:   apiCallerName,
-			StartAPIWorkers: config.StartAPIWorkers,
 		})),
 
 		// The logging config updater is a leaf worker that indirectly
@@ -635,15 +587,6 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			LogSource:     config.LogSource,
 		})),
 
-		resumerName: ifNotMigrating(resumer.Manifold(resumer.ManifoldConfig{
-			AgentName:     agentName,
-			APICallerName: apiCallerName,
-			Clock:         config.Clock,
-			Interval:      time.Minute,
-			NewFacade:     resumer.NewFacade,
-			NewWorker:     resumer.NewWorker,
-		})),
-
 		identityFileWriterName: ifNotMigrating(identityfilewriter.Manifold(identityfilewriter.ManifoldConfig{
 			AgentName:     agentName,
 			APICallerName: apiCallerName,
@@ -653,15 +596,6 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			externalcontrollerupdater.ManifoldConfig{
 				APICallerName:                      apiCallerName,
 				NewExternalControllerWatcherClient: newExternalControllerWatcherClient,
-			},
-		))),
-
-		txnPrunerName: ifNotMigrating(ifPrimaryController(txnpruner.Manifold(
-			txnpruner.ManifoldConfig{
-				ClockName:     clockName,
-				StateName:     stateName,
-				PruneInterval: config.TransactionPruneInterval,
-				NewWorker:     txnpruner.New,
 			},
 		))),
 
@@ -692,7 +626,6 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			StateName:            stateName,
 			MuxName:              httpServerArgsName,
 			APIServerName:        apiServerName,
-			RaftTransportName:    raftTransportName,
 			PrometheusRegisterer: config.PrometheusRegisterer,
 			AgentName:            config.AgentName,
 			Clock:                config.Clock,
@@ -716,11 +649,8 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			LeaseManagerName:       leaseManagerName,
 			UpgradeGateName:        upgradeStepsGateName,
 			AuditConfigUpdaterName: auditConfigUpdaterName,
-			// Synthetic dependency - if raft-transport bounces we
-			// need to bounce api-server too, otherwise http-server
-			// can't shutdown properly.
-			RaftTransportName:      raftTransportName,
 			CharmhubHTTPClientName: charmhubHTTPClientName,
+			DBAccessorName:         dbAccessorName,
 
 			PrometheusRegisterer:              config.PrometheusRegisterer,
 			RegisterIntrospectionHTTPHandlers: config.RegisterIntrospectionHTTPHandlers,
@@ -728,7 +658,6 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			Presence:                          config.PresenceRecorder,
 			NewWorker:                         apiserver.NewWorker,
 			NewMetricsCollector:               apiserver.NewMetricsCollector,
-			RaftOpQueue:                       config.RaftOpQueue,
 		})),
 
 		charmhubHTTPClientName: dependency.Manifold{
@@ -761,87 +690,57 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			NewWorker:            peergrouper.New,
 		})),
 
+		dbAccessorName: ifController(dbaccessor.Manifold(dbaccessor.ManifoldConfig{
+			AgentName:            agentName,
+			Clock:                config.Clock,
+			Hub:                  config.CentralHub,
+			Logger:               loggo.GetLogger("juju.worker.dbaccessor"),
+			PrometheusRegisterer: config.PrometheusRegisterer,
+			NewApp:               dbaccessor.NewApp,
+			NewDBWorker:          dbaccessor.NewTrackedDBWorker,
+			NewMetricsCollector:  dbaccessor.NewMetricsCollector,
+		})),
+
+		fileNotifyWatcherName: ifController(filenotifywatcher.Manifold(filenotifywatcher.ManifoldConfig{
+			Clock:             config.Clock,
+			Logger:            loggo.GetLogger("juju.worker.filenotifywatcher"),
+			NewWatcher:        filenotifywatcher.NewWatcher,
+			NewINotifyWatcher: filenotifywatcher.NewINotifyWatcher,
+		})),
+
+		changeStreamName: ifController(changestream.Manifold(changestream.ManifoldConfig{
+			DBAccessor:          dbAccessorName,
+			FileNotifyWatcher:   fileNotifyWatcherName,
+			Clock:               config.Clock,
+			Logger:              loggo.GetLogger("juju.worker.changestream"),
+			NewEventQueueWorker: changestream.NewEventQueueWorker,
+		})),
+
 		auditConfigUpdaterName: ifController(auditconfigupdater.Manifold(auditconfigupdater.ManifoldConfig{
 			AgentName: agentName,
 			StateName: stateName,
 			NewWorker: auditconfigupdater.New,
 		})),
 
-		raftTransportName: ifController(rafttransport.Manifold(rafttransport.ManifoldConfig{
-			ClockName:         clockName,
-			AgentName:         agentName,
-			AuthenticatorName: httpServerArgsName,
-			HubName:           centralHubName,
-			MuxName:           httpServerArgsName,
-			DialConn:          rafttransport.DialConn,
-			NewWorker:         rafttransport.NewWorker,
-			Path:              "/raft",
+		// The lease expiry worker constantly deletes
+		// leases with an expiry time in the past.
+		leaseExpiryName: ifController(leaseexpiry.Manifold(leaseexpiry.ManifoldConfig{
+			ClockName:      clockName,
+			DBAccessorName: dbAccessorName,
+			Logger:         loggo.GetLogger("juju.worker.leaseexpiry"),
+			NewWorker:      leaseexpiry.NewWorker,
 		})),
 
-		raftName: ifFullyUpgraded(raft.Manifold(raft.ManifoldConfig{
-			ClockName:            clockName,
-			AgentName:            agentName,
-			TransportName:        raftTransportName,
-			StateName:            stateName,
-			FSM:                  config.LeaseFSM,
-			Logger:               loggo.GetLogger("juju.worker.raft"),
-			PrometheusRegisterer: config.PrometheusRegisterer,
-			NewWorker:            raft.NewWorker,
-			NewTarget:            raft.NewTarget,
-			Queue:                config.RaftOpQueue,
-			NewApplier:           raft.NewApplier,
-		})),
-
-		raftFlagName: raftflag.Manifold(raftflag.ManifoldConfig{
-			RaftName:  raftName,
-			NewWorker: raftflag.NewWorker,
-		}),
-
-		// The raft clusterer can only run on the raft leader, since
-		// it makes configuration updates based on changes in API
-		// server details.
-		raftClustererName: ifRaftLeader(raftclusterer.Manifold(raftclusterer.ManifoldConfig{
-			RaftName:       raftName,
-			CentralHubName: centralHubName,
-			NewWorker:      raftclusterer.NewWorker,
-		})),
-
-		raftBackstopName: raftbackstop.Manifold(raftbackstop.ManifoldConfig{
-			RaftName:       raftName,
-			CentralHubName: centralHubName,
-			AgentName:      agentName,
-			Logger:         loggo.GetLogger("juju.worker.raft.raftbackstop"),
-			NewWorker:      raftbackstop.NewWorker,
-		}),
-
-		// The raft forwarder accepts FSM commands from the hub and
-		// applies them to the raft leader.
-		raftForwarderName: ifRaftLeader(raftforwarder.Manifold(raftforwarder.ManifoldConfig{
-			RaftName:             raftName,
-			StateName:            stateName,
-			CentralHubName:       centralHubName,
-			RequestTopic:         lease.LeaseRequestTopic,
-			Logger:               loggo.GetLogger("juju.worker.raft.raftforwarder"),
-			PrometheusRegisterer: config.PrometheusRegisterer,
-			NewWorker:            raftforwarder.NewWorker,
-			NewTarget:            raftforwarder.NewTarget,
-		})),
-
-		// The global lease manager tracks lease information in the raft
-		// cluster rather than in mongo.
+		// The global lease manager tracks lease information in the Dqlite database.
 		leaseManagerName: ifController(leasemanager.Manifold(leasemanager.ManifoldConfig{
 			AgentName:            agentName,
 			ClockName:            clockName,
-			CentralHubName:       centralHubName,
-			StateName:            stateName,
-			FSM:                  config.LeaseFSM,
-			RequestTopic:         lease.LeaseRequestTopic,
-			Logger:               loggo.GetLogger("juju.worker.lease.raft"),
+			DBAccessorName:       dbAccessorName,
+			Logger:               loggo.GetLogger("juju.worker.lease"),
 			LogDir:               agentConfig.LogDir(),
 			PrometheusRegisterer: config.PrometheusRegisterer,
 			NewWorker:            leasemanager.NewWorker,
 			NewStore:             leasemanager.NewStore,
-			NewClient:            leasemanager.NewClientFunc,
 		})),
 
 		// The proxy config updater is a leaf worker that sets http/https/apt/etc
@@ -868,6 +767,13 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			NewWorker:     credentialvalidator.NewWorker,
 			Logger:        loggo.GetLogger("juju.worker.credentialvalidator"),
 		}),
+
+		secretBackendRotateName: ifNotMigrating(ifPrimaryController(secretbackendrotate.Manifold(
+			secretbackendrotate.ManifoldConfig{
+				APICallerName: apiCallerName,
+				Logger:        loggo.GetLogger("juju.worker.secretbackendsrotate"),
+			},
+		))),
 	}
 
 	return manifolds
@@ -1019,11 +925,41 @@ func IAASManifolds(config ManifoldsConfig) dependency.Manifolds {
 			NewClient:     instancemutater.NewClient,
 			NewWorker:     instancemutater.NewContainerWorker,
 		})),
-
 		syslogName: syslogger.Manifold(syslogger.ManifoldConfig{
 			NewWorker: syslogger.NewWorker,
 			NewLogger: syslogger.NewSyslog,
 		}),
+		// The machineSetupName manifold runs small tasks required
+		// to setup a machine, but requires the machine agent's API
+		// connection. Once its work is complete, it stops.
+		machineSetupName: ifNotMigrating(MachineStartupManifold(MachineStartupConfig{
+			APICallerName:  apiCallerName,
+			MachineStartup: config.MachineStartup,
+			Logger:         loggo.GetLogger("juju.worker.machinesetup"),
+		})),
+		kvmContainerProvisioner: ifNotMigrating(provisioner.ContainerProvisioningManifold(provisioner.ContainerManifoldConfig{
+			AgentName:                    agentName,
+			APICallerName:                apiCallerName,
+			Logger:                       loggo.GetLogger("juju.worker.kvmprovisioner"),
+			MachineLock:                  config.MachineLock,
+			NewCredentialValidatorFacade: common.NewCredentialInvalidatorFacade,
+			ContainerType:                instance.KVM,
+		})),
+		lxdContainerProvisioner: ifNotMigrating(provisioner.ContainerProvisioningManifold(provisioner.ContainerManifoldConfig{
+			AgentName:                    agentName,
+			APICallerName:                apiCallerName,
+			Logger:                       loggo.GetLogger("juju.worker.lxdprovisioner"),
+			MachineLock:                  config.MachineLock,
+			NewCredentialValidatorFacade: common.NewCredentialInvalidatorFacade,
+			ContainerType:                instance.LXD,
+		})),
+		// isNotControllerFlagName is only used for the stateconverter,
+		isNotControllerFlagName: isControllerFlagManifold(false),
+		stateConverterName: ifNotController(ifNotMigrating(stateconverter.Manifold(stateconverter.ManifoldConfig{
+			AgentName:     agentName,
+			APICallerName: apiCallerName,
+			Logger:        loggo.GetLogger("juju.worker.stateconverter"),
+		}))),
 	}
 
 	return mergeManifolds(config, manifolds)
@@ -1101,9 +1037,9 @@ var ifController = engine.Housing{
 	},
 }.Decorate
 
-var ifRaftLeader = engine.Housing{
+var ifNotController = engine.Housing{
 	Flags: []string{
-		raftFlagName,
+		isNotControllerFlagName,
 	},
 }.Decorate
 
@@ -1133,6 +1069,7 @@ const (
 	controllerPortName     = "controller-port"
 	stateName              = "state"
 	apiCallerName          = "api-caller"
+	s3CallerName           = "s3-caller"
 	apiConfigWatcherName   = "api-config-watcher"
 	centralHubName         = "central-hub"
 	presenceName           = "presence"
@@ -1154,7 +1091,7 @@ const (
 	migrationInactiveFlagName = "migration-inactive-flag"
 	migrationMinionName       = "migration-minion"
 
-	apiWorkersName                = "unconverted-api-workers"
+	machineSetupName              = "machine-setup"
 	rebootName                    = "reboot-executor"
 	loggingConfigUpdaterName      = "logging-config-updater"
 	diskManagerName               = "disk-manager"
@@ -1165,18 +1102,16 @@ const (
 	deployerName                  = "deployer"
 	authenticationWorkerName      = "ssh-authkeys-updater"
 	storageProvisionerName        = "storage-provisioner"
-	resumerName                   = "mgo-txn-resumer"
 	identityFileWriterName        = "ssh-identity-writer"
 	toolsVersionCheckerName       = "tools-version-checker"
 	machineActionName             = "machine-action-runner"
 	hostKeyReporterName           = "host-key-reporter"
 	fanConfigurerName             = "fan-configurer"
 	externalControllerUpdaterName = "external-controller-updater"
-	leaseClockUpdaterName         = "lease-clock-updater"
 	isPrimaryControllerFlagName   = "is-primary-controller-flag"
 	isControllerFlagName          = "is-controller-flag"
+	isNotControllerFlagName       = "is-not-controller-flag"
 	instanceMutaterName           = "instance-mutater"
-	txnPrunerName                 = "transaction-pruner"
 	certificateWatcherName        = "certificate-watcher"
 	modelCacheName                = "model-cache"
 	modelCacheInitializedFlagName = "model-cache-initialized-flag"
@@ -1184,9 +1119,18 @@ const (
 	modelWorkerManagerName        = "model-worker-manager"
 	multiwatcherName              = "multiwatcher"
 	peergrouperName               = "peer-grouper"
+	dbAccessorName                = "db-accessor"
+	fileNotifyWatcherName         = "file-notify-watcher"
+	changeStreamName              = "change-stream"
 	certificateUpdaterName        = "certificate-updater"
 	auditConfigUpdaterName        = "audit-config-updater"
+	leaseExpiryName               = "lease-expiry"
 	leaseManagerName              = "lease-manager"
+	stateConverterName            = "state-converter"
+	lxdContainerProvisioner       = "lxd-container-provisioner"
+	kvmContainerProvisioner       = "kvm-container-provisioner"
+
+	secretBackendRotateName = "secret-backend-rotate"
 
 	upgradeSeriesWorkerName = "upgrade-series"
 
@@ -1196,13 +1140,6 @@ const (
 
 	syslogName       = "syslog"
 	caasUnitsManager = "caas-units-manager"
-
-	raftTransportName = "raft-transport"
-	raftName          = "raft"
-	raftClustererName = "raft-clusterer"
-	raftFlagName      = "raft-leader-flag"
-	raftBackstopName  = "raft-backstop"
-	raftForwarderName = "raft-forwarder"
 
 	validCredentialFlagName = "valid-credential-flag"
 

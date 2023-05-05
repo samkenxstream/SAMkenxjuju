@@ -9,10 +9,12 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
+	"github.com/juju/featureflag"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
 	"github.com/juju/proxy"
@@ -26,7 +28,9 @@ import (
 	"github.com/juju/juju/controller"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/tags"
+	"github.com/juju/juju/feature"
 	"github.com/juju/juju/juju/osenv"
 	"github.com/juju/juju/logfwd/syslog"
 	jujuversion "github.com/juju/juju/version"
@@ -268,10 +272,15 @@ const (
 	// using.
 	// It is expected that when in a different mode, Juju will perform in a
 	// different state.
-	// The lack of a mode means it will default into compatibility mode.
-	//
-	//  - strict mode ensures that we handle any fallbacks as errors.
 	ModeKey = "mode"
+
+	// SSHAllowKey is a comma separated list of CIDRs from which machines in
+	// this model will accept connections to the SSH service
+	SSHAllowKey = "ssh-allow"
+
+	// SAASIngressAllowKey is a comma separated list of CIDRs
+	// specifying what ingress can be applied to offers in this model
+	SAASIngressAllowKey = "saas-ingress-allow"
 
 	//
 	// Deprecated Settings Attributes
@@ -293,6 +302,17 @@ const (
 	// LoggingOutputKey is a key for determining the destination of output for
 	// logging.
 	LoggingOutputKey = "logging-output"
+
+	// DefaultSeriesKey is a key for determining the series a model should
+	// explicitly use for charms unless otherwise provided.
+	DefaultSeriesKey = "default-series"
+
+	// DefaultBaseKey is a key for determining the base a model should
+	// explicitly use for charms unless otherwise provided.
+	DefaultBaseKey = "default-base"
+
+	// SecretBackendKey is used to specify the secret backend.
+	SecretBackendKey = "secret-backend"
 )
 
 // ParseHarvestMode parses description of harvesting method and
@@ -359,25 +379,28 @@ func (method HarvestMode) HarvestUnknown() bool {
 	return method&HarvestUnknown != 0
 }
 
-// HasDefaultSeries defines a interface if a type has a default series or not.
-type HasDefaultSeries interface {
-	DefaultSeries() (string, bool)
-}
-
-// GetDefaultSupportedLTS returns the DefaultSupportedLTS.
+// GetDefaultSupportedLTSBase returns the DefaultSupportedLTSBase.
 // This is exposed for one reason and one reason only; testing!
-// The fact that PreferredSeries doesn't take an argument for a default series
+// The fact that PreferredBase doesn't take an argument for a default base
 // as a fallback. We then have to expose this so we can exercise the branching
 // code for other scenarios makes me sad.
-var GetDefaultSupportedLTS = jujuversion.DefaultSupportedLTS
+var GetDefaultSupportedLTSBase = jujuversion.DefaultSupportedLTSBase
 
-// PreferredSeries returns the preferred series to use when a charm does not
-// explicitly specify a series.
-func PreferredSeries(cfg HasDefaultSeries) string {
-	if series, ok := cfg.DefaultSeries(); ok {
-		return series
+// HasDefaultBase defines a interface if a type has a default base or not.
+type HasDefaultBase interface {
+	DefaultBase() (string, bool)
+}
+
+// PreferredBase returns the preferred base to use when a charm does not
+// explicitly specify a base.
+func PreferredBase(cfg HasDefaultBase) series.Base {
+	base, ok := cfg.DefaultBase()
+	if ok {
+		// We can safely ignore the error here as we know that we have
+		// validated the base when we set it.
+		return series.MustParseBaseFromString(base)
 	}
-	return GetDefaultSupportedLTS()
+	return GetDefaultSupportedLTSBase()
 }
 
 // Config holds an immutable environment configuration.
@@ -412,15 +435,39 @@ const (
 // "ca-cert" and "ca-private-key" values.  If not specified, CA details
 // will be read from:
 //
-//     ~/.local/share/juju/<name>-cert.pem
-//     ~/.local/share/juju/<name>-private-key.pem
+//	~/.local/share/juju/<name>-cert.pem
+//	~/.local/share/juju/<name>-private-key.pem
 //
 // if $XDG_DATA_HOME is defined it will be used instead of ~/.local/share
 func New(withDefaults Defaulting, attrs map[string]interface{}) (*Config, error) {
+	initSchema.Do(func() {
+		allFields = fields()
+		defaultsWhenParsing = allDefaults()
+		withDefaultsChecker = schema.FieldMap(allFields, defaultsWhenParsing)
+		noDefaultsChecker = schema.FieldMap(allFields, alwaysOptional)
+	})
 	checker := noDefaultsChecker
 	if withDefaults {
 		checker = withDefaultsChecker
+	} else {
+		// Config may be from an older Juju.
+		// Handle the case where we are parsing a fully formed
+		// set of config attributes (NoDefaults) and a value is strictly
+		// not optional, but may have previously been either set to empty
+		// or is missing.
+		// In this case, we use the default.
+		for k := range defaultsWhenParsing {
+			v, ok := attrs[k]
+			if ok && v != "" {
+				continue
+			}
+			_, explicitlyOptional := alwaysOptional[k]
+			if !explicitlyOptional {
+				attrs[k] = defaultsWhenParsing[k]
+			}
+		}
 	}
+
 	defined, err := checker.Coerce(attrs, nil)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -440,7 +487,7 @@ func New(withDefaults Defaulting, attrs map[string]interface{}) (*Config, error)
 	}
 	// Copy unknown attributes onto the type-specific map.
 	for k, v := range attrs {
-		if _, ok := fields[k]; !ok {
+		if _, ok := allFields[k]; !ok {
 			c.unknown[k] = v
 		}
 	}
@@ -464,6 +511,12 @@ const (
 
 	// DefaultActionResultsSize is the default size of the action results.
 	DefaultActionResultsSize = "5G"
+
+	// DefaultLxdSnapChannel is the default lxd snap channel to install on host vms.
+	DefaultLxdSnapChannel = "5.0/stable"
+
+	// DefaultSecretBackend is the default secret backend to use.
+	DefaultSecretBackend = "auto"
 )
 
 var defaultConfigValues = map[string]interface{}{
@@ -494,7 +547,8 @@ var defaultConfigValues = map[string]interface{}{
 	NetBondReconfigureDelayKey: 17,
 	ContainerNetworkingMethod:  "",
 
-	"default-series":                jujuversion.DefaultSupportedLTS(),
+	DefaultBaseKey: "",
+
 	ProvisionerHarvestModeKey:       HarvestDestroyed.String(),
 	NumProvisionWorkersKey:          16,
 	NumContainerProvisionWorkersKey: 4,
@@ -506,6 +560,7 @@ var defaultConfigValues = map[string]interface{}{
 	"enable-os-upgrade":             true,
 	"development":                   false,
 	TestModeKey:                     false,
+	ModeKey:                         RequiresPromptsMode,
 	DisableTelemetryKey:             false,
 	TransmitVendorMetricsKey:        true,
 	UpdateStatusHookInterval:        DefaultUpdateStatusHookInterval,
@@ -514,7 +569,7 @@ var defaultConfigValues = map[string]interface{}{
 	CloudInitUserDataKey:            "",
 	ContainerInheritPropertiesKey:   "",
 	BackupDirKey:                    "",
-	LXDSnapChannel:                  "latest/stable",
+	LXDSnapChannel:                  DefaultLxdSnapChannel,
 
 	CharmHubURLKey: charmhub.DefaultServerURL,
 
@@ -556,6 +611,13 @@ var defaultConfigValues = map[string]interface{}{
 	MaxStatusHistorySize: DefaultStatusHistorySize,
 	MaxActionResultsAge:  DefaultActionResultsAge,
 	MaxActionResultsSize: DefaultActionResultsSize,
+
+	// Secret settings.
+	SecretBackendKey: DefaultSecretBackend,
+
+	// Model firewall settings
+	SSHAllowKey:         "0.0.0.0/0,::/0",
+	SAASIngressAllowKey: "0.0.0.0/0,::/0",
 }
 
 // defaultLoggingConfig is the default value for logging-config if it is otherwise not set.
@@ -568,7 +630,14 @@ const defaultLoggingConfig = "<root>=INFO"
 // to be used for any new model where there is no
 // value yet defined.
 func ConfigDefaults() map[string]interface{} {
-	return defaultConfigValues
+	defaults := make(map[string]interface{})
+	for name, value := range defaultConfigValues {
+		if developerConfigValue(name) {
+			continue
+		}
+		defaults[name] = value
+	}
+	return defaults
 }
 
 func (c *Config) setLoggingFromEnviron() error {
@@ -795,7 +864,19 @@ func Validate(cfg, old *Config) error {
 		return errors.Trace(err)
 	}
 
+	if err := cfg.validateDefaultBase(); err != nil {
+		return errors.Trace(err)
+	}
+
 	if err := cfg.validateMode(); err != nil {
+		return errors.Trace(err)
+	}
+
+	if err := cfg.validateCIDRs(cfg.SSHAllow(), true); err != nil {
+		return errors.Trace(err)
+	}
+
+	if err := cfg.validateCIDRs(cfg.SAASIngressAllow(), false); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -931,10 +1012,39 @@ func (c *Config) DefaultSpace() string {
 	return c.asString(DefaultSpace)
 }
 
-// DefaultSeries returns the configured default Ubuntu series for the model,
-// and whether the default series was explicitly configured on the environment.
-func (c *Config) DefaultSeries() (string, bool) {
-	s, ok := c.defined["default-series"]
+func (c *Config) validateDefaultBase() error {
+	defaultBase, configured := c.DefaultBase()
+	if !configured {
+		return nil
+	}
+
+	parsedBase, err := series.ParseBaseFromString(defaultBase)
+	if err != nil {
+		return errors.Annotatef(err, "invalid default base %q", defaultBase)
+	}
+
+	supported, err := series.WorkloadBases(time.Now(), series.Base{}, "")
+	if err != nil {
+		return errors.Annotate(err, "cannot read supported bases")
+	}
+	logger.Tracef("supported bases %s", supported)
+	var found bool
+	for _, supportedBase := range supported {
+		if parsedBase.IsCompatible(supportedBase) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.NotSupportedf("base %q", parsedBase.DisplayString())
+	}
+	return nil
+}
+
+// DefaultBase returns the configured default base for the model, and whether
+// the default base was explicitly configured on the environment.
+func (c *Config) DefaultBase() (string, bool) {
+	s, ok := c.defined[DefaultBaseKey]
 	if !ok {
 		return "", false
 	}
@@ -942,9 +1052,15 @@ func (c *Config) DefaultSeries() (string, bool) {
 	case string:
 		return s, s != ""
 	default:
-		logger.Errorf("invalid default-series: %q", s)
+		logger.Errorf("invalid default-base: %q", s)
 		return "", false
 	}
+}
+
+// SecretBackend returns the secret backend name.
+func (c *Config) SecretBackend() string {
+	value, _ := c.defined[SecretBackendKey].(string)
+	return value
 }
 
 // AuthorizedKeys returns the content for ssh's authorized_keys file.
@@ -1381,13 +1497,25 @@ func (c *Config) validateCharmHubURL() error {
 	return nil
 }
 
-// Mode returns the mode type for the configuration.
-// Only two modes exist at the moment (strict or ""). Empty string
-// implies compatible mode.
-func (c *Config) Mode() ([]string, bool) {
+const (
+	// RequiresPromptsMode is used to tell clients interacting with
+	// model that confirmation prompts are required when removing
+	// potentially important resources
+	RequiresPromptsMode = "requires-prompts"
+
+	// StrictMode is currently unused
+	// TODO(jack-w-shaw) remove this mode
+	StrictMode = "strict"
+)
+
+var allModes = set.NewStrings(RequiresPromptsMode, StrictMode)
+
+// Mode returns a set of mode types for the configuration.
+// Only one option exists at the moment ('requires-prompts')
+func (c *Config) Mode() (set.Strings, bool) {
 	modes, ok := c.defined[ModeKey]
 	if !ok {
-		return []string{}, false
+		return set.NewStrings(), false
 	}
 	if m, ok := modes.(string); ok {
 		s := set.NewStrings()
@@ -1398,20 +1526,55 @@ func (c *Config) Mode() ([]string, bool) {
 			s.Add(strings.TrimSpace(v))
 		}
 		if s.Size() > 0 {
-			return s.SortedValues(), true
+			return s, true
 		}
 	}
 
-	return []string{}, false
+	return set.NewStrings(), false
 }
 
 func (c *Config) validateMode() error {
 	modes, _ := c.Mode()
-	for _, mode := range modes {
-		switch strings.TrimSpace(mode) {
-		case "strict":
-		default:
-			return errors.NotValidf("mode %q", mode)
+	difference := modes.Difference(allModes)
+	if !difference.IsEmpty() {
+		return errors.NotValidf("mode(s) %q", strings.Join(difference.SortedValues(), ", "))
+	}
+	return nil
+}
+
+// SSHAllow returns a slice of CIDRs from which machines in
+// this model will accept connections to the SSH service
+func (c *Config) SSHAllow() []string {
+	allowList, ok := c.defined[SSHAllowKey].(string)
+	if !ok {
+		return []string{"0.0.0.0/0"}
+	}
+	if allowList == "" {
+		return []string{}
+	}
+	return strings.Split(allowList, ",")
+}
+
+// SAASIngressAllow returns a slice of CIDRs specifying what
+// ingress can be applied to offers in this model
+func (c *Config) SAASIngressAllow() []string {
+	allowList, ok := c.defined[SAASIngressAllowKey].(string)
+	if !ok {
+		return []string{"0.0.0.0/0"}
+	}
+	if allowList == "" {
+		return []string{}
+	}
+	return strings.Split(allowList, ",")
+}
+
+func (c *Config) validateCIDRs(cidrs []string, allowEmpty bool) error {
+	if len(cidrs) == 0 && !allowEmpty {
+		return errors.NotValidf("empty cidrs")
+	}
+	for _, cidr := range cidrs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return errors.NotValidf("cidr %q", cidr)
 		}
 	}
 	return nil
@@ -1641,7 +1804,7 @@ var fields = func() schema.Fields {
 		panic(err)
 	}
 	return fs
-}()
+}
 
 // alwaysOptional holds configuration defaults for attributes that may
 // be unspecified even after a configuration has been created with all
@@ -1668,7 +1831,10 @@ var alwaysOptional = schema.Defaults{
 	StorageDefaultBlockSourceKey:      schema.Omit,
 	StorageDefaultFilesystemSourceKey: schema.Omit,
 
-	"firewall-mode":                 schema.Omit,
+	"firewall-mode":     schema.Omit,
+	SSHAllowKey:         schema.Omit,
+	SAASIngressAllowKey: schema.Omit,
+
 	"logging-config":                schema.Omit,
 	ProvisionerHarvestModeKey:       schema.Omit,
 	NumProvisionWorkersKey:          schema.Omit,
@@ -1701,7 +1867,7 @@ var alwaysOptional = schema.Defaults{
 	AgentMetadataURLKey:             schema.Omit,
 	ContainerImageStreamKey:         schema.Omit,
 	ContainerImageMetadataURLKey:    schema.Omit,
-	"default-series":                schema.Omit,
+	DefaultBaseKey:                  schema.Omit,
 	"development":                   schema.Omit,
 	"ssl-hostname-verification":     schema.Omit,
 	"proxy-ssh":                     schema.Omit,
@@ -1733,8 +1899,6 @@ func allowEmpty(attr string) bool {
 	return alwaysOptional[attr] == "" || alwaysOptional[attr] == schema.Omit
 }
 
-var defaultsWhenParsing = allDefaults()
-
 // allDefaults returns a schema.Defaults that contains
 // defaults to be used when creating a new config with
 // UseDefaults.
@@ -1745,6 +1909,9 @@ func allDefaults() schema.Defaults {
 		d[attr] = val
 	}
 	for attr, val := range alwaysOptional {
+		if developerConfigValue(attr) {
+			continue
+		}
 		if _, ok := d[attr]; !ok {
 			d[attr] = val
 		}
@@ -1764,8 +1931,11 @@ var immutableAttributes = []string{
 }
 
 var (
-	withDefaultsChecker = schema.FieldMap(fields, defaultsWhenParsing)
-	noDefaultsChecker   = schema.FieldMap(fields, alwaysOptional)
+	initSchema          sync.Once
+	allFields           schema.Fields
+	defaultsWhenParsing schema.Defaults
+	withDefaultsChecker schema.Checker
+	noDefaultsChecker   schema.Checker
 )
 
 // ValidateUnknownAttrs checks the unknown attributes of the config against
@@ -1793,7 +1963,7 @@ func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema
 			if val, isString := value.(string); isString && val != "" {
 				// only warn about attributes with non-empty string values
 				altName := strings.Replace(name, "_", "-", -1)
-				if extrafields[altName] != nil || fields[altName] != nil {
+				if extrafields[altName] != nil || allFields[altName] != nil {
 					logger.Warningf("unknown config field %q, did you mean %q?", name, altName)
 				} else {
 					logger.Warningf("unknown config field %q", name)
@@ -1856,6 +2026,15 @@ func AptProxyConfigMap(proxySettings proxy.Settings) map[string]interface{} {
 	return settings
 }
 
+func developerConfigValue(name string) bool {
+	if !featureflag.Enabled(feature.DeveloperMode) {
+		switch name {
+		// Add developer-mode keys here.
+		}
+	}
+	return false
+}
+
 // Schema returns a configuration schema that includes both
 // the given extra fields and all the fields defined in this package.
 // It returns an error if extra defines any fields defined in this
@@ -1863,6 +2042,9 @@ func AptProxyConfigMap(proxySettings proxy.Settings) map[string]interface{} {
 func Schema(extra environschema.Fields) (environschema.Fields, error) {
 	fields := make(environschema.Fields)
 	for name, field := range configSchema {
+		if developerConfigValue(name) {
+			continue
+		}
 		if controller.ControllerOnlyAttribute(name) {
 			return nil, errors.Errorf("config field %q clashes with controller config", name)
 		}
@@ -1933,11 +2115,12 @@ var configSchema = environschema.Fields{
 		Type:        environschema.Tstring,
 		Group:       environschema.EnvironGroup,
 	},
-	"default-series": {
-		Description: "The default series of Ubuntu to use for deploying charms",
+	DefaultBaseKey: {
+		Description: "The default base image to use for deploying charms, will act like --base when deploying charms",
 		Type:        environschema.Tstring,
 		Group:       environschema.EnvironGroup,
 	},
+	// TODO (jack-w-shaw) integrate this into mode
 	"development": {
 		Description: "Whether the model is in development mode",
 		Type:        environschema.Tbool,
@@ -2163,10 +2346,24 @@ data of the store. (default false)`,
 		Group:       environschema.EnvironGroup,
 	},
 	ModeKey: {
-		Description: `Mode sets the type of mode the model should run in.
-If the mode is set to "strict" then errors will be used instead of
-using fallbacks. By default mode is set to be lenient and use fallbacks
-where possible. (default "")`,
+		Description: `Mode is a comma-separated list which sets the
+mode the model should run in. So far only one is implemented
+- If 'requires-prompts' is present, clients will ask for confirmation before removing
+potentially valuable resources.
+(default "")`,
+		Type:  environschema.Tstring,
+		Group: environschema.EnvironGroup,
+	},
+	SSHAllowKey: {
+		Description: `SSH allowlist is a comma-separated list of CIDRs from
+which machines in this model will accept connections to the SSH service.
+Currently only the aws provider supports ssh-allow`,
+		Type:  environschema.Tstring,
+		Group: environschema.EnvironGroup,
+	},
+	SAASIngressAllowKey: {
+		Description: `Application-offer ingress allowlist is a comma-separated list of
+CIDRs specifying what ingress can be applied to offers in this model.`,
 		Type:  environschema.Tstring,
 		Group: environschema.EnvironGroup,
 	},
@@ -2270,6 +2467,11 @@ where possible. (default "")`,
 	},
 	LoggingOutputKey: {
 		Description: `The logging output destination: database and/or syslog. (default "")`,
+		Type:        environschema.Tstring,
+		Group:       environschema.EnvironGroup,
+	},
+	SecretBackendKey: {
+		Description: `The name of the secret store backend. (default "auto")`,
 		Type:        environschema.Tstring,
 		Group:       environschema.EnvironGroup,
 	},

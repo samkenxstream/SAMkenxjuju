@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
@@ -21,7 +21,6 @@ import (
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/cloudconfig/podcfg"
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/environs/bootstrap"
@@ -129,8 +128,8 @@ func (a *appWorker) loop() error {
 		return nil
 	}
 
-	// If the application has an operator pod due to an upgrade-charm from a
-	// pod-spec charm to a sidecar charm, delete it. Also delete workload pod.
+	// If the application has an operator pod due to upgrading the charm from a pod-spec charm
+	// to a sidecar charm, delete it. Also delete workload pod.
 	const maxDeleteLoops = 20
 	for i := 0; ; i++ {
 		if i >= maxDeleteLoops {
@@ -146,13 +145,13 @@ func (a *appWorker) loop() error {
 
 		exists, err := a.broker.OperatorExists(a.name)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Annotatef(err, "checking if %q has an operator pod due to upgrading the charm from a pod-spec charm to a sidecar charm", a.name)
 		}
 		if !exists.Exists {
 			break
 		}
 
-		a.logger.Infof("deleting workload and operator pods for application %q", a.name)
+		a.logger.Infof("app %q has just been upgraded from a podspec charm to sidecar, now deleting workload and operator pods %q", a.name)
 		err = a.broker.DeleteService(a.name)
 		if err != nil && !errors.IsNotFound(err) {
 			return errors.Annotatef(err, "deleting workload pod for application %q", a.name)
@@ -197,7 +196,7 @@ func (a *appWorker) loop() error {
 	}
 
 	var appChanges watcher.NotifyChannel
-	var appStateChanges watcher.NotifyChannel
+	var appProvisionChanges watcher.NotifyChannel
 	var replicaChanges watcher.NotifyChannel
 	var lastReportedStatus map[string]status.StatusInfo
 
@@ -246,18 +245,22 @@ func (a *appWorker) loop() error {
 		a.life = appLife
 		switch appLife {
 		case life.Alive:
-			if appStateChanges == nil {
-				appStateWatcher, err := a.facade.WatchApplication(a.name)
+			if appProvisionChanges == nil {
+				appProvisionWatcher, err := a.facade.WatchProvisioningInfo(a.name)
 				if err != nil {
-					return errors.Annotatef(err, "failed to watch facade for changes to application %q", a.name)
+					return errors.Annotatef(err, "failed to watch facade for changes to application provisioning %q", a.name)
 				}
-				if err := a.catacomb.Add(appStateWatcher); err != nil {
+				if err := a.catacomb.Add(appProvisionWatcher); err != nil {
 					return errors.Trace(err)
 				}
-				appStateChanges = appStateWatcher.Changes()
+				appProvisionChanges = appProvisionWatcher.Changes()
 			}
 			err = a.alive(app)
-			if err != nil {
+			if errors.Is(err, errors.NotProvisioned) {
+				// State not ready for this application to be provisioned yet.
+				// Usually because the charm has not yet been downloaded.
+				break
+			} else if err != nil {
 				return errors.Trace(err)
 			}
 			if appChanges == nil {
@@ -373,7 +376,7 @@ func (a *appWorker) loop() error {
 			}
 		case <-a.catacomb.Dying():
 			return a.catacomb.ErrDying()
-		case <-appStateChanges:
+		case <-appProvisionChanges:
 			err = handleChange()
 			if err != nil {
 				return errors.Trace(err)
@@ -643,7 +646,7 @@ func (a *appWorker) refreshApplicationStatus(app caas.Application, appLife life.
 		// Only set status to waiting for scale up.
 		// When the application gets scaled down, the desired units will be kept running and
 		// the application should be active always.
-		return a.setApplicationStatus(status.Waiting, "waiting for units settled down", nil)
+		return a.setApplicationStatus(status.Waiting, "waiting for units to settle down", nil)
 	}
 	return a.setApplicationStatus(status.Active, "", nil)
 }
@@ -697,7 +700,10 @@ func (a *appWorker) alive(app caas.Application) error {
 	a.logger.Debugf("ensuring application %q exists", a.name)
 
 	provisionInfo, err := a.facade.ProvisioningInfo(a.name)
-	if err != nil {
+	if errors.Is(err, errors.NotProvisioned) {
+		a.logger.Debugf("application %s is not provisioned yet: %s", a.name, err.Error())
+		return errors.NotProvisioned
+	} else if err != nil {
 		return errors.Annotate(err, "retrieving provisioning info")
 	}
 	if provisionInfo.CharmURL == nil {
@@ -725,22 +731,12 @@ func (a *appWorker) alive(app caas.Application) error {
 		return errors.Annotate(err, "getting OCI image resources")
 	}
 
-	os, err := series.GetOSFromSeries(provisionInfo.Series)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	ver, err := series.SeriesVersion(provisionInfo.Series)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
 	ch := charmInfo.Charm()
 	charmBaseImage, err := podcfg.ImageForBase(provisionInfo.ImageDetails.Repository, charm.Base{
-		Name: strings.ToLower(os.String()),
+		Name: provisionInfo.Base.OS,
 		Channel: charm.Channel{
-			Track: ver,
-			Risk:  charm.Stable,
+			Track: provisionInfo.Base.Channel.Track,
+			Risk:  charm.Risk(provisionInfo.Base.Channel.Risk),
 		},
 	})
 	if err != nil {

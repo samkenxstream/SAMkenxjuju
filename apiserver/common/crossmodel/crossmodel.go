@@ -12,10 +12,12 @@ import (
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/apiserver/common"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/life"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/migration"
+	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/network"
 	"github.com/juju/juju/rpc/params"
@@ -27,7 +29,7 @@ var (
 )
 
 // PublishRelationChange applies the relation change event to the specified backend.
-func PublishRelationChange(backend Backend, relationTag names.Tag, change params.RemoteRelationChangeEvent) error {
+func PublishRelationChange(auth authoriser, backend Backend, relationTag names.Tag, change params.RemoteRelationChangeEvent) error {
 	logger.Debugf("publish into model %v change for %v: %#v", backend.ModelUUID(), relationTag, &change)
 
 	dyingOrDead := change.Life != "" && change.Life != life.Alive
@@ -42,7 +44,7 @@ func PublishRelationChange(backend Backend, relationTag names.Tag, change params
 		return errors.Trace(err)
 	}
 
-	if err := handleSuspendedRelation(change, rel, dyingOrDead); err != nil {
+	if err := handleSuspendedRelation(auth, backend, change, rel, dyingOrDead); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -103,14 +105,41 @@ func PublishRelationChange(backend Backend, relationTag names.Tag, change params
 		}
 	}
 
-	if err := handleDepartedUnits(change, applicationTag, rel); err != nil {
+	if err := handleDepartedUnits(backend, change, applicationTag, rel); err != nil {
 		return errors.Trace(err)
 	}
 
 	return errors.Trace(handleChangedUnits(change, applicationTag, rel))
 }
 
-func handleSuspendedRelation(change params.RemoteRelationChangeEvent, rel Relation, dyingOrDead bool) error {
+type authoriser interface {
+	EntityHasPermission(entity names.Tag, operation permission.Access, target names.Tag) (bool, error)
+}
+
+type offerBackend interface {
+	ApplicationOfferForUUID(offerUUID string) (*crossmodel.ApplicationOffer, error)
+}
+
+// CheckCanConsume checks consume permission for a user on an offer connection.
+func CheckCanConsume(auth authoriser, backend offerBackend, controllerTag, modelTag names.Tag, oc OfferConnection) (bool, error) {
+	user := names.NewUserTag(oc.UserName())
+	ok, err := auth.EntityHasPermission(user, permission.SuperuserAccess, controllerTag)
+	if ok || err != nil && !errors.Is(err, &apiservererrors.AccessRequiredError{}) {
+		return ok, errors.Trace(err)
+	}
+	ok, err = auth.EntityHasPermission(user, permission.AdminAccess, modelTag)
+	if ok || err != nil && !errors.Is(err, &apiservererrors.AccessRequiredError{}) {
+		return ok, errors.Trace(err)
+	}
+
+	offer, err := backend.ApplicationOfferForUUID(oc.OfferUUID())
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	return auth.EntityHasPermission(user, permission.ConsumeAccess, names.NewApplicationOfferTag(offer.ApplicationName))
+}
+
+func handleSuspendedRelation(auth authoriser, backend Backend, change params.RemoteRelationChangeEvent, rel Relation, dyingOrDead bool) error {
 	// Update the relation suspended status.
 	currentStatus := rel.Suspended()
 	if !dyingOrDead && change.Suspended != nil && currentStatus != *change.Suspended {
@@ -123,6 +152,20 @@ func handleSuspendedRelation(change params.RemoteRelationChangeEvent, rel Relati
 			message = change.SuspendedReason
 			if message == "" {
 				message = "suspending after update from remote model"
+			}
+		} else {
+			oc, err := backend.OfferConnectionForRelation(rel.Tag().Id())
+			if err != nil && !errors.Is(err, errors.NotFound) {
+				return errors.Trace(err)
+			}
+			if oc != nil {
+				ok, err := CheckCanConsume(auth, backend, backend.ControllerTag(), backend.ModelTag(), oc)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				if !ok {
+					return apiservererrors.ErrPerm
+				}
 			}
 		}
 		if err := rel.SetSuspended(*change.Suspended, message); err != nil {
@@ -142,7 +185,7 @@ func handleSuspendedRelation(change params.RemoteRelationChangeEvent, rel Relati
 	return nil
 }
 
-func handleDepartedUnits(change params.RemoteRelationChangeEvent, applicationTag names.Tag, rel Relation) error {
+func handleDepartedUnits(backend Backend, change params.RemoteRelationChangeEvent, applicationTag names.Tag, rel Relation) error {
 	for _, id := range change.DepartedUnits {
 		unitTag := names.NewUnitTag(fmt.Sprintf("%s/%v", applicationTag.Id(), id))
 		logger.Debugf("unit %v has departed relation %v", unitTag.Id(), rel.Tag().Id())
@@ -152,6 +195,9 @@ func handleDepartedUnits(change params.RemoteRelationChangeEvent, applicationTag
 		}
 		logger.Debugf("%s leaving scope", unitTag.Id())
 		if err := ru.LeaveScope(); err != nil {
+			return errors.Trace(err)
+		}
+		if err := backend.RemoveSecretConsumer(unitTag); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -424,15 +470,13 @@ func validateIngressNetworks(backend Backend, networks []string) error {
 	}
 
 	// Check that the required ingress is allowed.
-	rule, err := backend.FirewallRule(firewall.JujuApplicationOfferRule)
-	if err != nil && !errors.IsNotFound(err) {
+	cfg, err := backend.ModelConfig()
+	if err != nil {
 		return errors.Trace(err)
 	}
-	if errors.IsNotFound(err) {
-		return nil
-	}
+
 	var whitelistCIDRs, requestedCIDRs []*net.IPNet
-	if err := parseCIDRs(&whitelistCIDRs, rule.WhitelistCIDRs()); err != nil {
+	if err := parseCIDRs(&whitelistCIDRs, cfg.SAASIngressAllow()); err != nil {
 		return errors.Trace(err)
 	}
 	if err := parseCIDRs(&requestedCIDRs, networks); err != nil {
@@ -505,13 +549,28 @@ func GetRelationLifeSuspendedStatusChange(
 type offerGetter interface {
 	ApplicationOfferForUUID(string) (*crossmodel.ApplicationOffer, error)
 	Application(string) (Application, error)
+
+	// IsMigrationActive returns true if the current model is
+	// in the process of being migrated to another controller.
+	IsMigrationActive() (bool, error)
 }
 
-// GetOfferStatusChange returns a status change
-// struct for a specified offer name.
+// GetOfferStatusChange returns a status change struct for the input offer name.
+// If the offer or application are not found during a migration, a specific
+// error to indicate the migration-in-progress is returned.
+// This is interpreted upstream as a watcher error and propagated to the
+// remote CMR consumer.
 func GetOfferStatusChange(st offerGetter, offerUUID, offerName string) (*params.OfferStatusChange, error) {
+	migrating, err := st.IsMigrationActive()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	offer, err := st.ApplicationOfferForUUID(offerUUID)
 	if errors.IsNotFound(err) {
+		if migrating {
+			return nil, migration.ErrMigrating
+		}
 		return &params.OfferStatusChange{
 			OfferName: offerName,
 			Status: params.EntityStatus{
@@ -522,9 +581,12 @@ func GetOfferStatusChange(st offerGetter, offerUUID, offerName string) (*params.
 	} else if err != nil {
 		return nil, errors.Trace(err)
 	}
-	// TODO(wallyworld) - for now, offer status is just the application status
+
 	app, err := st.Application(offer.ApplicationName)
 	if errors.IsNotFound(err) {
+		if migrating {
+			return nil, migration.ErrMigrating
+		}
 		return &params.OfferStatusChange{
 			OfferName: offerName,
 			Status: params.EntityStatus{
@@ -536,8 +598,6 @@ func GetOfferStatusChange(st offerGetter, offerUUID, offerName string) (*params.
 		return nil, errors.Trace(err)
 	}
 
-	// We use the status from the cached application as that is where
-	// the derived status from the units are handled if this is necessary.
 	sts := status.StatusInfo{
 		Status: status.Unknown,
 	}

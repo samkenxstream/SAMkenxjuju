@@ -4,7 +4,7 @@
 package secrets_test
 
 import (
-	"time"
+	"fmt"
 
 	"github.com/golang/mock/gomock"
 	"github.com/juju/cmd/v3/cmdtesting"
@@ -46,106 +46,92 @@ func (s *ListSuite) setup(c *gc.C) *gomock.Controller {
 func (s *ListSuite) TestListTabular(c *gc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretsAPI.EXPECT().ListSecrets(false).Return(
+	uri := coresecrets.NewURI()
+	uri2 := coresecrets.NewURI()
+	s.secretsAPI.EXPECT().ListSecrets(false, coresecrets.Filter{}).Return(
 		[]apisecrets.SecretDetails{{
 			Metadata: coresecrets.SecretMetadata{
-				ID: 666, RotateInterval: time.Hour,
-				Revision: 2, Path: "app/mariadb/password", Provider: "juju"},
+				URI: uri, RotatePolicy: coresecrets.RotateHourly,
+				LatestRevision: 2, OwnerTag: "application-mysql"},
 		}, {
 			Metadata: coresecrets.SecretMetadata{
-				ID:       667,
-				Revision: 1, Path: "app/gitlab/apitoken", Provider: "juju"},
+				URI:            uri2,
+				LatestRevision: 1, OwnerTag: "application-mariadb"},
 		}}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	ctx, err := cmdtesting.RunCommand(c, secrets.NewListCommandForTest(s.store, s.secretsAPI))
 	c.Assert(err, jc.ErrorIsNil)
 	out := cmdtesting.Stdout(ctx)
-	c.Assert(out, gc.Equals, `
-ID   Revision  Rotate  Backend  Path                  Age
-666         2  1h      juju     app/mariadb/password  0001-01-01  
-667         1  never   juju     app/gitlab/apitoken   0001-01-01  
-
-`[1:])
+	c.Assert(out, gc.Equals, fmt.Sprintf(`
+ID                    Owner    Rotation  Revision  Last updated
+%s  mariadb  never            1  0001-01-01  
+%s  mysql    hourly           2  0001-01-01  
+`[1:], uri2.ID, uri.ID))
 }
 
 func (s *ListSuite) TestListYAML(c *gc.C) {
 	defer s.setup(c).Finish()
 
-	secretUrl, err := coresecrets.ParseURL("secret://app/mariadb/password")
-	c.Assert(err, jc.ErrorIsNil)
-	secretUrl2, err := coresecrets.ParseURL("secret://app/gitlab/apitoken")
-	c.Assert(err, jc.ErrorIsNil)
-	s.secretsAPI.EXPECT().ListSecrets(true).Return(
+	uri := coresecrets.NewURI()
+	uri2 := coresecrets.NewURI()
+	s.secretsAPI.EXPECT().ListSecrets(false, coresecrets.Filter{}).Return(
 		[]apisecrets.SecretDetails{{
 			Metadata: coresecrets.SecretMetadata{
-				URL: secretUrl, ID: 666, RotateInterval: time.Hour,
-				Version: 1, Revision: 2, Path: "app/mariadb/password", Provider: "juju",
-				Status: coresecrets.StatusActive, Description: "my secret",
-				Tags: map[string]string{"foo": "bar"},
+				URI: uri, RotatePolicy: coresecrets.RotateHourly,
+				Version: 1, LatestRevision: 2,
+				Description: "my secret",
+				OwnerTag:    "application-mysql",
+				Label:       "foobar",
 			},
 			Value: coresecrets.NewSecretValue(map[string]string{"foo": "YmFy"}),
 		}, {
 			Metadata: coresecrets.SecretMetadata{
-				URL: secretUrl2, ID: 667, Version: 1, Revision: 1, Path: "app/gitlab/apitoken", Provider: "juju",
-				Status: coresecrets.StatusStaged,
+				URI: uri2, Version: 1, LatestRevision: 1, OwnerTag: "application-mariadb",
 			},
 			Error: "boom",
 		}}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
-	ctx, err := cmdtesting.RunCommand(c, secrets.NewListCommandForTest(s.store, s.secretsAPI), "--format", "yaml", "--show-secrets")
+	ctx, err := cmdtesting.RunCommand(c, secrets.NewListCommandForTest(s.store, s.secretsAPI), "--format", "yaml")
 	c.Assert(err, jc.ErrorIsNil)
 	out := cmdtesting.Stdout(ctx)
-	c.Assert(out, gc.Equals, `
-- ID: 666
-  URL: secret://app/mariadb/password
+	c.Assert(out, gc.Equals, fmt.Sprintf(`
+%s:
   revision: 2
-  path: app/mariadb/password
-  status: active
-  rotate-interval: 1h0m0s
-  version: 1
+  rotation: hourly
+  owner: mysql
   description: my secret
-  tags:
-    foo: bar
-  backend: juju
-  create-time: 0001-01-01T00:00:00Z
-  update-time: 0001-01-01T00:00:00Z
-  value:
-    foo: bar
-- ID: 667
-  URL: secret://app/gitlab/apitoken
+  label: foobar
+  created: 0001-01-01T00:00:00Z
+  updated: 0001-01-01T00:00:00Z
+%s:
   revision: 1
-  path: app/gitlab/apitoken
-  status: staged
-  version: 1
-  backend: juju
-  create-time: 0001-01-01T00:00:00Z
-  update-time: 0001-01-01T00:00:00Z
+  owner: mariadb
+  created: 0001-01-01T00:00:00Z
+  updated: 0001-01-01T00:00:00Z
   error: boom
-`[1:])
+`[1:], uri.ID, uri2.ID))
 }
 
 func (s *ListSuite) TestListJSON(c *gc.C) {
 	defer s.setup(c).Finish()
 
-	secretUrl, err := coresecrets.ParseURL("secret://app/mariadb/password")
-	c.Assert(err, jc.ErrorIsNil)
-	s.secretsAPI.EXPECT().ListSecrets(true).Return(
+	uri := coresecrets.NewURI()
+	s.secretsAPI.EXPECT().ListSecrets(false, coresecrets.Filter{}).Return(
 		[]apisecrets.SecretDetails{{
 			Metadata: coresecrets.SecretMetadata{
-				URL: secretUrl, ID: 666,
-				Version: 1, Revision: 2, Path: "app/mariadb/password", Provider: "juju",
-				Status: coresecrets.StatusActive,
+				URI:     uri,
+				Version: 1, LatestRevision: 2, OwnerTag: "application-mariadb",
 			},
 			Value: coresecrets.NewSecretValue(map[string]string{"foo": "YmFy"}),
 		}}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
-	ctx, err := cmdtesting.RunCommand(c, secrets.NewListCommandForTest(s.store, s.secretsAPI), "--format", "json", "--show-secrets")
+	ctx, err := cmdtesting.RunCommand(c, secrets.NewListCommandForTest(s.store, s.secretsAPI), "--format", "json")
 	c.Assert(err, jc.ErrorIsNil)
 	out := cmdtesting.Stdout(ctx)
-	c.Assert(out, gc.Equals, `
-[{"ID":666,"URL":"secret://app/mariadb/password","revision":2,"path":"app/mariadb/password","status":"active","version":1,"backend":"juju","create-time":"0001-01-01T00:00:00Z","update-time":"0001-01-01T00:00:00Z","value":{"Data":{"foo":"bar"}}}]
-`[1:])
+	c.Assert(out, gc.Equals, fmt.Sprintf(`
+{"%s":{"revision":2,"owner":"mariadb","created":"0001-01-01T00:00:00Z","updated":"0001-01-01T00:00:00Z"}}
+`[1:], uri.ID))
 }

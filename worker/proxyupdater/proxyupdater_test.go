@@ -5,7 +5,6 @@ package proxyupdater_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,7 +155,7 @@ func (s *ProxyUpdaterSuite) waitForFile(c *gc.C, filename, expected string) {
 			c.Fatalf("timeout while waiting for proxy settings to change")
 			return
 		case <-time.After(10 * time.Millisecond):
-			fileContent, err := ioutil.ReadFile(filename)
+			fileContent, err := os.ReadFile(filename)
 			if os.IsNotExist(err) {
 				continue
 			}
@@ -166,21 +165,6 @@ func (s *ProxyUpdaterSuite) waitForFile(c *gc.C, filename, expected string) {
 				continue
 			}
 			return
-		}
-	}
-}
-
-func (s *ProxyUpdaterSuite) assertNoFile(c *gc.C, filename string) {
-	maxWait := time.After(coretesting.ShortWait)
-	for {
-		select {
-		case <-maxWait:
-			return
-		case <-time.After(10 * time.Millisecond):
-			_, err := os.Stat(filename)
-			if err == nil {
-				c.Fatalf("file %s exists", filename)
-			}
 		}
 	}
 }

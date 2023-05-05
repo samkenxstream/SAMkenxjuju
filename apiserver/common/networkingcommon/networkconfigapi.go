@@ -13,7 +13,7 @@ import (
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/apiserver/common"
@@ -405,16 +405,12 @@ func (o *updateMachineLinkLayerOp) processSubnets(name string) ([]txn.Op, error)
 	cidrSet := set.NewStrings()
 	var isVLAN bool
 	for _, matching := range o.Incoming().GetByName(name) {
-		if matching.InterfaceType == network.LoopbackDevice {
-			continue
-		}
-
 		if matching.IsVLAN() {
 			isVLAN = true
 		}
 
 		for _, addr := range matching.Addresses {
-			if addr.CIDR != "" {
+			if addr.Scope != network.ScopeMachineLocal && addr.CIDR != "" {
 				cidrSet.Add(addr.CIDR)
 			}
 		}

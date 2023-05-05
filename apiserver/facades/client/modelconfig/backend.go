@@ -7,8 +7,8 @@ import (
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/constraints"
+	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/state"
 )
@@ -25,9 +25,9 @@ type Backend interface {
 	SetSLA(level, owner string, credentials []byte) error
 	SLALevel() (string, error)
 	SpaceByName(string) error
-	ControllerConfig() (controller.Config, error)
 	SetModelConstraints(value constraints.Value) error
 	ModelConstraints() (constraints.Value, error)
+	GetSecretBackend(string) (*coresecrets.SecretBackend, error)
 }
 
 type stateShim struct {
@@ -55,6 +55,11 @@ func (st stateShim) ModelTag() names.ModelTag {
 func (st stateShim) SpaceByName(name string) error {
 	_, err := st.State.SpaceByName(name)
 	return err
+}
+
+func (st stateShim) GetSecretBackend(name string) (*coresecrets.SecretBackend, error) {
+	backends := state.NewSecretBackends(st.State)
+	return backends.GetSecretBackend(name)
 }
 
 // NewStateBackend creates a backend for the facade to use.

@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	"github.com/juju/errors"
@@ -37,14 +37,14 @@ func (s *backupsSuite) SetUpTest(c *gc.C) {
 	s.backupURL = s.server.URL + fmt.Sprintf("/model/%s/backups", s.State.ModelUUID())
 	s.fake = &backupstesting.FakeBackups{}
 	s.PatchValue(apiserver.NewBackups,
-		func() backups.Backups {
+		func(path *backups.Paths) backups.Backups {
 			return s.fake
 		},
 	)
 }
 
 func (s *backupsSuite) assertErrorResponse(c *gc.C, resp *http.Response, statusCode int, msg string) *params.Error {
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 
 	c.Assert(resp.StatusCode, gc.Equals, statusCode, gc.Commentf("body: %s", body))
@@ -62,7 +62,7 @@ func (s *backupsSuite) TestRequiresAuth(c *gc.C) {
 	defer resp.Body.Close()
 
 	c.Assert(resp.StatusCode, gc.Equals, http.StatusUnauthorized)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(body), gc.Equals, "authentication failed: no credentials provided\n")
 }
@@ -82,7 +82,7 @@ func (s *backupsSuite) TestInvalidHTTPMethods(c *gc.C) {
 
 func (s *backupsSuite) TestAuthRequiresClientNotMachine(c *gc.C) {
 	// Add a machine and try to login.
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine.SetProvisioned("foo", "", "fake_nonce", nil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -98,7 +98,10 @@ func (s *backupsSuite) TestAuthRequiresClientNotMachine(c *gc.C) {
 		URL:      s.backupURL,
 		Nonce:    "fake_nonce",
 	})
-	s.assertErrorResponse(c, resp, http.StatusInternalServerError, "tag kind machine not valid")
+	c.Assert(resp.StatusCode, gc.Equals, http.StatusForbidden)
+	body, err := io.ReadAll(resp.Body)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(string(body), gc.Equals, "authorization failed: machine 0 is not a user\n")
 
 	// Now try a user login.
 	resp = s.sendHTTPRequest(c, apitesting.HTTPRequestParams{Method: "POST", URL: s.backupURL})
@@ -114,7 +117,7 @@ func (s *backupsSuite) sendValidGet(c *gc.C) (resp *http.Response, archiveBytes 
 	c.Assert(err, jc.ErrorIsNil)
 	archiveBytes = archive.Bytes()
 	s.fake.Meta = meta
-	s.fake.Archive = ioutil.NopCloser(archive)
+	s.fake.Archive = io.NopCloser(archive)
 
 	return s.sendHTTPRequest(c, apitesting.HTTPRequestParams{
 		Method:      "GET",
@@ -149,7 +152,7 @@ func (s *backupsSuite) TestBody(c *gc.C) {
 	resp, archiveBytes := s.sendValidGet(c)
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(body, jc.DeepEquals, archiveBytes)
 }

@@ -4,7 +4,6 @@
 package backups
 
 import (
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,11 +12,10 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
 
 	"github.com/juju/juju/mongo"
-	"github.com/juju/juju/state/imagestorage"
 )
 
 // db is a surrogate for the proverbial DB layer abstraction that we
@@ -52,8 +50,7 @@ type DBInfo struct {
 var ignoredDatabases = set.NewStrings(
 	"admin",
 	"backups",
-	"presence",            // note: this is still backed up anyway
-	imagestorage.ImagesDB, // note: this is still backed up anyway
+	"presence", // note: this is still backed up anyway
 )
 
 // DBSession is a subset of mgo.Session.
@@ -121,13 +118,16 @@ func getBackupTargetDatabases(session DBSession) (set.Strings, error) {
 const (
 	dumpName       = "mongodump"
 	snapToolPrefix = "juju-db."
-	snapTmpDir     = "/tmp/snap.juju-db"
+	snapTmpDir     = "/tmp/snap-private-tmp/snap.juju-db"
 )
 
 // DBDumper is any type that dumps something to a dump dir.
 type DBDumper interface {
 	// Dump something to dumpDir.
 	Dump(dumpDir string) error
+
+	// IsSnap returns true if we are using the juju-db snap.
+	IsSnap() bool
 }
 
 var getMongodumpPath = func() (string, error) {
@@ -197,30 +197,23 @@ func (md *mongoDumper) options(dumpDir string) []string {
 }
 
 func (md *mongoDumper) dump(dumpDir string) error {
-	options := md.options(dumpDir)
+	// Works around https://bugs.launchpad.net/snapd/+bug/1999109
+	// If running the juju-db.mongodump snap and staging to /tmp,
+	// it outputs to /tmp/snap-private-tmp/snap.juju-db/<dumpDir>
+	dumpDirArg := dumpDir
+	if md.IsSnap() && strings.HasPrefix(dumpDirArg, snapTmpDir) {
+		dumpDirArg = strings.TrimPrefix(dumpDirArg, snapTmpDir)
+	}
+
+	options := md.options(dumpDirArg)
 	if err := runCommandFn(md.binPath, options...); err != nil {
 		return errors.Annotate(err, "error dumping databases")
 	}
-
-	// If running the juju-db.mongodump Snap, it outputs to
-	// /tmp/snap.juju-db/DUMPDIR, so move to /DUMPDIR as our code expects.
-	if md.isSnap() && strings.HasPrefix(dumpDir, "/tmp") {
-		actualDir := filepath.Join(snapTmpDir, dumpDir)
-		logger.Tracef("moving from Snap dump dir %q to %q", actualDir, dumpDir)
-		err := os.Remove(dumpDir) // will be empty, delete
-		if err != nil {
-			return errors.Trace(err)
-		}
-		err = os.Rename(actualDir, dumpDir)
-		if err != nil {
-			return errors.Trace(err)
-		}
-	}
-
 	return nil
 }
 
-func (md *mongoDumper) isSnap() bool {
+// IsSnap returns true if we are using the juju-db snap.
+func (md *mongoDumper) IsSnap() bool {
 	return filepath.Base(md.binPath) == snapToolPrefix+dumpName
 }
 
@@ -274,28 +267,34 @@ func stripIgnored(ignored set.Strings, dumpDir string) error {
 // mongodump.  Note that, while mongodump is unlikely to change behavior
 // in this regard, this is not a documented guaranteed behavior.
 func listDatabases(dumpDir string) (set.Strings, error) {
-	list, err := ioutil.ReadDir(dumpDir)
+	dirEntries, err := os.ReadDir(dumpDir)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	logger.Tracef("%d files found in dump dir", len(list))
-	for _, info := range list {
+	logger.Tracef("%d files found in dump dir", len(dirEntries))
+	for _, entry := range dirEntries {
+		fi, err := entry.Info()
+		if err != nil {
+			logger.Errorf("failed to read file info: %s", entry.Name())
+			continue
+		}
+
 		logger.Tracef("file found in dump dir: %q dir=%v size=%d",
-			info.Name(), info.IsDir(), info.Size())
+			fi.Name(), fi.IsDir(), fi.Size())
 	}
-	if len(list) < 2 {
+	if len(dirEntries) < 2 {
 		// Should be *at least* oplog.bson and a data directory
-		return nil, errors.Errorf("too few files in dump dir (%d)", len(list))
+		return nil, errors.Errorf("too few files in dump dir %s (%d)", dumpDir, len(dirEntries))
 	}
 
 	databases := make(set.Strings)
-	for _, info := range list {
-		if !info.IsDir() {
+	for _, entry := range dirEntries {
+		if !entry.IsDir() {
 			// Notably, oplog.bson is thus excluded here.
 			continue
 		}
-		databases.Add(info.Name())
+		databases.Add(entry.Name())
 	}
 	return databases, nil
 }

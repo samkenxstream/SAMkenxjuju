@@ -7,15 +7,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
+	"github.com/juju/errors"
+	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/worker/uniter/remotestate"
-	"github.com/juju/names/v4"
 )
 
 func newMockWatcher() *mockWatcher {
@@ -295,7 +297,7 @@ func (u *mockUnit) WatchInstanceData() (watcher.NotifyWatcher, error) {
 }
 
 func (u *mockUnit) UpgradeSeriesStatus() (model.UpgradeSeriesStatus, string, error) {
-	return model.UpgradeSeriesPrepareStarted, "focal", nil
+	return model.UpgradeSeriesPrepareStarted, "ubuntu@20.04", nil
 }
 
 func (u *mockUnit) SetUpgradeSeriesStatus(status model.UpgradeSeriesStatus) error {
@@ -399,12 +401,12 @@ func (t *mockTicket) Wait() bool {
 	return t.result
 }
 
-type mockRotateSecretsWatcher struct {
-	rotateCh chan []string
-	stopCh   chan struct{}
+type mockSecretTriggerWatcher struct {
+	ch     chan []string
+	stopCh chan struct{}
 }
 
-func (w *mockRotateSecretsWatcher) Kill() {
+func (w *mockSecretTriggerWatcher) Kill() {
 	select {
 	case <-w.stopCh:
 	default:
@@ -412,6 +414,40 @@ func (w *mockRotateSecretsWatcher) Kill() {
 	}
 }
 
-func (*mockRotateSecretsWatcher) Wait() error {
+func (*mockSecretTriggerWatcher) Wait() error {
 	return nil
+}
+
+type mockSecretsClient struct {
+	secretsWatcher          *mockStringsWatcher
+	secretsRevisionsWatcher *mockStringsWatcher
+	unitName                string
+	owners                  []names.Tag
+}
+
+func (m *mockSecretsClient) WatchConsumedSecretsChanges(unitName string) (watcher.StringsWatcher, error) {
+	m.unitName = unitName
+	return m.secretsWatcher, nil
+}
+
+func (m *mockSecretsClient) GetConsumerSecretsRevisionInfo(unitName string, uris []string) (map[string]secrets.SecretRevisionInfo, error) {
+	if unitName != m.unitName {
+		return nil, errors.NotFoundf("unit %q", unitName)
+	}
+	result := make(map[string]secrets.SecretRevisionInfo)
+	for i, uri := range uris {
+		if i == 0 {
+			continue
+		}
+		result[uri] = secrets.SecretRevisionInfo{
+			Revision: 665 + i,
+			Label:    "label-" + uri,
+		}
+	}
+	return result, nil
+}
+
+func (m *mockSecretsClient) WatchObsolete(owners ...names.Tag) (watcher.StringsWatcher, error) {
+	m.owners = owners
+	return m.secretsRevisionsWatcher, nil
 }

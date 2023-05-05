@@ -91,9 +91,9 @@ type LocalState struct {
 	// controller.
 	CompletedActions map[string]struct{}
 
-	// UpgradeSeriesStatus is the current state of any currently running
+	// UpgradeMachineStatus is the current state of any currently running
 	// upgrade series.
-	UpgradeSeriesStatus model.UpgradeSeriesStatus
+	UpgradeMachineStatus model.UpgradeSeriesStatus
 
 	// ContainerRunningStatus is the current state of remote containers for CAAS.
 	ContainerRunningStatus *remotestate.ContainerRunningStatus
@@ -101,4 +101,7 @@ type LocalState struct {
 	// OutdatedRemoteCharm is true when an upgrade has happened but the remotestate
 	// needs an update.
 	OutdatedRemoteCharm bool
+
+	// HookWasShutdown is true if the hook exited due to a SIGTERM.
+	HookWasShutdown bool
 }

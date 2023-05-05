@@ -1,9 +1,6 @@
 // Copyright 2012-2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package state enables reading, observing, and changing
-// the state stored in MongoDB of a whole model
-// managed by juju.
 package state
 
 import (
@@ -14,18 +11,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
-	csparams "github.com/juju/charmrepo/v7/csclient/params"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 	"github.com/juju/pubsub/v2"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
 
@@ -34,17 +30,13 @@ import (
 	"github.com/juju/juju/core/config"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/lease"
 	corenetwork "github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/os"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/core/raftlease"
 	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/mongo"
 	"github.com/juju/juju/state/cloudimagemetadata"
 	stateerrors "github.com/juju/juju/state/errors"
-	raftleasestore "github.com/juju/juju/state/raftlease"
 	"github.com/juju/juju/state/watcher"
 	"github.com/juju/juju/storage"
 	jujuversion "github.com/juju/juju/version"
@@ -76,6 +68,7 @@ type State struct {
 	policy                 Policy
 	newPolicy              NewPolicyFunc
 	runTransactionObserver RunTransactionObserverFunc
+	maxTxnAttempts         int
 
 	// workers is responsible for keeping the various sub-workers
 	// available by starting new ones as they fail. It doesn't do
@@ -97,6 +90,7 @@ func (st *State) newStateNoWorkers(modelUUID string) (*State, error) {
 		st.newPolicy,
 		st.stateClock,
 		st.runTransactionObserver,
+		st.maxTxnAttempts,
 	)
 	// We explicitly don't start the workers.
 	if err != nil {
@@ -244,41 +238,14 @@ func (st *State) RemoveExportingModelDocs() error {
 }
 
 func (st *State) removeAllModelDocs(modelAssertion bson.D) error {
-	modelUUID := st.ModelUUID()
-
-	// Gather all user permissions for the model.
-	// Do this first because we remove some parent docs below.
-	var permOps []txn.Op
-	permPattern := bson.M{
-		"_id": bson.M{"$regex": "^" + permissionID(modelKey(modelUUID), "")},
-	}
-	ops, err := st.removeInCollectionOps(permissionsC, permPattern)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	permOps = append(permOps, ops...)
-	// Gather all offer permissions for the model.
-	ao := NewApplicationOffers(st)
-	allOffers, err := ao.AllApplicationOffers()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	for _, offer := range allOffers {
-		permPattern = bson.M{
-			"_id": bson.M{"$regex": "^" + permissionID(applicationOfferKey(offer.OfferUUID), "")},
-		}
-		ops, err = st.removeInCollectionOps(permissionsC, permPattern)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		permOps = append(permOps, ops...)
-	}
-	err = st.db().RunTransaction(permOps)
-	if err != nil {
-		return errors.Trace(err)
+	// Remove permissions first, because we potentially
+	// remove parent documents in the following stage.
+	if err := st.removeAllModelPermissions(); err != nil {
+		return errors.Annotate(err, "removing permissions")
 	}
 
 	// Remove each collection in its own transaction.
+	modelUUID := st.ModelUUID()
 	for name, info := range st.database.Schema() {
 		if info.global || info.rawAccess {
 			continue
@@ -321,7 +288,7 @@ func (st *State) removeAllModelDocs(modelAssertion bson.D) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	ops = []txn.Op{{
+	ops := []txn.Op{{
 		// Cleanup the owner:envName unique key.
 		C:      usermodelnameC,
 		Id:     model.uniqueIndexID(),
@@ -347,7 +314,42 @@ func (st *State) removeAllModelDocs(modelAssertion bson.D) error {
 	if !st.IsController() {
 		ops = append(ops, decHostedModelCountOp())
 	}
-	return st.db().RunTransaction(ops)
+	return errors.Trace(st.db().RunTransaction(ops))
+}
+
+// removeAllModelPermissions removes all direct permissions documents for
+// this model, and all permissions for offers hosted by this model.
+func (st *State) removeAllModelPermissions() error {
+	var permOps []txn.Op
+	permPattern := bson.M{
+		"_id": bson.M{"$regex": "^" + permissionID(modelKey(st.ModelUUID()), "")},
+	}
+	ops, err := st.removeInCollectionOps(permissionsC, permPattern)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	permOps = append(permOps, ops...)
+
+	applicationOffersCollection, closer := st.db().GetCollection(applicationOffersC)
+	defer closer()
+
+	var offerDocs []applicationOfferDoc
+	if err := applicationOffersCollection.Find(bson.D{}).All(&offerDocs); err != nil {
+		return errors.Annotate(err, "getting application offer documents")
+	}
+
+	for _, offer := range offerDocs {
+		permPattern = bson.M{
+			"_id": bson.M{"$regex": "^" + permissionID(applicationOfferKey(offer.OfferUUID), "")},
+		}
+		ops, err = st.removeInCollectionOps(permissionsC, permPattern)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		permOps = append(permOps, ops...)
+	}
+	err = st.db().RunTransaction(permOps)
+	return errors.Trace(err)
 }
 
 // removeAllInCollectionRaw removes all the documents from the given
@@ -388,8 +390,9 @@ func (st *State) removeInCollectionOps(name string, sel interface{}) ([]txn.Op, 
 }
 
 // startWorkers starts the worker backends on the *State
-//   * txn log watcher
-//   * txn log pruner
+//   - txn log watcher
+//   - txn log pruner
+//
 // startWorkers will close the *State if it fails.
 func (st *State) startWorkers(hub *pubsub.SimpleHub) (err error) {
 	defer func() {
@@ -409,29 +412,6 @@ func (st *State) startWorkers(hub *pubsub.SimpleHub) (err error) {
 	st.workers = workers
 	logger.Infof("started state workers for %s successfully", st.modelTag)
 	return nil
-}
-
-// ApplicationLeaders returns a map of the application name to the
-// unit name that is the current leader.
-func (st *State) ApplicationLeaders() (map[string]string, error) {
-	return raftleasestore.LeaseHolders(
-		&environMongo{st},
-		leaseHoldersC,
-		lease.ApplicationLeadershipNamespace,
-		st.ModelUUID(),
-	)
-}
-
-// LeaseNotifyTarget returns a raftlease.NotifyTarget for storing
-// lease changes in the database.
-func (st *State) LeaseNotifyTarget(logger raftleasestore.Logger) raftlease.NotifyTarget {
-	return raftleasestore.NewNotifyTarget(&environMongo{st}, leaseHoldersC, logger)
-}
-
-// LeaseTrapdoorFunc returns a raftlease.TrapdoorFunc for checking
-// lease state in a database.
-func (st *State) LeaseTrapdoorFunc() raftlease.TrapdoorFunc {
-	return raftleasestore.MakeTrapdoorFunc(&environMongo{st}, leaseHoldersC)
 }
 
 // ModelUUID returns the model UUID for the model
@@ -715,48 +695,38 @@ func (st *State) AllMachines() ([]*Machine, error) {
 	return st.allMachines(machinesCollection)
 }
 
-// MachineCountForSeries counts the machines for the provided series in the model.
-func (st *State) MachineCountForSeries(series ...string) (map[string]int, error) {
+// MachineCountForBase counts the machines for the provided bases in the model.
+// The bases must all be for the one os.
+func (st *State) MachineCountForBase(base ...Base) (map[string]int, error) {
 	machinesCollection, closer := st.db().GetCollection(machinesC)
 	defer closer()
-	pipe := machinesCollection.Pipe([]bson.M{
-		{
-			"$match": bson.M{
-				"series":     bson.M{"$in": series},
-				"model-uuid": st.ModelUUID(),
-			},
-		},
-		{
-			"$group": bson.M{
-				"_id": "$series", "count": bson.M{"$sum": 1},
-			},
-		},
-		{
-			"$sort": bson.M{"_id": 1},
-		},
-		{
-			"$group": bson.M{
-				"_id": nil,
-				"counts": bson.M{
-					"$push": bson.M{"k": "$_id", "v": "$count"},
-				},
-			},
-		},
-		{
-			"$replaceRoot": bson.M{
-				"newRoot": bson.M{"$arrayToObject": "$counts"},
-			},
-		},
-	})
-	var result []map[string]int
-	err := pipe.All(&result)
+
+	var (
+		os       string
+		channels []string
+	)
+	for _, b := range base {
+		if os != "" && os != b.OS {
+			return nil, errors.New("bases must all be for the same OS")
+		}
+		os = b.OS
+		channels = append(channels, b.Normalise().Channel)
+	}
+
+	var docs []machineDoc
+	err := machinesCollection.Find(bson.D{
+		{"base.channel", bson.D{{"$in", channels}}},
+		{"base.os", os},
+	}).Select(bson.M{"base": 1}).All(&docs)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if len(result) > 0 {
-		return result[0], nil
+	result := make(map[string]int)
+	for _, m := range docs {
+		b := m.Base.DisplayString()
+		result[b] = result[b] + 1
 	}
-	return nil, nil
+	return result, nil
 }
 
 type machineDocSlice []machineDoc
@@ -1117,10 +1087,8 @@ func (st *State) CloudService(id string) (*CloudService, error) {
 
 type AddApplicationArgs struct {
 	Name              string
-	Series            string
 	Charm             *Charm
 	CharmOrigin       *CharmOrigin
-	Channel           csparams.Channel
 	Storage           map[string]StorageConstraints
 	Devices           map[string]DeviceConstraints
 	AttachStorage     []names.StorageTag
@@ -1146,14 +1114,19 @@ func (st *State) AddApplication(args AddApplicationArgs) (_ *Application, err er
 	if args.Charm == nil {
 		return nil, errors.Errorf("charm is nil")
 	}
+	if args.CharmOrigin == nil {
+		return nil, errors.Errorf("charm origin is nil")
+	}
+	if args.CharmOrigin.Platform == nil {
+		return nil, errors.Errorf("charm origin platform is nil")
+	}
 
 	// If either the charm origin ID or Hash is set before a charm is
 	// downloaded, charm download will fail for charms with a forced series.
 	// The logic (refreshConfig) in sending the correct request to charmhub
 	// will break.
-	if args.CharmOrigin != nil &&
-		((args.CharmOrigin.ID != "" && args.CharmOrigin.Hash == "") ||
-			(args.CharmOrigin.ID == "" && args.CharmOrigin.Hash != "")) {
+	if (args.CharmOrigin.ID != "" && args.CharmOrigin.Hash == "") ||
+		(args.CharmOrigin.ID == "" && args.CharmOrigin.Hash != "") {
 		return nil, errors.BadRequestf("programming error, AddApplication, neither CharmOrigin ID nor Hash can be set before a charm is downloaded. See CharmHubRepository GetDownloadURL.")
 	}
 
@@ -1287,11 +1260,9 @@ func (st *State) AddApplication(args AddApplicationArgs) (_ *Application, err er
 		DocID:         applicationID,
 		Name:          args.Name,
 		ModelUUID:     st.ModelUUID(),
-		Series:        args.Series,
 		Subordinate:   subordinate,
 		CharmURL:      &cURL,
-		CharmOrigin:   args.CharmOrigin,
-		Channel:       string(args.Channel),
+		CharmOrigin:   *args.CharmOrigin,
 		RelationCount: len(peers),
 		Life:          Alive,
 		UnitCount:     args.NumUnits,
@@ -1439,61 +1410,56 @@ func (st *State) AddApplication(args AddApplicationArgs) (_ *Application, err er
 	return nil, errors.Trace(err)
 }
 
-func (st *State) processCommonModelApplicationArgs(args *AddApplicationArgs) error {
-	if args.Series == "" {
-		// args.Release is not set, so use the series in the URL.
-		args.Series = args.Charm.URL().Series
-		if args.Series == "" {
-			// Should not happen, but just in case.
-			return errors.New("series is empty")
+func (st *State) processCommonModelApplicationArgs(args *AddApplicationArgs) (Base, error) {
+	// User has specified series. Overriding supported series is
+	// handled by the client, so args.Release is not necessarily
+	// one of the charm's supported series. We require that the
+	// specified series is of the same operating system as one of
+	// the supported series. For old-style charms with the series
+	// in the URL, that series is the one and only supported
+	// series.
+	appBase, err := series.ParseBase(args.CharmOrigin.Platform.OS, args.CharmOrigin.Platform.Channel)
+	if err != nil {
+		return Base{}, errors.Trace(err)
+	}
+
+	var supportedSeries []string
+	if cSeries := args.Charm.URL().Series; cSeries != "" {
+		supportedSeries = []string{cSeries}
+		// If a charm has a url, but is a kubernetes charm then we need to
+		// add this to the list of supported series.
+		if cSeries != series.Kubernetes.String() &&
+			(set.NewStrings(args.Charm.Meta().Series...).Contains(series.Kubernetes.String()) ||
+				len(args.Charm.Meta().Containers) > 0) {
+			supportedSeries = append(supportedSeries, series.Kubernetes.String())
 		}
 	} else {
-		// User has specified series. Overriding supported series is
-		// handled by the client, so args.Release is not necessarily
-		// one of the charm's supported series. We require that the
-		// specified series is of the same operating system as one of
-		// the supported series. For old-style charms with the series
-		// in the URL, that series is the one and only supported
-		// series.
-		var supportedSeries []string
-		if cSeries := args.Charm.URL().Series; cSeries != "" {
-			supportedSeries = []string{cSeries}
-			// If a charm has a url, but is a kubernetes charm then we need to
-			// add this to the list of supported series.
-			if cSeries != series.Kubernetes.String() &&
-				(set.NewStrings(args.Charm.Meta().Series...).Contains(series.Kubernetes.String()) ||
-					len(args.Charm.Meta().Containers) > 0) {
-				supportedSeries = append(supportedSeries, series.Kubernetes.String())
-			}
-		} else {
-			var err error
-			supportedSeries, err = corecharm.ComputedSeries(args.Charm)
-			if err != nil {
-				return errors.Trace(err)
-			}
+		var err error
+		supportedSeries, err = corecharm.ComputedSeries(args.Charm)
+		if err != nil {
+			return Base{}, errors.Trace(err)
 		}
-		if len(supportedSeries) > 0 {
-			// TODO(sidecar): handle computed series
-			seriesOS, err := series.GetOSFromSeries(args.Series)
+	}
+	if len(supportedSeries) > 0 {
+		supportedOperatingSystems := make(map[string]bool)
+		for _, chSeries := range supportedSeries {
+			if chSeries == series.Kubernetes.String() {
+				chSeries = series.LegacyKubernetesSeries()
+			}
+			os, err := series.GetOSFromSeries(chSeries)
 			if err != nil {
-				return errors.Trace(err)
+				// If we can't figure out a series written in the charm
+				// just skip it.
+				continue
 			}
-			supportedOperatingSystems := make(map[os.OSType]bool)
-			for _, supportedSeries := range supportedSeries {
-				os, err := series.GetOSFromSeries(supportedSeries)
-				if err != nil {
-					// If we can't figure out a series written in the charm
-					// just skip it.
-					continue
-				}
-				supportedOperatingSystems[os] = true
-			}
-			if !supportedOperatingSystems[seriesOS] {
-				return errors.NewNotSupported(errors.Errorf(
-					"series %q (OS %q) not supported by charm, supported series are %q",
-					args.Series, seriesOS, strings.Join(supportedSeries, ", "),
-				), "")
-			}
+			supportedOperatingSystems[strings.ToLower(os.String())] = true
+		}
+		if !supportedOperatingSystems[appBase.OS] {
+			series, _ := series.GetSeriesFromBase(appBase)
+			return Base{}, errors.NewNotSupported(errors.Errorf(
+				"series %q not supported by charm, supported series are %q",
+				series, strings.Join(supportedSeries, ", "),
+			), "")
 		}
 	}
 
@@ -1502,18 +1468,19 @@ func (st *State) processCommonModelApplicationArgs(args *AddApplicationArgs) err
 	// but we only want application constraints to be persisted here.
 	cons, err := st.ResolveConstraints(args.Constraints)
 	if err != nil {
-		return errors.Trace(err)
+		return Base{}, errors.Trace(err)
 	}
 	unsupported, err := st.validateConstraints(cons)
 	if len(unsupported) > 0 {
 		logger.Warningf(
 			"deploying %q: unsupported constraints: %v", args.Name, strings.Join(unsupported, ","))
 	}
-	return errors.Trace(err)
+	return Base{appBase.OS, appBase.Channel.String()}, errors.Trace(err)
 }
 
 func (st *State) processIAASModelApplicationArgs(args *AddApplicationArgs) error {
-	if err := st.processCommonModelApplicationArgs(args); err != nil {
+	appBase, err := st.processCommonModelApplicationArgs(args)
+	if err != nil {
 		return errors.Trace(err)
 	}
 
@@ -1574,7 +1541,7 @@ func (st *State) processIAASModelApplicationArgs(args *AddApplicationArgs) error
 			}
 			subordinate := args.Charm.Meta().Subordinate
 			if err := validateUnitMachineAssignment(
-				m, args.Series, subordinate, storagePools,
+				m, appBase, subordinate, storagePools,
 			); err != nil {
 				return errors.Annotatef(
 					err, "cannot deploy to machine %s", m,
@@ -1586,7 +1553,7 @@ func (st *State) processIAASModelApplicationArgs(args *AddApplicationArgs) error
 
 		case directivePlacement:
 			if err := st.precheckInstance(
-				args.Series,
+				appBase,
 				args.Constraints,
 				data.directive,
 				volumeAttachments,
@@ -1598,7 +1565,7 @@ func (st *State) processIAASModelApplicationArgs(args *AddApplicationArgs) error
 	// We want to check the constraints if there's no placement at all.
 	if len(args.Placement) == 0 {
 		if err := st.precheckInstance(
-			args.Series,
+			appBase,
 			args.Constraints,
 			"",
 			volumeAttachments,
@@ -1611,14 +1578,15 @@ func (st *State) processIAASModelApplicationArgs(args *AddApplicationArgs) error
 }
 
 func (st *State) processCAASModelApplicationArgs(args *AddApplicationArgs) error {
-	if err := st.processCommonModelApplicationArgs(args); err != nil {
+	appSeries, err := st.processCommonModelApplicationArgs(args)
+	if err != nil {
 		return errors.Trace(err)
 	}
 	if len(args.Placement) > 0 {
 		return errors.NotValidf("placement directives on k8s models")
 	}
 	return st.precheckInstance(
-		args.Series,
+		appSeries,
 		args.Constraints,
 		"",
 		nil,
@@ -1880,7 +1848,7 @@ func (st *State) addMachineWithPlacement(unit *Unit, data *placementData) (*Mach
 	case containerPlacement:
 		// If a container is to be used, create it.
 		template := MachineTemplate{
-			Series:      unit.Series(),
+			Base:        unit.doc.Base,
 			Jobs:        []MachineJob{JobHostUnits},
 			Dirty:       true,
 			Constraints: cons,
@@ -1897,7 +1865,7 @@ func (st *State) addMachineWithPlacement(unit *Unit, data *placementData) (*Mach
 	}
 }
 
-// Application returns a application state by name.
+// Application returns an application state by name.
 func (st *State) Application(name string) (_ *Application, err error) {
 	applications, closer := st.db().GetCollection(applicationsC)
 	defer closer()
@@ -1932,6 +1900,32 @@ func (st *State) AllApplications() (applications []*Application, err error) {
 	return applications, nil
 }
 
+// InferActiveRelation returns the relation corresponding to the supplied
+// application or endpoint name(s), assuming such a relation exists and is unique.
+// There must be 1 or 2 supplied names, of the form <application>[:<relation>].
+func (st *State) InferActiveRelation(names ...string) (*Relation, error) {
+	candidates, err := matchingRelations(st, names...)
+	if err != nil {
+		return nil, err
+	}
+
+	relationQuery := strings.Join(names, " ")
+	if len(candidates) == 0 {
+		return nil, errors.NotFoundf("relation matching %q", relationQuery)
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+
+	keys := make([]string, len(candidates))
+	for i, relation := range candidates {
+		keys[i] = fmt.Sprintf("%q", relation.String())
+	}
+	return nil, errors.Errorf("ambiguous relation: %q could refer to %s",
+		relationQuery, strings.Join(keys, "; "),
+	)
+}
+
 // InferEndpoints returns the endpoints corresponding to the supplied names.
 // There must be 1 or 2 supplied names, of the form <application>[:<relation>].
 // If the supplied names uniquely specify a possible relation, or if they
@@ -1941,6 +1935,7 @@ func (st *State) InferEndpoints(names ...string) ([]Endpoint, error) {
 	// Collect all possible sane endpoint lists.
 	var candidates [][]Endpoint
 	switch len(names) {
+	// Implicitly assume this is a peer relation, as they have only one endpoint
 	case 1:
 		eps, err := st.endpoints(names[0], isPeer)
 		if err != nil {
@@ -1949,6 +1944,7 @@ func (st *State) InferEndpoints(names ...string) ([]Endpoint, error) {
 		for _, ep := range eps {
 			candidates = append(candidates, []Endpoint{ep})
 		}
+	// All other relations are between two endpoints
 	case 2:
 		eps1, err := st.endpoints(names[0], notPeer)
 		if err != nil {
@@ -1972,13 +1968,13 @@ func (st *State) InferEndpoints(names ...string) ([]Endpoint, error) {
 	default:
 		return nil, errors.Errorf("cannot relate %d endpoints", len(names))
 	}
-	// If there's ambiguity, try discarding implicit relations.
 	switch len(candidates) {
 	case 0:
 		return nil, errors.Errorf("no relations found")
 	case 1:
 		return candidates[0], nil
 	}
+	// If there's ambiguity, try discarding implicit relations.
 	var filtered [][]Endpoint
 outer:
 	for _, cand := range candidates {
@@ -2030,6 +2026,16 @@ func containerScopeOk(st *State, ep1, ep2 Endpoint) (bool, error) {
 	return subordinateCount >= 1, nil
 }
 
+func splitEndpointName(name string) (string, string, error) {
+	if i := strings.Index(name, ":"); i == -1 {
+		return name, "", nil
+	} else if i != 0 && i != len(name)-1 {
+		return name[:i], name[i+1:], nil
+	} else {
+		return "", "", errors.Errorf("invalid endpoint %q", name)
+	}
+}
+
 func applicationByName(st *State, name string) (ApplicationEntity, error) {
 	app, err := st.Application(name)
 	if err == nil {
@@ -2052,14 +2058,9 @@ func applicationByName(st *State, name string) (ApplicationEntity, error) {
 // supplied endpoint name, and which cause the filter param to
 // return true.
 func (st *State) endpoints(name string, filter func(ep Endpoint) bool) ([]Endpoint, error) {
-	var appName, relName string
-	if i := strings.Index(name, ":"); i == -1 {
-		appName = name
-	} else if i != 0 && i != len(name)-1 {
-		appName = name[:i]
-		relName = name[i+1:]
-	} else {
-		return nil, errors.Errorf("invalid endpoint %q", name)
+	appName, relName, err := splitEndpointName(name)
+	if err != nil {
+		return nil, err
 	}
 	app, err := applicationByName(st, appName)
 	if err != nil {
@@ -2157,7 +2158,7 @@ func (st *State) AddRelation(eps ...Endpoint) (r *Relation, err error) {
 		// Collect per-application operations, checking sanity as we go.
 		var ops []txn.Op
 		var subordinateCount int
-		appSeries := map[string][]string{}
+		appBases := map[string][]string{}
 		for _, ep := range eps {
 			app, err := aliveApplication(st, ep.ApplicationName)
 			if err != nil {
@@ -2195,10 +2196,26 @@ func (st *State) AddRelation(eps ...Endpoint) (r *Relation, err error) {
 				if err != nil {
 					return nil, errors.Trace(err)
 				}
-				if len(charmSeries) == 0 {
-					charmSeries = []string{localApp.doc.Series}
+				var charmBases []string
+				for _, s := range charmSeries {
+					if s == series.Kubernetes.String() {
+						charmBases = append(charmBases, series.LegacyKubernetesBase().DisplayString())
+						continue
+					}
+					b, err := series.GetBaseFromSeries(s)
+					if err != nil {
+						return nil, errors.Trace(err)
+					}
+					charmBases = append(charmBases, b.DisplayString())
 				}
-				appSeries[localApp.doc.Name] = charmSeries
+				if len(charmBases) == 0 {
+					localBase, err := series.ParseBase(localApp.Base().OS, localApp.Base().Channel)
+					if err != nil {
+						return nil, errors.Trace(err)
+					}
+					charmBases = []string{localBase.DisplayString()}
+				}
+				appBases[localApp.doc.Name] = charmBases
 				ops = append(ops, txn.Op{
 					C:      applicationsC,
 					Id:     st.docID(ep.ApplicationName),
@@ -2212,12 +2229,12 @@ func (st *State) AddRelation(eps ...Endpoint) (r *Relation, err error) {
 				return nil, errors.Trace(err)
 			}
 		}
-		if compatibleSeries && len(appSeries) > 1 {
+		if compatibleSeries && len(appBases) > 1 {
 			// We need to ensure that there's intersection between the supported
-			// series of both applications' charms.
-			app1Series := set.NewStrings(appSeries[eps[0].ApplicationName]...)
-			app2Series := set.NewStrings(appSeries[eps[1].ApplicationName]...)
-			if app1Series.Intersection(app2Series).Size() == 0 {
+			// bases of both applications' charms.
+			app1Bases := set.NewStrings(appBases[eps[0].ApplicationName]...)
+			app2Bases := set.NewStrings(appBases[eps[1].ApplicationName]...)
+			if app1Bases.Intersection(app2Bases).Size() == 0 {
 				return nil, errors.Errorf("principal and subordinate applications' series must match")
 			}
 		}
@@ -2499,24 +2516,6 @@ func (st *State) AssignUnit(u *Unit, policy AssignmentPolicy) (err error) {
 		return errors.Trace(u.AssignToNewMachine())
 	}
 	return errors.Errorf("unknown unit assignment policy: %q", policy)
-}
-
-type hasAdvance interface {
-	Advance(time.Duration)
-}
-
-// StartSync forces watchers to resynchronize their state with the
-// database immediately. This will happen periodically automatically.
-// This method is called only from tests.
-func (st *State) StartSync() {
-	if advanceable, ok := st.clock().(hasAdvance); ok {
-		// The amount of time we advance here just needs to be more
-		// than 10ms as that is the minimum time the txnwatcher
-		// is waiting on, however one second is more human noticeable.
-		// The state testing StateSuite type changes the polling interval
-		// of the pool's txnwatcher to be one second.
-		advanceable.Advance(time.Second)
-	}
 }
 
 // SetAdminMongoPassword sets the administrative password

@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	stdtesting "testing"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
@@ -50,14 +50,14 @@ var marshalTestCases = []struct {
 				Current: status.Pending,
 			},
 			Life:                    life.Alive,
-			Series:                  "jammy",
+			Base:                    "ubuntu@22.04",
 			SupportedContainers:     []instance.ContainerType{instance.LXD},
 			Jobs:                    []model.MachineJob{model.JobManageModel},
 			Addresses:               []params.Address{},
 			HardwareCharacteristics: &instance.HardwareCharacteristics{},
 		},
 	},
-	json: `["machine","change",{"model-uuid":"uuid","id":"Benji","instance-id":"Shazam","container-type":"","agent-status":{"current":"error","message":"foo","version":""},"instance-status":{"current":"pending","message":"","version":""},"life":"alive","series":"jammy","supported-containers":["lxd"],"supported-containers-known":false,"hardware-characteristics":{},"jobs":["JobManageModel"],"addresses":[],"has-vote":false,"wants-vote":false}]`,
+	json: `["machine","change",{"model-uuid":"uuid","id":"Benji","instance-id":"Shazam","container-type":"","agent-status":{"current":"error","message":"foo","version":""},"instance-status":{"current":"pending","message":"","version":""},"life":"alive","base":"ubuntu@22.04","supported-containers":["lxd"],"supported-containers-known":false,"hardware-characteristics":{},"jobs":["JobManageModel"],"addresses":[],"has-vote":false,"wants-vote":false}]`,
 }, {
 	about: "ApplicationInfo Delta",
 	value: params.Delta{
@@ -65,7 +65,7 @@ var marshalTestCases = []struct {
 			ModelUUID:   "uuid",
 			Name:        "Benji",
 			Exposed:     true,
-			CharmURL:    "cs:quantal/name",
+			CharmURL:    "ch:quantal/name",
 			Life:        life.Dying,
 			OwnerTag:    "test-owner",
 			MinUnits:    42,
@@ -81,19 +81,19 @@ var marshalTestCases = []struct {
 			WorkloadVersion: "42.47",
 		},
 	},
-	json: `["application","change",{"model-uuid": "uuid", "charm-url": "cs:quantal/name","name":"Benji","exposed":true,"life":"dying","owner-tag":"test-owner","workload-version":"42.47","min-units":42,"constraints":{"arch":"armhf", "mem": 1024},"config": {"hello":"goodbye","foo":false},"subordinate":false,"status":{"current":"active", "message":"all good", "version": ""}}]`,
+	json: `["application","change",{"model-uuid": "uuid", "charm-url": "ch:quantal/name","name":"Benji","exposed":true,"life":"dying","owner-tag":"test-owner","workload-version":"42.47","min-units":42,"constraints":{"arch":"armhf", "mem": 1024},"config": {"hello":"goodbye","foo":false},"subordinate":false,"status":{"current":"active", "message":"all good", "version": ""}}]`,
 }, {
 	about: "CharmInfo Delta",
 	value: params.Delta{
 		Entity: &params.CharmInfo{
 			ModelUUID:    "uuid",
-			CharmURL:     "cs:quantal/name",
+			CharmURL:     "ch:quantal/name",
 			Life:         life.Dying,
 			CharmVersion: "3",
 			LXDProfile:   &params.Profile{},
 		},
 	},
-	json: `["charm","change",{"model-uuid": "uuid", "charm-url": "cs:quantal/name", "charm-version":"3", "life":"dying","profile":{}}]`,
+	json: `["charm","change",{"model-uuid": "uuid", "charm-url": "ch:quantal/name", "charm-version":"3", "life":"dying","profile":{}}]`,
 }, {
 	about: "UnitInfo Delta",
 	value: params.Delta{
@@ -101,8 +101,8 @@ var marshalTestCases = []struct {
 			ModelUUID:   "uuid",
 			Name:        "Benji",
 			Application: "Shazam",
-			Series:      "precise",
-			CharmURL:    "cs:~user/precise/wordpress-42",
+			Base:        "ubuntu@12.04",
+			CharmURL:    "ch:precise/wordpress-42",
 			Life:        life.Alive,
 			Ports: []params.Port{{
 				Protocol: "http",
@@ -125,7 +125,7 @@ var marshalTestCases = []struct {
 			},
 		},
 	},
-	json: `["unit","change",{"model-uuid":"uuid","name":"Benji","application":"Shazam","series":"precise","charm-url":"cs:~user/precise/wordpress-42","life":"alive","public-address":"testing.invalid","private-address":"10.0.0.1","machine-id":"1","principal":"","ports":[{"protocol":"http","number":80}],"port-ranges":[{"from-port":80,"to-port":80,"protocol":"http"}],"subordinate":false,"workload-status":{"current":"active","message":"all good","version":""},"agent-status":{"current":"idle","message":"","version":""}}]`,
+	json: `["unit","change",{"model-uuid":"uuid","name":"Benji","application":"Shazam","base":"ubuntu@12.04","charm-url":"ch:precise/wordpress-42","life":"alive","public-address":"testing.invalid","private-address":"10.0.0.1","machine-id":"1","principal":"","ports":[{"protocol":"http","number":80}],"port-ranges":[{"from-port":80,"to-port":80,"protocol":"http"}],"subordinate":false,"workload-status":{"current":"active","message":"all good","version":""},"agent-status":{"current":"idle","message":"","version":""}}]`,
 }, {
 	about: "RelationInfo Delta",
 	value: params.Delta{

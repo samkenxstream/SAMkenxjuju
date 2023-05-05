@@ -8,6 +8,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/lxdprofile"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/instances"
 )
@@ -18,7 +19,7 @@ const (
 	ConfigAvailabilityZone = "availability-zone"
 )
 
-//go:generate go run github.com/golang/mock/mockgen -package testing -destination testing/package_mock.go github.com/juju/juju/container Manager,Initialiser
+//go:generate go run github.com/golang/mock/mockgen -package testing -destination testing/package_mock.go -write_package_comment=false github.com/juju/juju/container Manager,Initialiser
 
 // ManagerConfig contains the initialization parameters for the ContainerManager.
 // The name of the manager is used to namespace the containers on the machine.
@@ -32,7 +33,7 @@ type Manager interface {
 	CreateContainer(
 		instanceConfig *instancecfg.InstanceConfig,
 		cons constraints.Value,
-		series string,
+		base series.Base,
 		network *NetworkConfig,
 		storage *StorageConfig,
 		callback environs.StatusCallbackFunc) (instances.Instance, *instance.HardwareCharacteristics, error)
@@ -45,7 +46,7 @@ type Manager interface {
 	// this manager.
 	ListContainers() ([]instances.Instance, error)
 
-	// IsInitialized check whether or not required packages have been installed
+	// IsInitialized checks whether the required packages have been installed
 	// to support this manager.
 	IsInitialized() bool
 

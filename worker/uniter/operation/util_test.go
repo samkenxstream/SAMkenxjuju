@@ -5,16 +5,17 @@ package operation_test
 
 import (
 	"sync"
-	"time"
 
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
+	"github.com/juju/names/v4"
 	"github.com/juju/testing"
 	utilexec "github.com/juju/utils/v3/exec"
 
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/worker/uniter/charm"
 	"github.com/juju/juju/worker/uniter/hook"
 	"github.com/juju/juju/worker/uniter/operation"
@@ -229,17 +230,21 @@ type CommitHookCallbacks struct {
 	operation.Callbacks
 	*MockCommitHook
 
-	rotatedSecretURL  string
-	rotatedSecretTime time.Time
+	rotatedSecretURI   string
+	rotatedOldRevision int
+}
+
+func (cb *CommitHookCallbacks) PrepareHook(hookInfo hook.Info) (string, error) {
+	return "", nil
 }
 
 func (cb *CommitHookCallbacks) CommitHook(hookInfo hook.Info) error {
 	return cb.MockCommitHook.Call(hookInfo)
 }
 
-func (cb *CommitHookCallbacks) SetSecretRotated(url string, when time.Time) error {
-	cb.rotatedSecretURL = url
-	cb.rotatedSecretTime = when
+func (cb *CommitHookCallbacks) SetSecretRotated(url string, oldRevision int) error {
+	cb.rotatedSecretURI = url
+	cb.rotatedOldRevision = oldRevision
 	return nil
 }
 
@@ -327,6 +332,18 @@ type MockContext struct {
 	status          jujuc.StatusInfo
 	isLeader        bool
 	relation        *MockRelation
+}
+
+func (mock *MockContext) SecretMetadata() (map[string]jujuc.SecretMetadata, error) {
+	return map[string]jujuc.SecretMetadata{
+		"9m4e2mr0ui3e8a215n4g": {
+			Description:    "description",
+			Label:          "label",
+			Owner:          names.NewApplicationTag("mariadb"),
+			RotatePolicy:   secrets.RotateHourly,
+			LatestRevision: 666,
+		},
+	}, nil
 }
 
 func (mock *MockContext) ActionData() (*runnercontext.ActionData, error) {
@@ -562,7 +579,7 @@ var overwriteState = operation.State{
 	Kind:     operation.Continue,
 	Step:     operation.Pending,
 	Started:  true,
-	CharmURL: "cs:quantal/wordpress-2",
+	CharmURL: "ch:quantal/wordpress-2",
 	ActionId: &randomActionId,
 	Hook:     &hook.Info{Kind: hooks.Install},
 }

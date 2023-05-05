@@ -1,24 +1,20 @@
 // Copyright 2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package testcharms holds a corpus of charms
-// for testing.
 package testcharms
 
 import (
 	"archive/zip"
 	"bytes"
 	"io"
-	"io/ioutil"
 	"os"
 	"time"
 
+	"github.com/juju/charm/v10"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
-	"github.com/juju/charm/v9"
-	"github.com/juju/charmrepo/v7/testing"
-
+	"github.com/juju/juju/testcharms/repo"
 	jtesting "github.com/juju/juju/testing"
 )
 
@@ -29,21 +25,21 @@ const (
 )
 
 // Repo provides access to the test charm repository.
-var Repo = testing.NewRepo(localCharmRepo, defaultSeries)
+var Repo = repo.NewRepo(localCharmRepo, defaultSeries)
 
 // Hub provides access to the test charmhub repository.
-var Hub = testing.NewRepo(localCharmHub, defaultSeries)
+var Hub = repo.NewRepo(localCharmHub, defaultSeries)
 
 // RepoForSeries returns a new charm repository for the specified series.
 // Note: this is a bit weird, as it ignores the series if it's NOT kubernetes
 // and falls back to the default series, which makes this pretty pointless.
-func RepoForSeries(series string) *testing.Repo {
-	return testing.NewRepo(localCharmRepo, series)
+func RepoForSeries(series string) *repo.CharmRepo {
+	return repo.NewRepo(localCharmRepo, series)
 }
 
 // RepoWithSeries returns a new charm repository for the specified series.
-func RepoWithSeries(series string) *testing.Repo {
-	return testing.NewRepo(localCharmRepo, series)
+func RepoWithSeries(series string) *repo.CharmRepo {
+	return repo.NewRepo(localCharmRepo, series)
 }
 
 // CheckCharmReady ensures that a desired charm archive exists and
@@ -52,7 +48,7 @@ func CheckCharmReady(c *gc.C, charmArchive *charm.CharmArchive) {
 	fileSize := func() int64 {
 		f, err := os.Open(charmArchive.Path)
 		c.Assert(err, jc.ErrorIsNil)
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		fi, err := f.Stat()
 		c.Assert(err, jc.ErrorIsNil)
@@ -126,5 +122,5 @@ func InjectFilesToCharmArchive(pathToArchive string, fileContents map[string]str
 
 	// Overwrite original archive with the patched version
 	_, _ = zr.Close(), zw.Close()
-	return ioutil.WriteFile(pathToArchive, buf.Bytes(), 0644)
+	return os.WriteFile(pathToArchive, buf.Bytes(), 0644)
 }

@@ -36,6 +36,8 @@ import (
 	"github.com/juju/juju/worker/migrationflag"
 	"github.com/juju/juju/worker/migrationminion"
 	"github.com/juju/juju/worker/retrystrategy"
+	"github.com/juju/juju/worker/s3caller"
+	"github.com/juju/juju/worker/secretdrainworker"
 	"github.com/juju/juju/worker/uniter"
 	"github.com/juju/juju/worker/upgrader"
 )
@@ -127,6 +129,18 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			NewConnection:        apicaller.ScaryConnect,
 			Filter:               connectFilter,
 			Logger:               config.LoggingContext.GetLogger("juju.worker.apicaller"),
+		}),
+
+		// The S3 API caller is a shim API that wraps the /charms REST
+		// API for uploading and downloading charms. It provides a
+		// S3-compatible API.
+		s3CallerName: s3caller.Manifold(s3caller.ManifoldConfig{
+			AgentName:            agentName,
+			APIConfigWatcherName: apiConfigWatcherName,
+			APICallerName:        apiCallerName,
+			NewS3Client:          s3caller.NewS3Client,
+			Filter:               connectFilter,
+			Logger:               loggo.GetLogger("juju.worker.s3caller"),
 		}),
 
 		// The log sender is a leaf worker that sends log messages to some
@@ -222,6 +236,7 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			AgentName:             agentName,
 			ModelType:             model.IAAS,
 			APICallerName:         apiCallerName,
+			S3CallerName:          s3CallerName,
 			MachineLock:           config.MachineLock,
 			Clock:                 config.Clock,
 			LeadershipTrackerName: leadershipTrackerName,
@@ -276,6 +291,15 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			Logger:        config.LoggingContext.GetLogger("juju.worker.upgrader"),
 			Clock:         config.Clock,
 		}),
+
+		// The secretDrainWorker is the worker that drains secrets from the inactive backend to the current active backend.
+		secretDrainWorker: ifNotMigrating(secretdrainworker.Manifold(secretdrainworker.ManifoldConfig{
+			APICallerName:         apiCallerName,
+			Logger:                loggo.GetLogger("juju.worker.secretdrainworker"),
+			NewSecretsDrainFacade: secretdrainworker.NewSecretsDrainFacade,
+			NewWorker:             secretdrainworker.NewWorker,
+			NewBackendsClient:     secretdrainworker.NewBackendsClient,
+		})),
 	}
 }
 
@@ -290,6 +314,7 @@ const (
 	agentName            = "agent"
 	apiConfigWatcherName = "api-config-watcher"
 	apiCallerName        = "api-caller"
+	s3CallerName         = "s3-caller"
 	logSenderName        = "log-sender"
 
 	migrationFortressName     = "migration-fortress"
@@ -309,4 +334,6 @@ const (
 	meterStatusName   = "meter-status"
 	metricCollectName = "metric-collect"
 	metricSenderName  = "metric-sender"
+
+	secretDrainWorker = "secret-drain-worker"
 )

@@ -11,7 +11,7 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/checkers"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jtesting "github.com/juju/testing"
@@ -485,14 +485,6 @@ func (st *mockStatePool) GetModel(modelUUID string) (applicationoffers.Model, fu
 		return nil, nil, err
 	}
 	return model, func() {}, nil
-}
-
-type mockCommonStatePool struct {
-	*mockStatePool
-}
-
-func (st *mockCommonStatePool) Get(modelUUID string) (crossmodel.Backend, func(), error) {
-	return st.mockStatePool.Get(modelUUID)
 }
 
 type mockBakeryService struct {

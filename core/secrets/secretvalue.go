@@ -4,8 +4,9 @@
 package secrets
 
 import (
+	"bytes"
 	"encoding/base64"
-	"io/ioutil"
+	"io"
 	"strings"
 
 	"github.com/juju/errors"
@@ -15,8 +16,6 @@ import (
 // Instances of SecretValue are returned by a secret store
 // when a secret look up is performed. The underlying value
 // is a map of base64 encoded values represented as []byte.
-// Convenience methods exist to retrieve singular decoded string
-// and encoded base64 string values.
 type SecretValue interface {
 	// EncodedValues returns the key values of a secret as
 	// the raw base64 encoded strings.
@@ -31,18 +30,12 @@ type SecretValue interface {
 	//to get the result.
 	Values() (map[string]string, error)
 
-	// Singular returns true if the secret value represents a
-	// single data value rather than key values.
-	Singular() bool
+	// KeyValue returns the specified secret value for the key.
+	// If the key has a #base64 suffix, the returned value is base64 encoded.
+	KeyValue(string) (string, error)
 
-	// EncodedValue returns the value of the secret as the raw
-	// base64 encoded string.
-	// The secret must be a singular value.
-	EncodedValue() (string, error)
-
-	// Value returns the value of the secret as a string.
-	// The secret must be a singular value.
-	Value() (string, error)
+	// IsEmpty checks if the value is empty.
+	IsEmpty() bool
 }
 
 type secretValue struct {
@@ -63,7 +56,20 @@ func NewSecretValue(data map[string]string) SecretValue {
 	return &secretValue{data: dataCopy}
 }
 
-const singularSecretKey = "data"
+// NewSecretBytes returns a secret using the specified map of values.
+// The map values are assumed to be already base64 encoded.
+func NewSecretBytes(data map[string][]byte) SecretValue {
+	dataCopy := make(map[string][]byte, len(data))
+	for k, v := range data {
+		dataCopy[k] = append([]byte(nil), v...)
+	}
+	return &secretValue{data: dataCopy}
+}
+
+// IsEmpty checks if the value is empty.
+func (v secretValue) IsEmpty() bool {
+	return len(v.data) == 0
+}
 
 // EncodedValues implements SecretValue.
 func (v *secretValue) EncodedValues() map[string]string {
@@ -87,29 +93,23 @@ func (v *secretValue) Values() (map[string]string, error) {
 	return dataCopy, nil
 }
 
-// Singular implements SecretValue.
-func (v *secretValue) Singular() bool {
-	_, ok := v.data[singularSecretKey]
-	return ok && len(v.data) == 1
-}
-
-// EncodedValue implements SecretValue.
-func (v *secretValue) EncodedValue() (string, error) {
-	if !v.Singular() {
-		return "", errors.NewNotValid(nil, "secret is not a singular value")
+// KeyValue implements SecretValue.
+func (v *secretValue) KeyValue(key string) (string, error) {
+	useBase64 := false
+	if strings.HasSuffix(key, base64Suffix) {
+		key = strings.TrimSuffix(key, base64Suffix)
+		useBase64 = true
 	}
-	return string(v.data[singularSecretKey]), nil
-}
-
-// Value implements SecretValue.
-func (v *secretValue) Value() (string, error) {
-	s, err := v.EncodedValue()
-	if err != nil {
-		return "", errors.Trace(err)
+	val, ok := v.data[key]
+	if !ok {
+		return "", errors.NotFoundf("secret key value %q", key)
 	}
 	// The stored value is always base64 encoded.
-	b64 := base64.NewDecoder(base64.StdEncoding, strings.NewReader(s))
-	result, err := ioutil.ReadAll(b64)
+	if useBase64 {
+		return string(val), nil
+	}
+	b64 := base64.NewDecoder(base64.StdEncoding, bytes.NewReader(val))
+	result, err := io.ReadAll(b64)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

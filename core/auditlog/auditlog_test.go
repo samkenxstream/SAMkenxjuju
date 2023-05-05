@@ -1,9 +1,9 @@
 // Copyright 2017 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package auditlog_test
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
@@ -60,7 +60,7 @@ func (s *AuditLogSuite) TestAuditLogFile(c *gc.C) {
 	err = logFile.Close()
 	c.Assert(err, jc.ErrorIsNil)
 
-	bytes, err := ioutil.ReadFile(filepath.Join(dir, "audit.log"))
+	bytes, err := os.ReadFile(filepath.Join(dir, "audit.log"))
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(bytes), gc.Equals, expectedLogContents)
 }

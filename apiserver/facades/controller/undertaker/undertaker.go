@@ -8,11 +8,18 @@ import (
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/apiserver/common"
+	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/rpc/params"
+	"github.com/juju/juju/secrets/provider"
 	"github.com/juju/juju/state/watcher"
+)
+
+// For testing.
+var (
+	GetProvider = provider.Provider
 )
 
 // UndertakerAPI implements the API used by the model undertaker worker.
@@ -20,9 +27,11 @@ type UndertakerAPI struct {
 	st        State
 	resources facade.Resources
 	*common.StatusSetter
+
+	secretBackendConfigGetter commonsecrets.BackendAdminConfigGetter
 }
 
-func newUndertakerAPI(st State, resources facade.Resources, authorizer facade.Authorizer) (*UndertakerAPI, error) {
+func newUndertakerAPI(st State, resources facade.Resources, authorizer facade.Authorizer, secretBackendConfigGetter commonsecrets.BackendAdminConfigGetter) (*UndertakerAPI, error) {
 	if !authorizer.AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
@@ -44,9 +53,10 @@ func newUndertakerAPI(st State, resources facade.Resources, authorizer facade.Au
 		}, nil
 	}
 	return &UndertakerAPI{
-		st:           st,
-		resources:    resources,
-		StatusSetter: common.NewStatusSetter(st, getCanModifyModel),
+		st:                        st,
+		resources:                 resources,
+		secretBackendConfigGetter: secretBackendConfigGetter,
+		StatusSetter:              common.NewStatusSetter(st, getCanModifyModel),
 	}, nil
 }
 
@@ -80,7 +90,24 @@ func (u *UndertakerAPI) ProcessDyingModel() error {
 
 // RemoveModel removes any records of this model from Juju.
 func (u *UndertakerAPI) RemoveModel() error {
+	secretBackendCfg, err := u.secretBackendConfigGetter()
+	if err != nil {
+		return errors.Annotate(err, "getting secrets backends config")
+	}
+	for _, cfg := range secretBackendCfg.Configs {
+		if err := u.removeModelSecrets(&cfg); err != nil {
+			return errors.Annotatef(err, "cleaning model from inactive secrets provider %q", cfg.BackendType)
+		}
+	}
 	return u.st.RemoveDyingModel()
+}
+
+func (u *UndertakerAPI) removeModelSecrets(cfg *provider.ModelBackendConfig) error {
+	p, err := GetProvider(cfg.BackendType)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return p.CleanupModel(cfg)
 }
 
 func (u *UndertakerAPI) modelEntitiesWatcher() params.NotifyWatchResult {

@@ -7,15 +7,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
-	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/cmd/output"
+	coreseries "github.com/juju/juju/core/series"
 )
 
 // Note:
@@ -24,13 +23,14 @@ import (
 // There are exceptions, slices of strings and tables.  These
 // are transformed into strings.
 
-func makeInfoWriter(w io.Writer, warningLog Log, config bool, unicodeMode string, in *InfoResponse) Printer {
+func makeInfoWriter(w io.Writer, warningLog Log, config bool, unicodeMode string, baseMode baseMode, in *InfoResponse) Printer {
 	iw := infoWriter{
 		w:             w,
 		warningf:      warningLog,
 		in:            in,
 		displayConfig: config,
 		unicodeMode:   unicodeMode,
+		baseMode:      baseMode,
 	}
 	if iw.in.Type == "charm" {
 		return charmInfoWriter{infoWriter: iw}
@@ -44,7 +44,17 @@ type infoWriter struct {
 	in            *InfoResponse
 	displayConfig bool
 	unicodeMode   string
+	baseMode      baseMode
 }
+
+type baseMode int
+
+const (
+	baseModeNone baseMode = iota
+	baseModeArches
+	baseModeBases
+	baseModeBoth
+)
 
 func (iw infoWriter) print(info interface{}) error {
 	encoder := yaml.NewEncoder(iw.w)
@@ -56,21 +66,64 @@ func (iw infoWriter) channels() string {
 	if len(iw.in.Channels) == 0 {
 		return ""
 	}
-	buffer := bytes.NewBufferString("")
 
-	tw := output.TabWriter(buffer)
+	var buffer bytes.Buffer
+	tw := output.TabWriter(&buffer)
 	ow := output.Wrapper{TabWriter: tw}
 	w := InfoUnicodeWriter(ow, iw.unicodeMode)
+
+	// Iterate Tracks slice instead of Channels map to maintain order
 	for _, track := range iw.in.Tracks {
-		trackHasOpenChannel := false
+		risks := iw.in.Channels[track]
+		shown := false
+
+		// Iterate charm.Risks instead of risks map to standardize order
 		for _, risk := range charm.Risks {
-			chName := fmt.Sprintf("%s/%s", track, risk)
-			ch, ok := iw.in.Channels[chName]
-			if ok {
-				iw.writeOpenChanneltoBuffer(w, ch)
-				trackHasOpenChannel = true
-			} else {
-				iw.writeClosedChannelToBuffer(w, chName, trackHasOpenChannel)
+			revisions, ok := risks[string(risk)]
+			if !ok {
+				w.Printf("%s/%s:", track, risk)
+				c := UnicodeDash // dash means no revision available
+				if shown {
+					c = UnicodeUpArrow // points up to revision on previous line
+				}
+				_, _ = w.PrintlnUnicode(c)
+				continue
+			}
+			shown = true
+
+			switch iw.baseMode {
+			case baseModeNone:
+				latest := revisions[0] // latest is always first
+				w.Println(formatRevision(latest, true))
+			case baseModeArches:
+				for i, r := range revisions {
+					args := []any{formatRevision(r, i == 0)}
+					arches := strings.Join(r.Arches, ", ")
+					if arches != "" {
+						args = append(args, arches)
+					}
+					w.Println(args...)
+				}
+			case baseModeBases:
+				latest := revisions[0]
+				args := []any{formatRevision(latest, true)}
+				bases := strings.Join(basesDisplay(latest.Bases), ", ")
+				if bases != "" {
+					args = append(args, bases)
+				}
+				w.Println(args...)
+			case baseModeBoth:
+				latest := revisions[0]
+				args := []any{formatRevision(latest, true)}
+				arches := strings.Join(latest.Arches, ", ")
+				if arches != "" {
+					args = append(args, arches)
+				}
+				bases := strings.Join(basesDisplay(latest.Bases), ", ")
+				if bases != "" {
+					args = append(args, bases)
+				}
+				w.Println(args...)
 			}
 		}
 	}
@@ -80,40 +133,39 @@ func (iw infoWriter) channels() string {
 	return buffer.String()
 }
 
-func (iw infoWriter) writeOpenChanneltoBuffer(w *UnicodeWriter, channel Channel) {
-	w.Printf("%s/%s:", channel.Track, channel.Risk)
-	w.Print(channel.Version)
-	releasedAt, err := time.Parse(time.RFC3339, channel.ReleasedAt)
-	if err != nil {
-		// This should not fail, if it does, warn on the error
-		// rather than ignoring.
-		iw.warningf("%s", errors.Annotate(err, "could not parse released at time").Error())
-		w.Print(" ")
-	} else {
-		w.Print(releasedAt.Format("2006-01-02"))
+// formatRevision formats revision for human-readable tabbed output.
+func formatRevision(r Revision, showName bool) string {
+	var namePrefix string
+	if showName {
+		namePrefix = fmt.Sprintf("%s/%s:", r.Track, r.Risk)
 	}
-	w.Printf("(%s)", strconv.Itoa(channel.Revision))
-	w.Println(sizeToStr(channel.Size))
+	return fmt.Sprintf("%s\t%s\t%s\t(%d)\t%s",
+		namePrefix, r.Version, r.ReleasedAt[:10], r.Revision, sizeToStr(r.Size))
 }
 
-func (iw infoWriter) writeClosedChannelToBuffer(w *UnicodeWriter, name string, hasOpenChannel bool) {
-	w.Printf("%s:", name)
-	if hasOpenChannel {
-		_, _ = w.PrintlnUnicode(UnicodeUpArrow)
-		return
+// basesDisplay returns a slice of bases in the format "name@channel".
+func basesDisplay(bases []Base) []string {
+	strs := make([]string, len(bases))
+	for i, b := range bases {
+		base, err := coreseries.ParseBase(b.Name, b.Channel)
+		if err != nil {
+			strs[i] = base.DisplayString()
+			continue
+		}
+
+		strs[i] = b.Name + "@" + b.Channel
 	}
-	_, _ = w.PrintlnUnicode(UnicodeDash)
+	return strs
 }
 
 type bundleInfoOutput struct {
 	Name        string `yaml:"name,omitempty"`
-	ID          string `yaml:"bundle-id,omitempty"`
-	Summary     string `yaml:"summary,omitempty"`
 	Publisher   string `yaml:"publisher,omitempty"`
-	Supports    string `yaml:"supports,omitempty"`
-	Tags        string `yaml:"tags,omitempty"`
-	StoreURL    string `yaml:"store-url,omitempty"`
+	Summary     string `yaml:"summary,omitempty"`
 	Description string `yaml:"description,omitempty"`
+	StoreURL    string `yaml:"store-url,omitempty"`
+	ID          string `yaml:"bundle-id,omitempty"`
+	Tags        string `yaml:"tags,omitempty"`
 	Charms      string `yaml:"charms,omitempty"`
 	Channels    string `yaml:"channels,omitempty"`
 	Installed   string `yaml:"installed,omitempty"`
@@ -138,14 +190,14 @@ func (b bundleInfoWriter) Print() error {
 
 type charmInfoOutput struct {
 	Name        string                 `yaml:"name,omitempty"`
-	ID          string                 `yaml:"charm-id,omitempty"`
-	Summary     string                 `yaml:"summary,omitempty"`
 	Publisher   string                 `yaml:"publisher,omitempty"`
+	Summary     string                 `yaml:"summary,omitempty"`
+	Description string                 `yaml:"description,omitempty"`
+	StoreURL    string                 `yaml:"store-url,omitempty"`
+	ID          string                 `yaml:"charm-id,omitempty"`
 	Supports    string                 `yaml:"supports,omitempty"`
 	Tags        string                 `yaml:"tags,omitempty"`
 	Subordinate bool                   `yaml:"subordinate"`
-	StoreURL    string                 `yaml:"store-url,omitempty"`
-	Description string                 `yaml:"description,omitempty"`
 	Relations   relationOutput         `yaml:"relations,omitempty"`
 	Channels    string                 `yaml:"channels,omitempty"`
 	Installed   string                 `yaml:"installed,omitempty"`
@@ -167,7 +219,7 @@ func (c charmInfoWriter) Print() error {
 		ID:          c.in.ID,
 		Summary:     c.in.Summary,
 		Publisher:   c.in.Publisher,
-		Supports:    strings.Join(c.in.Series, ", "),
+		Supports:    strings.Join(basesDisplay(c.in.Supports), ", "),
 		StoreURL:    c.in.StoreURL,
 		Description: c.in.Description,
 		Channels:    c.channels(),

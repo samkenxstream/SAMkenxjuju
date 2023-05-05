@@ -4,15 +4,12 @@
 package jujuc
 
 import (
-	"fmt"
-	"io"
-
 	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/juju/core/secrets"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/core/secrets"
 )
 
 type secretGetCommand struct {
@@ -20,8 +17,11 @@ type secretGetCommand struct {
 	ctx Context
 	out cmd.Output
 
-	secretUrl *secrets.URL
-	asBase64  bool
+	secretUri *secrets.URI
+	label     string
+	key       string
+	peek      bool
+	refresh   bool
 }
 
 // NewSecretGetCommand returns a command to get a secret value.
@@ -32,91 +32,89 @@ func NewSecretGetCommand(ctx Context) (cmd.Command, error) {
 // Info implements cmd.Command.
 func (c *secretGetCommand) Info() *cmd.Info {
 	doc := `
-Get the value of a secret with a given secret ID.
-For secrets with a singular value, the decoded string
-is printed, unless --base64 is specified, in which case
-the encoded base64 value is printed.
-Multiple key value secrets are printed as YAML.
+Get the content of a secret with a given secret ID.
+The first time the value is fetched, the latest revision is used.
+Subsequent calls will always return this same revision unless
+--peek or --refresh are used.
+Using --peek will fetch the latest revision just this time.
+Using --refresh will fetch the latest revision and continue to
+return the same revision next time unless --peek or --refresh is used.
+
+Either the ID or label can be used to identify the secret.
+
+Examples
+    secret-get secret:9m4e2mr0ui3e8a215n4g
+    secret-get secret:9m4e2mr0ui3e8a215n4g token
+    secret-get secret:9m4e2mr0ui3e8a215n4g token#base64
+    secret-get secret:9m4e2mr0ui3e8a215n4g --format json
+    secret-get secret:9m4e2mr0ui3e8a215n4g --peek
+    secret-get secret:9m4e2mr0ui3e8a215n4g --refresh
+    secret-get secret:9m4e2mr0ui3e8a215n4g --label db-password
 `
 	return jujucmd.Info(&cmd.Info{
 		Name:    "secret-get",
-		Args:    "<ID>",
-		Purpose: "get the value of a secret",
+		Args:    "<ID> [key[#base64]]",
+		Purpose: "get the content of a secret",
 		Doc:     doc,
 	})
 }
 
 // SetFlags implements cmd.Command.
 func (c *secretGetCommand) SetFlags(f *gnuflag.FlagSet) {
-	c.out.AddFlags(f, "plain", map[string]cmd.Formatter{
-		"yaml":  cmd.FormatYaml,
-		"json":  cmd.FormatJson,
-		"plain": printPlainOutput,
+	c.out.AddFlags(f, "yaml", map[string]cmd.Formatter{
+		"yaml": cmd.FormatYaml,
+		"json": cmd.FormatJson,
 	})
-	f.BoolVar(&c.asBase64, "base64", false,
-		`print the singular secret value as the base64 encoded string`)
-}
-
-func printPlainOutput(writer io.Writer, val interface{}) error {
-	var str string
-	switch v := val.(type) {
-	case string:
-		str = v
-	default:
-		return cmd.FormatYaml(writer, val)
-	}
-	fmt.Fprintf(writer, str)
-	return nil
+	f.StringVar(&c.label, "label", "", "a label used to identify the secret in hooks")
+	f.BoolVar(&c.peek, "peek", false,
+		`get the latest revision just this time`)
+	f.BoolVar(&c.refresh, "refresh", false,
+		`get the latest revision and also get this same revision for subsequent calls`)
 }
 
 // Init implements cmd.Command.
 func (c *secretGetCommand) Init(args []string) (err error) {
-	if len(args) < 1 {
-		return errors.New("missing secret name")
+	if len(args) > 0 {
+		c.secretUri, err = secrets.ParseURI(args[0])
+		if err != nil {
+			return errors.NotValidf("secret URI %q", args[0])
+		}
+		args = args[1:]
 	}
-	c.secretUrl, err = secrets.ParseURL(args[0])
-	if err != nil {
-		return errors.NotValidf("secret URL %q", args[0])
+
+	if c.secretUri == nil && c.label == "" {
+		return errors.New("require either a secret URI or label")
 	}
-	return cmd.CheckEmpty(args[1:])
+
+	if c.peek && c.refresh {
+		return errors.New("specify one of --peek or --refresh but not both")
+	}
+	if len(args) > 0 {
+		c.key = args[0]
+		return cmd.CheckEmpty(args[1:])
+	}
+	return cmd.CheckEmpty(args)
 }
 
 // Run implements cmd.Command.
 func (c *secretGetCommand) Run(ctx *cmd.Context) error {
-	value, err := c.ctx.GetSecret(c.secretUrl.String())
+	value, err := c.ctx.GetSecret(c.secretUri, c.label, c.refresh, c.peek)
 	if err != nil {
 		return err
 	}
 
 	var val interface{}
-	if c.asBase64 {
-		if value.Singular() {
-			val, _ = value.EncodedValue()
-		} else {
-			valMap := value.EncodedValues()
-			if c.secretUrl.Attribute != "" {
-				val = valMap[c.secretUrl.Attribute]
-			} else {
-				val = valMap
-			}
-		}
-	} else {
-		if value.Singular() {
-			val, err = value.Value()
-			if err != nil {
-				return err
-			}
-		} else {
-			valMap, err := value.Values()
-			if err != nil {
-				return err
-			}
-			if c.secretUrl.Attribute != "" {
-				val = valMap[c.secretUrl.Attribute]
-			} else {
-				val = valMap
-			}
-		}
+	val, err = value.Values()
+	if err != nil {
+		return err
+	}
+	if c.key == "" {
+		return c.out.Write(ctx, val)
+	}
+
+	val, err = value.KeyValue(c.key)
+	if err != nil {
+		return err
 	}
 	return c.out.Write(ctx, val)
 }

@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,7 +207,7 @@ func SignFileData(stor storage.Storage, fileName string) error {
 	}
 	defer r.Close()
 
-	fileData, err := ioutil.ReadAll(r)
+	fileData, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
@@ -277,7 +277,7 @@ func UploadFakeTools(c *gc.C, stor storage.Storage, toolsDir, stream string, arc
 // RemoveFakeTools deletes the fake tools from the supplied storage.
 func RemoveFakeTools(c *gc.C, stor storage.Storage, toolsDir string) {
 	c.Logf("removing fake tools")
-	toolsVersion := coretesting.CurrentVersion(c)
+	toolsVersion := coretesting.CurrentVersion()
 	name := envtools.StorageName(toolsVersion, toolsDir)
 	err := stor.Remove(name)
 	c.Check(err, jc.ErrorIsNil)

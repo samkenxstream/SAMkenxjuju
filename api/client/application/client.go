@@ -1,18 +1,15 @@
 // Copyright 2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package application provides access to the application api facade.
-// This facade contains api calls that are specific to applications.
-// As a rule of thumb, if the argument for an api requires an application name
-// and affects only that application then the call belongs here.
 package application
 
 import (
 	stderrors "errors"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
@@ -24,6 +21,7 @@ import (
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/instance"
+	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/storage"
 )
@@ -77,9 +75,6 @@ type DeployArgs struct {
 
 	// ApplicationName is the name to give the application.
 	ApplicationName string
-
-	// Series to be used for the machine.
-	Series string
 
 	// NumUnits is the number of units to deploy.
 	NumUnits int
@@ -159,7 +154,6 @@ func (c *Client) Deploy(args DeployArgs) error {
 	deployArgs := params.ApplicationsDeploy{
 		Applications: []params.ApplicationDeploy{{
 			ApplicationName:  args.ApplicationName,
-			Series:           args.Series,
 			CharmURL:         args.CharmID.URL.String(),
 			CharmOrigin:      &origin,
 			Channel:          origin.Risk,
@@ -220,7 +214,8 @@ func (c *Client) GetCharmURLOrigin(branchName, applicationName string) (*charm.U
 	if err != nil {
 		return nil, apicharm.Origin{}, errors.Trace(err)
 	}
-	return curl, apicharm.APICharmOrigin(result.Origin), nil
+	origin, err := apicharm.APICharmOrigin(result.Origin)
+	return curl, origin, err
 }
 
 // GetConfig returns the charm configuration settings for each of the
@@ -284,15 +279,15 @@ type SetCharmConfig struct {
 
 	// Force forces the use of the charm in the following scenarios:
 	// overriding a lxd profile upgrade.
-	// In the future, we should deprecate ForceSeries and ForceUnits and just
+	// In the future, we should deprecate ForceBase and ForceUnits and just
 	// use Force for all instances.
-	// TODO (stickupkid): deprecate ForceSeries and ForceUnits in favour of
+	// TODO (stickupkid): deprecate ForceBase and ForceUnits in favour of
 	// just using Force.
 	Force bool
 
-	// ForceSeries forces the use of the charm even if it doesn't match the
+	// ForceBase forces the use of the charm even if it doesn't match the
 	// series of the unit.
-	ForceSeries bool
+	ForceBase bool
 
 	// ForceUnits forces the upgrade on units in an error state.
 	ForceUnits bool
@@ -344,7 +339,7 @@ func (c *Client) SetCharm(branchName string, cfg SetCharmConfig) error {
 		ConfigSettings:     cfg.ConfigSettings,
 		ConfigSettingsYAML: cfg.ConfigSettingsYAML,
 		Force:              cfg.Force,
-		ForceSeries:        cfg.ForceSeries,
+		ForceBase:          cfg.ForceBase,
 		ForceUnits:         cfg.ForceUnits,
 		ResourceIDs:        cfg.ResourceIDs,
 		StorageConstraints: storageConstraints,
@@ -354,19 +349,17 @@ func (c *Client) SetCharm(branchName string, cfg SetCharmConfig) error {
 	return c.facade.FacadeCall("SetCharm", args, nil)
 }
 
-// UpdateApplicationSeries updates the application series in the db.
-func (c *Client) UpdateApplicationSeries(appName, series string, force bool) error {
-	args := params.UpdateSeriesArgs{
-		Args: []params.UpdateSeriesArg{{
-			Entity: params.Entity{Tag: names.NewApplicationTag(appName).String()},
-			Force:  force,
-			Series: series,
+// UpdateApplicationBase updates the application base in the db.
+func (c *Client) UpdateApplicationBase(appName string, base coreseries.Base, force bool) error {
+	args := params.UpdateChannelArgs{
+		Args: []params.UpdateChannelArg{{
+			Entity:  params.Entity{Tag: names.NewApplicationTag(appName).String()},
+			Force:   force,
+			Channel: base.Channel.Track,
 		}},
 	}
-
 	results := new(params.ErrorResults)
-	err := c.facade.FacadeCall("UpdateApplicationSeries", args, results)
-	if err != nil {
+	if err := c.facade.FacadeCall("UpdateApplicationBase", args, results); err != nil {
 		return errors.Trace(err)
 	}
 	return results.OneError()
@@ -438,6 +431,10 @@ type DestroyUnitsParams struct {
 	// will wait before forcing the next step to kick-off. This parameter
 	// only makes sense in combination with 'force' set to 'true'.
 	MaxWait *time.Duration
+
+	// DryRun specifies whether to perform the destroy action or
+	// just return what this action will destroy
+	DryRun bool
 }
 
 // DestroyUnits decreases the number of units dedicated to one or more
@@ -461,6 +458,7 @@ func (c *Client) DestroyUnits(in DestroyUnitsParams) ([]params.DestroyUnitResult
 			DestroyStorage: in.DestroyStorage,
 			Force:          in.Force,
 			MaxWait:        in.MaxWait,
+			DryRun:         in.DryRun,
 		})
 	}
 	if len(args.Units) == 0 {
@@ -498,6 +496,10 @@ type DestroyApplicationsParams struct {
 	// will wait before forcing the next step to kick-off. This parameter
 	// only makes sense in combination with 'force' set to 'true'.
 	MaxWait *time.Duration
+
+	// DryRun specifies whether this should perform this destroy
+	// action or just return what this action will destroy
+	DryRun bool
 }
 
 // DestroyApplications destroys the given applications.
@@ -520,6 +522,7 @@ func (c *Client) DestroyApplications(in DestroyApplicationsParams) ([]params.Des
 			DestroyStorage: in.DestroyStorage,
 			Force:          in.Force,
 			MaxWait:        in.MaxWait,
+			DryRun:         in.DryRun,
 		})
 	}
 	if len(args.Applications) == 0 {
@@ -767,7 +770,20 @@ func (c *Client) SetRelationSuspended(relationIds []int, suspended bool, message
 	if len(results.Results) != len(args.Args) {
 		return errors.Errorf("expected %d results, got %d", len(args.Args), len(results.Results))
 	}
-	return results.Combine()
+	var errorStrings []string
+	for i, r := range results.Results {
+		if r.Error != nil {
+			if r.Error.Code == params.CodeUnauthorized {
+				errorStrings = append(errorStrings, fmt.Sprintf("cannot resume relation %d without consume permission", relationIds[i]))
+			} else {
+				errorStrings = append(errorStrings, r.Error.Error())
+			}
+		}
+	}
+	if errorStrings != nil {
+		return errors.New(strings.Join(errorStrings, "\n"))
+	}
+	return nil
 }
 
 // Consume adds a remote application to the model.
@@ -778,6 +794,7 @@ func (c *Client) Consume(arg crossmodel.ConsumeApplicationArgs) (string, error) 
 			ApplicationOfferDetails: arg.Offer,
 			ApplicationAlias:        arg.ApplicationAlias,
 			Macaroon:                arg.Macaroon,
+			AuthToken:               arg.AuthToken,
 		}},
 	}
 	if arg.ControllerInfo != nil {
@@ -1016,4 +1033,176 @@ func unitInfoFromParams(in params.UnitInfoResult) UnitInfo {
 		info.RelationData = append(info.RelationData, erd)
 	}
 	return info
+}
+
+type DeployInfo struct {
+	// Architecture is the architecture used to deploy the charm.
+	Architecture string `json:"architecture"`
+	// Base is the base used to deploy the charm.
+	Base coreseries.Base `json:"base,omitempty"`
+	// Channel is a string representation of the channel used to
+	// deploy the charm.
+	Channel string `json:"channel"`
+	// EffectiveChannel is the channel actually deployed from as determined
+	// by the charmhub response.
+	EffectiveChannel *string `json:"effective-channel,omitempty"`
+	// Is the name of the application deployed. This may vary from
+	// the charm name provided if differs in the metadata.yaml and
+	// no provided on the cli.
+	Name string `json:"name"`
+	// Revision is the revision of the charm deployed.
+	Revision int `json:"revision"`
+}
+
+type PendingResourceUpload struct {
+	// Name is the name of the resource.
+	Name string
+	// Filename is the name of the file as it exists on disk.
+	// Sometimes referred to as the path.
+	Filename string
+	// Type of the resource, a string matching one of the resource.Type
+	Type string
+}
+
+type DeployFromRepositoryArg struct {
+	// CharmName is a string identifying the name of the thing to deploy.
+	// Required.
+	CharmName string
+	// ApplicationName is the name to give the application. Optional. By
+	// default, the charm name and the application name will be the same.
+	ApplicationName string
+	// AttachStorage contains IDs of existing storage that should be
+	// attached to the application unit that will be deployed. This
+	// may be non-empty only if NumUnits is 1.
+	AttachStorage []string
+	// Base describes the OS base intended to be used by the charm.
+	Base *coreseries.Base `json:"base,omitempty"`
+	// Channel is the channel in the repository to deploy from.
+	// This is an optional value. Required if revision is provided.
+	// Defaults to “stable” if not defined nor required.
+	Channel *string `json:"channel,omitempty"`
+	// ConfigYAML is a string that overrides the default config.yml.
+	ConfigYAML string
+	// Cons contains constraints on where units of this application
+	// may be placed.
+	Cons constraints.Value
+	// Devices contains Constraints specifying how devices should be
+	// handled.
+	Devices map[string]devices.Constraints
+	// DryRun just shows what the deploy would do, including finding the
+	// charm; determining version, channel and base to use; validation
+	// of the config. Does not actually download or deploy the charm.
+	DryRun bool
+	// EndpointBindings
+	EndpointBindings map[string]string `json:"endpoint-bindings,omitempty"`
+	// Force can be set to true to bypass any checks for charm-specific
+	// requirements ("assumes" sections in charm metadata, supported series,
+	// LXD profile allow list)
+	Force bool `json:"force,omitempty"`
+	// NumUnits is the number of units to deploy. Defaults to 1 if no
+	// value provided. Synonymous with scale for kubernetes charms.
+	NumUnits *int `json:"num-units,omitempty"`
+	// Placement directives define on which machines the unit(s) must be
+	// created.
+	Placement []*instance.Placement
+	// Revision is the charm revision number. Requires the channel
+	// be explicitly set.
+	Revision *int `json:"revision,omitempty"`
+	// Resources is a collection of resource names for the
+	// application, with the value being the revision of the
+	// resource to use if default revision is not desired.
+	Resources map[string]string `json:"resources,omitempty"`
+	// Storage contains Constraints specifying how storage should be
+	// handled.
+	Storage map[string]storage.Constraints
+	//  Trust allows charm to run hooks that require access credentials
+	Trust bool
+}
+
+// DeployFromRepository deploys a charm from a repository based on the
+// provided arguments. Returned in info on application was deployed,
+// data required to upload any local resources and errors returned.
+// Where possible, more than all errors regarding argument validation
+// are returned.
+func (c *Client) DeployFromRepository(arg DeployFromRepositoryArg) (DeployInfo, []PendingResourceUpload, []error) {
+	var result params.DeployFromRepositoryResults
+	args := params.DeployFromRepositoryArgs{
+		Args: []params.DeployFromRepositoryArg{paramsFromDeployFromRepositoryArg(arg)},
+	}
+	err := c.facade.FacadeCall("DeployFromRepository", args, &result)
+	if err != nil {
+		return DeployInfo{}, nil, []error{err}
+	}
+	if len(result.Results) != 1 {
+		return DeployInfo{}, nil, []error{fmt.Errorf("expected 1 result, got %d", len(result.Results))}
+	}
+	deployInfo, err := deployInfoFromParams(result.Results[0].Info)
+	pendingResourceUploads := pendingResourceUploadsFromParams(result.Results[0].PendingResourceUploads)
+	var errs []error
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(result.Results[0].Errors) > 0 {
+		errs = make([]error, len(result.Results[0].Errors))
+		for i, er := range result.Results[0].Errors {
+			errs[i] = errors.New(er.Error())
+		}
+	}
+	return deployInfo, pendingResourceUploads, errs
+}
+
+func deployInfoFromParams(di params.DeployFromRepositoryInfo) (DeployInfo, error) {
+	base, err := coreseries.ParseBase(di.Base.Name, di.Base.Channel)
+	return DeployInfo{
+		Architecture:     di.Architecture,
+		Base:             base,
+		Channel:          di.Channel,
+		EffectiveChannel: di.EffectiveChannel,
+		Name:             di.Name,
+		Revision:         di.Revision,
+	}, err
+}
+
+func pendingResourceUploadsFromParams(uploads []*params.PendingResourceUpload) []PendingResourceUpload {
+	if len(uploads) == 0 {
+		return []PendingResourceUpload{}
+	}
+	prus := make([]PendingResourceUpload, len(uploads))
+	for i, upload := range uploads {
+		prus[i] = PendingResourceUpload{
+			Name:     upload.Name,
+			Filename: upload.Filename,
+			Type:     upload.Type,
+		}
+	}
+	return prus
+}
+
+func paramsFromDeployFromRepositoryArg(arg DeployFromRepositoryArg) params.DeployFromRepositoryArg {
+	var b *params.Base
+	if arg.Base != nil {
+		b = &params.Base{
+			Name:    arg.Base.OS,
+			Channel: arg.Base.Channel.String(),
+		}
+	}
+	return params.DeployFromRepositoryArg{
+		CharmName:        arg.CharmName,
+		ApplicationName:  arg.ApplicationName,
+		AttachStorage:    arg.AttachStorage,
+		Base:             b,
+		Channel:          arg.Channel,
+		ConfigYAML:       arg.ConfigYAML,
+		Cons:             arg.Cons,
+		Devices:          arg.Devices,
+		DryRun:           arg.DryRun,
+		EndpointBindings: arg.EndpointBindings,
+		Force:            arg.Force,
+		NumUnits:         arg.NumUnits,
+		Placement:        arg.Placement,
+		Revision:         arg.Revision,
+		Resources:        arg.Resources,
+		Storage:          arg.Storage,
+		Trust:            arg.Trust,
+	}
 }

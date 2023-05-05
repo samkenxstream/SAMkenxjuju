@@ -22,6 +22,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/manual"
 	"github.com/juju/juju/environs/manual/sshprovisioner"
@@ -54,7 +55,8 @@ machine instance from the current cloud. The machine's specifications,
 including whether the machine is virtual or physical depends on the cloud.
 
 To control which instance type is provisioned, use the --constraints and 
---series options.
+--base options. --base can be specified using the OS name and the version of
+the OS, separated by @. For example, --base ubuntu@22.04.
 
 To add storage volumes to the instance, provide a whitespace-delimited
 list of storage constraints to the --disks option. 
@@ -85,63 +87,63 @@ It is also possible to add containers to existing machines using the format
 <container-type>:<machine-id>. Constraints cannot be combined this mode.
 
 
-Examples:
-
-	# Start a new machine by requesting one from the cloud provider.
-	juju add-machine
-	
-	# Start 2 new machines.
-	juju add-machine -n 2
-
-	# Start a LXD container on a new machine instance and add both as machines. 
-	juju add-machine lxd
-
-	# Start two machine instances, each hosting a LXD container, then add all
-	# four as machines. 
-	juju add-machine lxd -n 2
-
-	# Create a container on machine 4 and add it as a machine.
-	juju add-machine lxd:4
-
-	# Start a new machine and require that it has 8GB RAM
-	juju add-machine --constraints mem=8G
-
-	# Start a new machine within the "us-east-1a" availability zone.
-	juju add-machine --constraints zones=us-east-1a
-
-	# Start a new machine with at least 4 CPU cores and 16GB RAM, and request
-	# three storage volumes to be attached to it. Two are large capacity (1TB)
-	# HDD and one is a lower capacity (100GB) SSD. Note: "ebs" and "ebs-ssd" 
-	# are storage pools specific to AWS. 
-	juju add-machine --constraints="cores=4 mem=16G" --disks="ebs,1T,2 ebs-ssd,100G,1"
-
-	# Allocate a machine to the model via SSH
-	juju add-machine ssh:user@10.10.0.3
-
-	# Allocate a machine specifying the private key to use during the connection.
-	juju add-machine ssh:user@10.10.0.3 --private-key /tmp/id_rsa
-
-	# Allocate a machine specifying a public key to set in the list of
-	# authorized keys in the machine.
-	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_rsa.pub
-
-	# Allocate a machine specifying a public key to set in the list of
-	# authorized keys and the private key to used during the 
-	# connection
-	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_rsa.pub --private-key /tmp/id_rsa
-
-	# Allocate a machine to the model. Note: specific to MAAS.
-	juju add-machine host.internal
-
-
 Further reading:
 	https://juju.is/docs/reference/commands/add-machine
 	https://juju.is/docs/reference/constraints
+`
 
-See also:
-	remove-machine
-	get-model-constraints
-	set-model-constraints
+const addMachineExamples = `
+Start a new machine by requesting one from the cloud provider:
+
+	juju add-machine
+	
+Start 2 new machines:
+
+	juju add-machine -n 2
+	
+Start a LXD container on a new machine instance and add both as machines:
+
+	juju add-machine lxd
+
+Start two machine instances, each hosting a LXD container, then add all four as machines:
+
+	juju add-machine lxd -n 2
+	
+Create a container on machine 4 and add it as a machine:
+
+	juju add-machine lxd:4
+	
+Start a new machine and require that it has 8GB RAM:
+
+	juju add-machine --constraints mem=8G
+	
+Start a new machine within the "us-east-1a" availability zone:
+
+	juju add-machine --constraints zones=us-east-1a
+	
+Start a new machine with at least 4 CPU cores and 16GB RAM, and request three storage volumes to be attached to it. Two are large capacity (1TB) HDD and one is a lower capacity (100GB) SSD. Note: 'ebs' and 'ebs-ssd' are storage pools specific to AWS.
+
+	juju add-machine --constraints="cores=4 mem=16G" --disks="ebs,1T,2 ebs-ssd,100G,1"
+	
+Allocate a machine to the model via SSH:
+
+	juju add-machine ssh:user@10.10.0.3
+	
+Allocate a machine specifying the private key to use during the connection:
+
+	juju add-machine ssh:user@10.10.0.3 --private-key /tmp/id_rsa
+	
+Allocate a machine specifying a public key to set in the list of authorized keys in the machine:
+
+	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_rsa.pub
+	
+Allocate a machine specifying a public key to set in the list of authorized keys and the private key to used during the connection:
+
+	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_rsa.pub --private-key /tmp/id_rsa
+	
+Allocate a machine to the model. Note: specific to MAAS.
+
+	juju add-machine host.internal
 `
 
 // NewAddCommand returns a command that adds a machine to a model.
@@ -154,8 +156,12 @@ type addCommand struct {
 	baseMachinesCommand
 	modelConfigAPI    ModelConfigAPI
 	machineManagerAPI MachineManagerAPI
-	// If specified, use this series, else use the model default-series
+	// Series defines the series the machine should use instead of the
+	// default-series. DEPRECATED use --base
 	Series string
+	// Base defines the series the machine should use instead of the
+	// default-base.
+	Base string
 	// If specified, these constraints are merged with those already in the model.
 	Constraints constraints.Value
 	// If specified, these constraints are merged with those already in the model.
@@ -176,24 +182,34 @@ type addCommand struct {
 
 func (c *addCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "add-machine",
-		Args:    "[<container-type>[:<machine-id>] | ssh:[<user>@]<host> | <placement>] | <private-key> | <public-key>",
-		Purpose: "Provision a new machine or assign one to the model.",
-		Doc:     addMachineDoc,
+		Name:     "add-machine",
+		Args:     "[<container-type>[:<machine-id>] | ssh:[<user>@]<host> | <placement>] | <private-key> | <public-key>",
+		Purpose:  "Provision a new machine or assign one to the model.",
+		Doc:      addMachineDoc,
+		Examples: addMachineExamples,
+		SeeAlso: []string{
+			"remove-machine",
+			"model-constraints",
+			"set-model-constraints",
+		},
 	})
 }
 
 func (c *addCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
-	f.StringVar(&c.Series, "series", "", "The operating system series to install on the new machine(s)")
+	f.StringVar(&c.Series, "series", "", "The operating system series to install on the new machine(s). DEPRECATED use --base")
+	f.StringVar(&c.Base, "base", "", "The operating system base to install on the new machine(s)")
 	f.IntVar(&c.NumMachines, "n", 1, "The number of machines to add")
-	f.StringVar(&c.ConstraintsStr, "constraints", "", "Machine constraints that overwrite those available from 'juju get-model-constraints' and provider's defaults")
+	f.StringVar(&c.ConstraintsStr, "constraints", "", "Machine constraints that overwrite those available from 'juju model-constraints' and provider's defaults")
 	f.Var(disksFlag{&c.Disks}, "disks", "Storage constraints for disks to attach to the machine(s)")
 	f.StringVar(&c.PrivateKey, "private-key", "", "Path to the private key to use during the connection")
 	f.StringVar(&c.PublicKey, "public-key", "", "Path to the public key to add to the remote authorized keys")
 }
 
 func (c *addCommand) Init(args []string) error {
+	if c.Base != "" && c.Series != "" {
+		return errors.New("--series and --base cannot be specified together")
+	}
 	if c.Constraints.Container != nil {
 		return errors.Errorf("container constraint %q not allowed when adding a machine", *c.Constraints.Container)
 	}
@@ -222,7 +238,7 @@ type ModelConfigAPI interface {
 
 type MachineManagerAPI interface {
 	AddMachines([]params.AddMachineParams) ([]params.AddMachinesResult, error)
-	DestroyMachinesWithParams(force, keep bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error)
+	DestroyMachinesWithParams(force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error)
 	ModelUUID() (string, bool)
 	ProvisioningScript(params.ProvisioningScriptParams) (script string, err error)
 	Close() error
@@ -265,7 +281,30 @@ func (c *addCommand) getMachineManagerAPI() (MachineManagerAPI, error) {
 }
 
 func (c *addCommand) Run(ctx *cmd.Context) error {
-	var err error
+	var (
+		base series.Base
+		err  error
+	)
+	// Note: we validated that both series and base cannot be specified in
+	// Init(), so it's safe to assume that only one of them is set here.
+	if c.Series != "" {
+		if c.Series == "kubernetes" {
+			return fmt.Errorf(`command "add-machine" does not support container models`)
+		} else {
+			ctx.Warningf("series flag is deprecated, use --base instead")
+			if base, err = series.GetBaseFromSeries(c.Series); err != nil {
+				return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
+			}
+		}
+		c.Base = base.String()
+		c.Series = ""
+	}
+	if c.Base != "" {
+		if base, err = series.ParseBaseFromString(c.Base); err != nil {
+			return errors.Trace(err)
+		}
+	}
+
 	c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
 	if err != nil {
 		return err
@@ -317,9 +356,17 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 
 	jobs := []model.MachineJob{model.JobHostUnits}
 
+	var paramsBase *params.Base
+	if !base.Empty() {
+		paramsBase = &params.Base{
+			Name:    base.OS,
+			Channel: base.Channel.String(),
+		}
+	}
+
 	machineParams := params.AddMachineParams{
 		Placement:   c.Placement,
-		Series:      c.Series,
+		Base:        paramsBase,
 		Constraints: c.Constraints,
 		Jobs:        jobs,
 		Disks:       c.Disks,

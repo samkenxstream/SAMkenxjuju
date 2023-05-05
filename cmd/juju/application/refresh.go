@@ -6,17 +6,12 @@ package application
 import (
 	"fmt"
 
-	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
-	"github.com/juju/charmrepo/v7"
-	csparams "github.com/juju/charmrepo/v7/csclient/params"
+	"github.com/juju/charm/v10"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/names/v4"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
@@ -28,7 +23,6 @@ import (
 	"github.com/juju/juju/api/client/spaces"
 	commoncharm "github.com/juju/juju/api/common/charm"
 	apicommoncharms "github.com/juju/juju/api/common/charms"
-	"github.com/juju/juju/api/controller/controller"
 	"github.com/juju/juju/charmhub"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/application/deployer"
@@ -39,6 +33,7 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/storage"
@@ -73,19 +68,8 @@ func newRefreshCommand() *refreshCommand {
 				Logger: logger,
 			})
 		},
-		CharmStoreURLGetter: getCharmStoreAPIURL,
-		NewCharmStore: func(
-			bakeryClient *httpbakery.Client,
-			csURL string,
-			channel csparams.Channel,
-		) (store.MacaroonGetter, store.CharmrepoForDeploy) {
-			return getCharmStore(bakeryClient, csURL, channel)
-		},
-		NewCharmResolver: func(apiRoot base.APICallCloser, charmrepo store.CharmrepoForDeploy, downloadClient store.DownloadBundleClient) CharmResolver {
+		NewCharmResolver: func(apiRoot base.APICallCloser, downloadClient store.DownloadBundleClient) CharmResolver {
 			return store.NewCharmAdaptor(apicharms.NewClient(apiRoot),
-				func() (store.CharmrepoForDeploy, error) {
-					return charmrepo, nil
-				},
 				func() (store.DownloadBundleClient, error) {
 					return downloadClient, nil
 				},
@@ -120,15 +104,8 @@ type NewCharmAdderFunc func(
 	api.Connection,
 ) store.CharmAdder
 
-// NewCharmStoreFunc constructs a charm store client.
-type NewCharmStoreFunc func(
-	*httpbakery.Client,
-	string, // Charmstore API URL
-	csparams.Channel,
-) (store.MacaroonGetter, store.CharmrepoForDeploy)
-
 // NewCharmResolverFunc returns a client implementing CharmResolver.
-type NewCharmResolverFunc func(base.APICallCloser, store.CharmrepoForDeploy, store.DownloadBundleClient) CharmResolver
+type NewCharmResolverFunc func(base.APICallCloser, store.DownloadBundleClient) CharmResolver
 
 // RefreshCharm is responsible for upgrading an application's charm.
 type refreshCommand struct {
@@ -136,26 +113,24 @@ type refreshCommand struct {
 
 	DeployResources       deployer.DeployResourcesFunc
 	NewCharmAdder         NewCharmAdderFunc
-	NewCharmStore         NewCharmStoreFunc
 	NewCharmResolver      NewCharmResolverFunc
 	NewCharmClient        func(base.APICallCloser) utils.CharmClient
 	NewCharmRefreshClient func(base.APICallCloser) CharmRefreshClient
 	NewResourceLister     func(base.APICallCloser) (utils.ResourceLister, error)
 	NewSpacesClient       func(base.APICallCloser) SpacesAPI
-	CharmStoreURLGetter   func(base.APICallCloser) (string, error)
 	ModelConfigClient     func(base.APICallCloser) ModelConfigClient
 	NewCharmHubClient     func(string) (store.DownloadBundleClient, error)
 	NewRefresherFactory   func(refresher.RefresherDependencies) refresher.RefresherFactory
 
 	ApplicationName string
 	// Force should be ubiquitous and we should eventually deprecate both
-	// ForceUnits and ForceSeries; instead just using "force"
-	Force       bool
-	ForceUnits  bool
-	ForceSeries bool
-	SwitchURL   string
-	CharmPath   string
-	Revision    int // defaults to -1 (latest)
+	// ForceUnits and ForceBase; instead just using "force"
+	Force      bool
+	ForceUnits bool
+	ForceBase  bool
+	SwitchURL  string
+	CharmPath  string
+	Revision   int // defaults to -1 (latest)
 
 	BindToSpaces string
 	Bindings     map[string]string
@@ -163,18 +138,23 @@ type refreshCommand struct {
 	// Resources is a map of resource name to filename to be uploaded on upgrade.
 	Resources map[string]string
 
-	// Channel holds the charmstore or charmhub channel to use when obtaining
+	// Channel holds the charmhub channel to use when obtaining
 	// the charm to be refreshed to.
 	Channel    charm.Channel
 	channelStr string
 
-	// Config is a config file variable, pointing at a YAML file containing
-	// the application config to update.
-	Config cmd.FileVar
+	// ConfigOptions records k=v attributes from command arguments
+	// and/or specified files containing key values.
+	ConfigOptions common.ConfigFlag
 
 	// Storage is a map of storage constraints, keyed on the storage name
 	// defined in charm storage metadata, to add or update during upgrade.
 	Storage map[string]storage.Constraints
+
+	// Trust signifies that the charm should have access to trusted credentials.
+	// That is, hooks run by the charm can access cloud credentials and other
+	// trusted access credentials.
+	Trust bool
 }
 
 const refreshDoc = `
@@ -233,27 +213,27 @@ regardless of potential havoc, so long as the following conditions hold:
   participating in.
 - All config settings shared by the old and new charms must
   have the same types.
-- Charms changing from CharmStore (cs: prefix) to CharmHub require a 
-  homogeneous architecture for applications.
 
 The new charm may add new relations and configuration settings.
+
+The new charm may also need to be granted access to trusted credentials.
+Use --trust to grant such access.
+Or use --trust=false to revoke such access.
 
 --switch and --path are mutually exclusive.
 
 --path and --revision are mutually exclusive. The revision of the updated charm
 is determined by the contents of the charm at the specified path.
 
---switch and --revision are mutually exclusive. To specify a given revision
-number with --switch, give it in the charm URL, for instance "cs:wordpress-5"
-would specify revision number 5 of the wordpress charm.
+--switch and --revision are mutually exclusive.
 
-Use of the --force-units option is not generally recommended; units upgraded 
-while in an error state will not have refreshed hooks executed, and may cause 
+Use of the --force-units option is not generally recommended; units upgraded
+while in an error state will not have refreshed hooks executed, and may cause
 unexpected behavior.
 
---force option for LXD Profiles is not generally recommended when upgrading an 
-application; overriding profiles on the container may cause unexpected 
-behavior. 
+--force option for LXD Profiles is not generally recommended when upgrading an
+application; overriding profiles on the container may cause unexpected
+behavior.
 `
 
 func (c *refreshCommand) Info() *cmd.Info {
@@ -262,7 +242,6 @@ func (c *refreshCommand) Info() *cmd.Info {
 		Args:    "<application>",
 		Purpose: "Refresh an application's charm.",
 		Doc:     refreshDoc,
-		Aliases: []string{"upgrade-charm"},
 	})
 }
 
@@ -270,15 +249,16 @@ func (c *refreshCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 	f.BoolVar(&c.Force, "force", false, "Allow a charm to be refreshed which bypasses LXD profile allow list")
 	f.BoolVar(&c.ForceUnits, "force-units", false, "Refresh all units immediately, even if in error state")
-	f.StringVar(&c.channelStr, "channel", "", "Channel to use when getting the charm or bundle from the charm store or charm hub")
-	f.BoolVar(&c.ForceSeries, "force-series", false, "Refresh even if series of deployed applications are not supported by the new charm")
+	f.StringVar(&c.channelStr, "channel", "", "Channel to use when getting the charm from Charmhub")
+	f.BoolVar(&c.ForceBase, "force-series", false, "Refresh even if series of deployed applications are not supported by the new charm")
 	f.StringVar(&c.SwitchURL, "switch", "", "Crossgrade to a different charm")
 	f.StringVar(&c.CharmPath, "path", "", "Refresh to a charm located at path")
 	f.IntVar(&c.Revision, "revision", -1, "Explicit revision of current charm")
 	f.Var(stringMap{&c.Resources}, "resource", "Resource to be uploaded to the controller")
 	f.Var(storageFlag{&c.Storage, nil}, "storage", "Charm storage constraints")
-	f.Var(&c.Config, "config", "Path to yaml-formatted application config")
+	f.Var(&c.ConfigOptions, "config", "Either a path to yaml-formatted application config file or a key=value pair ")
 	f.StringVar(&c.BindToSpaces, "bind", "", "Configure application endpoint bindings to spaces")
+	f.BoolVar(&c.Trust, "trust", false, "Allows charm to run hooks that require access credentials")
 }
 
 func (c *refreshCommand) Init(args []string) error {
@@ -339,8 +319,11 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 	// Ensure that the switchURL (if provided) always contains a schema. If
 	// one is missing inject the default value we selected above.
 	if c.SwitchURL != "" {
-		if c.SwitchURL, err = charm.EnsureSchema(c.SwitchURL, defaultCharmSchema); err != nil {
-			return errors.Trace(err)
+		// Don't prepend `ch:` when referring to a local charm
+		if !refresher.IsLocalURL(c.SwitchURL) {
+			if c.SwitchURL, err = charm.EnsureSchema(c.SwitchURL, defaultCharmSchema); err != nil {
+				return errors.Trace(err)
+			}
 		}
 	}
 
@@ -360,7 +343,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 		// If the charm we are refreshing is local, then we must
 		// specify a path or switch url to upgrade with.
 		if oldURL.Schema == charm.Local.String() {
-			return errors.New("upgrading a local charm requires either --path or --switch")
+			return errors.New("refreshing a local charm requires either --path or --switch")
 		}
 		// No new URL specified, but revision might have been.
 		newRef = oldURL.WithRevision(c.Revision).String()
@@ -383,15 +366,19 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
+	chBase, err := series.ParseBase(applicationInfo.Base.Name, applicationInfo.Base.Channel)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	cfg := refresher.RefresherConfig{
 		ApplicationName: c.ApplicationName,
 		CharmURL:        oldURL,
 		CharmOrigin:     oldOrigin.CoreCharmOrigin(),
 		CharmRef:        newRef,
 		Channel:         c.Channel,
-		DeployedSeries:  applicationInfo.Series,
+		DeployedBase:    chBase,
 		Force:           c.Force,
-		ForceSeries:     c.ForceSeries,
+		ForceBase:       c.ForceBase,
 		Switch:          c.SwitchURL != "",
 		Logger:          ctx,
 	}
@@ -399,51 +386,61 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	charmID, err := factory.Run(cfg)
-	if err == nil {
-		curl := charmID.URL
-		charmOrigin := charmID.Origin
+	charmID, runErr := factory.Run(cfg)
+	if runErr != nil && !errors.Is(runErr, refresher.ErrAlreadyUpToDate) {
+		// Process errors.Is(runErr, refresher.ErrAlreadyUpToDate) after reviewing resources.
+		if termErr, ok := errors.Cause(runErr).(*common.TermsRequiredError); ok {
+			return errors.Trace(termErr.UserErr())
+		}
+		return block.ProcessBlockedError(runErr, block.BlockChange)
+	}
+	curl := charmID.URL
+	charmOrigin := charmID.Origin
+	if runErr == nil {
 		// The current charm URL that's been found and selected.
 		channel := ""
-		if charmOrigin.Source == corecharm.CharmHub || charmOrigin.Source == corecharm.CharmStore {
+		if charmOrigin.Source == corecharm.CharmHub {
 			channel = fmt.Sprintf(" in channel %s", charmID.Origin.Channel.String())
 		}
 		ctx.Infof("Added %s charm %q, revision %d%s, to the model", charmOrigin.Source, curl.Name, curl.Revision, channel)
-	} else if errors.Is(err, refresher.ErrAlreadyUpToDate) {
-		if len(c.Resources) == 0 {
-			// Charm already up-to-date and no resources to refresh.
-			ctx.Infof(err.Error())
-			return nil
-		}
-	} else {
-		if termErr, ok := errors.Cause(err).(*common.TermsRequiredError); ok {
-			return errors.Trace(termErr.UserErr())
-		}
-		return block.ProcessBlockedError(err, block.BlockChange)
 	}
 
 	// Next, upgrade resources.
-
-	resourceLister, err := c.NewResourceLister(apiRoot)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	curl := charmID.URL
-	charmsClient := c.NewCharmClient(apiRoot)
-	charmInfo, err := charmsClient.CharmInfo(curl.String())
+	origin, err := commoncharm.CoreCharmOrigin(charmID.Origin)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	chID := application.CharmID{
 		URL:    curl,
-		Origin: commoncharm.CoreCharmOrigin(charmID.Origin),
+		Origin: origin,
 	}
-	resourceIDs, err := c.upgradeResources(apiRoot, resourceLister, chID, charmID.Macaroon, charmInfo.Meta.Resources)
+	resourceIDs, err := c.upgradeResources(apiRoot, chID)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	// Process the factory Run error from above where the charm itself is
+	// already up-to-date. There are 2 scenarios where we should continue.
+	// 1. There is a change to the charm's channel.
+	// 2. There is a resource change to process.
+	if errors.Is(runErr, refresher.ErrAlreadyUpToDate) {
+		ctx.Infof(runErr.Error())
+		if len(resourceIDs) == 0 && c.Channel.String() == oldOrigin.CoreCharmOrigin().Channel.String() {
+			return nil
+		}
+		if c.Channel.String() != oldOrigin.CoreCharmOrigin().Channel.String() {
+			ctx.Infof("Note: all future refreshes will now use channel %q", charmID.Origin.Channel.String())
+		}
+		if len(resourceIDs) > 0 {
+			ctx.Infof("resources to be upgraded")
+		}
+	}
 
 	// Print out the updated endpoint binding plan.
+	charmsClient := c.NewCharmClient(apiRoot)
+	charmInfo, err := charmsClient.CharmInfo(curl.String())
+	if err != nil {
+		return errors.Trace(err)
+	}
 	var bindingsChangelog []string
 	curBindings := applicationInfo.EndpointBindings
 	appDefaultSpace := curBindings[""]
@@ -454,19 +451,17 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 	c.Bindings, bindingsChangelog = mergeBindings(newCharmEndpoints, curBindings, c.Bindings, appDefaultSpace)
 
 	// Finally, upgrade the application.
-	var configYAML []byte
-	if c.Config.Path != "" {
-		configYAML, err = c.Config.Read(ctx)
-		if err != nil {
-			return errors.Trace(err)
-		}
+	appConfig, configYAML, err := utils.ProcessConfig(ctx, c.Filesystem(), &c.ConfigOptions, c.Trust)
+	if err != nil {
+		return errors.Trace(err)
 	}
 	charmCfg := application.SetCharmConfig{
 		ApplicationName:    c.ApplicationName,
 		CharmID:            chID,
-		ConfigSettingsYAML: string(configYAML),
+		ConfigSettings:     appConfig,
+		ConfigSettingsYAML: configYAML,
 		Force:              c.Force,
-		ForceSeries:        c.ForceSeries,
+		ForceBase:          c.ForceBase,
 		ForceUnits:         c.ForceUnits,
 		ResourceIDs:        resourceIDs,
 		StorageConstraints: c.Storage,
@@ -532,13 +527,20 @@ func (c *refreshCommand) parseBindFlag(apiRoot base.APICallCloser) error {
 // DeployResources should accept a resource-specific client instead.
 func (c *refreshCommand) upgradeResources(
 	apiRoot base.APICallCloser,
-	resourceLister utils.ResourceLister,
 	chID application.CharmID,
-	csMac *macaroon.Macaroon,
-	meta map[string]charmresource.Meta,
 ) (map[string]string, error) {
+	resourceLister, err := c.NewResourceLister(apiRoot)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	charmsClient := c.NewCharmClient(apiRoot)
+	meta, err := utils.GetMetaResources(chID.URL, charmsClient)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	filtered, err := utils.GetUpgradeResources(
-		chID.URL,
+		chID,
+		charmsClient,
 		resourceLister,
 		c.ApplicationName,
 		c.Resources,
@@ -559,7 +561,6 @@ func (c *refreshCommand) upgradeResources(
 			URL:    chID.URL,
 			Origin: chID.Origin,
 		},
-		csMac,
 		c.Resources,
 		filtered,
 		apiRoot,
@@ -592,26 +593,6 @@ func (c *charmAdderShim) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bo
 	return c.charmsClient.AddLocalCharm(curl, ch, force, agentVersion)
 }
 
-func getCharmStore(
-	bakeryClient *httpbakery.Client,
-	csURL string,
-	channel csparams.Channel,
-) (store.MacaroonGetter, store.CharmrepoForDeploy) {
-	csClient := store.NewCharmStoreClient(bakeryClient, csURL).WithChannel(channel)
-	return csClient, charmrepo.NewCharmStoreFromClient(csClient)
-}
-
-// getCharmStoreAPIURL consults the controller config for the charmstore api url
-// to use.
-var getCharmStoreAPIURL = func(conAPIRoot base.APICallCloser) (string, error) {
-	controllerAPI := controller.NewClient(conAPIRoot)
-	controllerCfg, err := controllerAPI.ControllerConfig()
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	return controllerCfg.CharmStoreURL(), nil
-}
-
 func allEndpoints(ci *apicommoncharms.CharmInfo) set.Strings {
 	epSet := set.NewStrings()
 	for n := range ci.Meta.ExtraBindings {
@@ -631,21 +612,6 @@ func allEndpoints(ci *apicommoncharms.CharmInfo) set.Strings {
 }
 
 func (c *refreshCommand) getRefresherFactory(apiRoot api.Connection) (refresher.RefresherFactory, error) {
-	// First, ensure the charm is added to the model.
-	conAPIRoot, err := c.NewControllerAPIRoot()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	csURL, err := c.CharmStoreURLGetter(conAPIRoot)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	bakeryClient, err := c.BakeryClient()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	csClient, charmStore := c.NewCharmStore(bakeryClient, csURL, csparams.Channel(c.Channel.Risk))
-
 	charmHubURL, err := c.getCharmHubURL(apiRoot)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -657,9 +623,8 @@ func (c *refreshCommand) getRefresherFactory(apiRoot api.Connection) (refresher.
 	}
 
 	deps := refresher.RefresherDependencies{
-		Authorizer:    csClient,
 		CharmAdder:    c.NewCharmAdder(apiRoot),
-		CharmResolver: c.NewCharmResolver(apiRoot, charmStore, downloadClient),
+		CharmResolver: c.NewCharmResolver(apiRoot, downloadClient),
 	}
 	return c.NewRefresherFactory(deps), nil
 }

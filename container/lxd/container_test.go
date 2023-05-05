@@ -19,6 +19,7 @@ import (
 	"github.com/juju/juju/container/lxd/mocks"
 	lxdtesting "github.com/juju/juju/container/lxd/testing"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/instance"
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/network"
@@ -41,6 +42,12 @@ func (s *containerSuite) TestContainerArch(c *gc.C) {
 	container := lxd.Container{}
 	container.Architecture = lxdArch
 	c.Check(container.Arch(), gc.Equals, arch.AMD64)
+}
+
+func (s *containerSuite) TestContainerVirtType(c *gc.C) {
+	container := lxd.Container{}
+	container.Type = string(instance.DefaultInstanceType)
+	c.Check(container.VirtType(), gc.Equals, api.InstanceTypeContainer)
 }
 
 func (s *containerSuite) TestContainerCPUs(c *gc.C) {
@@ -88,7 +95,7 @@ func (s *containerSuite) TestFilterContainers(c *gc.C) {
 	defer ctrl.Finish()
 	cSvr := s.NewMockServer(ctrl)
 
-	matching := []api.Container{
+	matching := []api.Instance{
 		{
 			Name:       "prefix-c1",
 			StatusCode: api.Starting,
@@ -98,7 +105,7 @@ func (s *containerSuite) TestFilterContainers(c *gc.C) {
 			StatusCode: api.Stopped,
 		},
 	}
-	ret := append(matching, []api.Container{
+	ret := append(matching, []api.Instance{
 		{
 			Name:       "prefix-c3",
 			StatusCode: api.Started,
@@ -108,7 +115,7 @@ func (s *containerSuite) TestFilterContainers(c *gc.C) {
 			StatusCode: api.Stopped,
 		},
 	}...)
-	cSvr.EXPECT().GetContainers().Return(ret, nil)
+	cSvr.EXPECT().GetInstances(api.InstanceTypeAny).Return(ret, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
 	c.Assert(err, jc.ErrorIsNil)
@@ -124,12 +131,82 @@ func (s *containerSuite) TestFilterContainers(c *gc.C) {
 	c.Check(filtered, gc.DeepEquals, expected)
 }
 
+func (s *containerSuite) TestFilterContainersRetry(c *gc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+	cSvr := s.NewMockServer(ctrl)
+
+	for i := 0; i < 3; i++ {
+		ret := []api.Instance{
+			{
+				Name:       "prefix-c1",
+				StatusCode: api.Pending,
+			},
+			{
+				Name:       "prefix-c2",
+				StatusCode: api.Pending,
+			},
+			{
+				Name:       "prefix-c3",
+				StatusCode: api.Pending,
+			},
+			{
+				Name:       "not-prefix-c4",
+				StatusCode: api.Pending,
+			},
+		}
+		cSvr.EXPECT().GetInstances(api.InstanceTypeAny).Return(ret, nil)
+	}
+
+	matching := []api.Instance{
+		{
+			Name:       "prefix-c1",
+			StatusCode: api.Starting,
+		},
+		{
+			Name:       "prefix-c2",
+			StatusCode: api.Stopped,
+		},
+	}
+	ret := append(matching, []api.Instance{
+		{
+			Name:       "prefix-c3",
+			StatusCode: api.Started,
+		},
+		{
+			Name:       "not-prefix-c4",
+			StatusCode: api.Stopped,
+		},
+	}...)
+	cSvr.EXPECT().GetInstances(api.InstanceTypeAny).Return(ret, nil)
+
+	clock := mocks.NewMockClock(ctrl)
+	clock.EXPECT().Now().Return(time.Now()).AnyTimes()
+	clock.EXPECT().After(gomock.Any()).DoAndReturn(func(d time.Duration) <-chan time.Time {
+		c := make(chan time.Time, 1)
+		defer close(c)
+		return c
+	}).AnyTimes()
+
+	jujuSvr, err := lxd.NewTestingServer(cSvr, clock)
+	c.Assert(err, jc.ErrorIsNil)
+
+	filtered, err := jujuSvr.FilterContainers("prefix", "Starting", "Stopped")
+	c.Assert(err, jc.ErrorIsNil)
+
+	expected := make([]lxd.Container, len(matching))
+	for i, v := range matching {
+		expected[i] = lxd.Container{v}
+	}
+	c.Check(filtered, gc.DeepEquals, expected)
+}
+
 func (s *containerSuite) TestAliveContainers(c *gc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServer(ctrl)
 
-	matching := []api.Container{
+	matching := []api.Instance{
 		{
 			Name:       "c1",
 			StatusCode: api.Starting,
@@ -143,11 +220,11 @@ func (s *containerSuite) TestAliveContainers(c *gc.C) {
 			StatusCode: api.Running,
 		},
 	}
-	ret := append(matching, api.Container{
+	ret := append(matching, api.Instance{
 		Name:       "c4",
 		StatusCode: api.Frozen,
 	})
-	cSvr.EXPECT().GetContainers().Return(ret, nil)
+	cSvr.EXPECT().GetInstances(api.InstanceTypeAny).Return(ret, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
 	c.Assert(err, jc.ErrorIsNil)
@@ -167,10 +244,10 @@ func (s *containerSuite) TestContainerAddresses(c *gc.C) {
 	defer ctrl.Finish()
 	cSvr := s.NewMockServer(ctrl)
 
-	state := api.ContainerState{
-		Network: map[string]api.ContainerStateNetwork{
+	state := api.InstanceState{
+		Network: map[string]api.InstanceStateNetwork{
 			"eth0": {
-				Addresses: []api.ContainerStateNetworkAddress{
+				Addresses: []api.InstanceStateNetworkAddress{
 					{
 						Family:  "inet",
 						Address: "10.0.8.173",
@@ -186,7 +263,7 @@ func (s *containerSuite) TestContainerAddresses(c *gc.C) {
 				},
 			},
 			"lo": {
-				Addresses: []api.ContainerStateNetworkAddress{
+				Addresses: []api.InstanceStateNetworkAddress{
 					{
 						Family:  "inet",
 						Address: "127.0.0.1",
@@ -201,24 +278,8 @@ func (s *containerSuite) TestContainerAddresses(c *gc.C) {
 					},
 				},
 			},
-			"lxcbr0": {
-				Addresses: []api.ContainerStateNetworkAddress{
-					{
-						Family:  "inet",
-						Address: "10.0.5.12",
-						Netmask: "24",
-						Scope:   "global",
-					},
-					{
-						Family:  "inet6",
-						Address: "fe80::216:3eff:fe3b:e432",
-						Netmask: "64",
-						Scope:   "link",
-					},
-				},
-			},
 			"lxdbr0": {
-				Addresses: []api.ContainerStateNetworkAddress{
+				Addresses: []api.InstanceStateNetworkAddress{
 					{
 						Family:  "inet",
 						Address: "10.0.6.17",
@@ -235,7 +296,7 @@ func (s *containerSuite) TestContainerAddresses(c *gc.C) {
 			},
 		},
 	}
-	cSvr.EXPECT().GetContainerState("c1").Return(&state, lxdtesting.ETag, nil)
+	cSvr.EXPECT().GetInstanceState("c1").Return(&state, lxdtesting.ETag, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
 	c.Assert(err, jc.ErrorIsNil)
@@ -283,9 +344,10 @@ func (s *containerSuite) TestCreateContainerFromSpecSuccess(c *gc.C) {
 		},
 	}
 
-	createReq := api.ContainersPost{
+	createReq := api.InstancesPost{
 		Name: spec.Name,
-		ContainerPut: api.ContainerPut{
+		Type: api.InstanceTypeContainer,
+		InstancePut: api.InstancePut{
 			Profiles:  spec.Profiles,
 			Devices:   spec.Devices,
 			Config:    spec.Config,
@@ -293,7 +355,7 @@ func (s *containerSuite) TestCreateContainerFromSpecSuccess(c *gc.C) {
 		},
 	}
 
-	startReq := api.ContainerStatePut{
+	startReq := api.InstanceStatePut{
 		Action:   "start",
 		Timeout:  -1,
 		Force:    false,
@@ -303,9 +365,9 @@ func (s *containerSuite) TestCreateContainerFromSpecSuccess(c *gc.C) {
 	// Container created, started and returned.
 	exp := cSvr.EXPECT()
 	gomock.InOrder(
-		exp.CreateContainerFromImage(cSvr, image, createReq).Return(createOp, nil),
-		exp.UpdateContainerState(spec.Name, startReq, "").Return(startOp, nil),
-		exp.GetContainer(spec.Name).Return(&api.Container{}, lxdtesting.ETag, nil),
+		exp.CreateInstanceFromImage(cSvr, image, createReq).Return(createOp, nil),
+		exp.UpdateInstanceState(spec.Name, startReq, "").Return(startOp, nil),
+		exp.GetInstance(spec.Name).Return(&api.Instance{}, lxdtesting.ETag, nil),
 	)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
@@ -347,9 +409,10 @@ func (s *containerSuite) TestCreateContainerFromSpecAlreadyExists(c *gc.C) {
 		},
 	}
 
-	createReq := api.ContainersPost{
+	createReq := api.InstancesPost{
 		Name: spec.Name,
-		ContainerPut: api.ContainerPut{
+		Type: api.InstanceTypeContainer,
+		InstancePut: api.InstancePut{
 			Profiles:  spec.Profiles,
 			Devices:   spec.Devices,
 			Config:    spec.Config,
@@ -360,9 +423,9 @@ func (s *containerSuite) TestCreateContainerFromSpecAlreadyExists(c *gc.C) {
 	// Container created, started and returned.
 	exp := cSvr.EXPECT()
 	gomock.InOrder(
-		exp.CreateContainerFromImage(cSvr, image, createReq).Return(createOp, errors.Errorf("Container 'juju-5bcbde-5-lxd-6' already exists")),
-		exp.GetContainer(spec.Name).Return(&api.Container{
-			ContainerPut: api.ContainerPut{
+		exp.CreateInstanceFromImage(cSvr, image, createReq).Return(createOp, errors.Errorf("Container 'juju-5bcbde-5-lxd-6' already exists")),
+		exp.GetInstance(spec.Name).Return(&api.Instance{
+			InstancePut: api.InstancePut{
 				Profiles: spec.Profiles,
 				Devices:  spec.Devices,
 				Config:   spec.Config,
@@ -410,9 +473,10 @@ func (s *containerSuite) TestCreateContainerFromSpecAlreadyExistsNotCorrectSpec(
 		},
 	}
 
-	createReq := api.ContainersPost{
+	createReq := api.InstancesPost{
 		Name: spec.Name,
-		ContainerPut: api.ContainerPut{
+		Type: api.InstanceTypeContainer,
+		InstancePut: api.InstancePut{
 			Profiles:  spec.Profiles,
 			Devices:   spec.Devices,
 			Config:    spec.Config,
@@ -423,8 +487,8 @@ func (s *containerSuite) TestCreateContainerFromSpecAlreadyExistsNotCorrectSpec(
 	// Container created, started and returned.
 	exp := cSvr.EXPECT()
 	gomock.InOrder(
-		exp.CreateContainerFromImage(cSvr, image, createReq).Return(createOp, errors.Errorf("Container 'juju-5bcbde-5-lxd-6' already exists")),
-		exp.GetContainer(spec.Name).Return(&api.Container{
+		exp.CreateInstanceFromImage(cSvr, image, createReq).Return(createOp, errors.Errorf("Container 'juju-5bcbde-5-lxd-6' already exists")),
+		exp.GetInstance(spec.Name).Return(&api.Instance{
 			StatusCode: api.Running,
 		}, lxdtesting.ETag, nil),
 	)
@@ -470,9 +534,10 @@ func (s *containerSuite) TestCreateContainerFromSpecStartFailed(c *gc.C) {
 		},
 	}
 
-	createReq := api.ContainersPost{
+	createReq := api.InstancesPost{
 		Name: spec.Name,
-		ContainerPut: api.ContainerPut{
+		Type: api.InstanceTypeContainer,
+		InstancePut: api.InstancePut{
 			Profiles:  spec.Profiles,
 			Devices:   spec.Devices,
 			Config:    spec.Config,
@@ -480,7 +545,7 @@ func (s *containerSuite) TestCreateContainerFromSpecStartFailed(c *gc.C) {
 		},
 	}
 
-	startReq := api.ContainerStatePut{
+	startReq := api.InstanceStatePut{
 		Action:   "start",
 		Timeout:  -1,
 		Force:    false,
@@ -490,11 +555,11 @@ func (s *containerSuite) TestCreateContainerFromSpecStartFailed(c *gc.C) {
 	// Container created, starting fails, container state checked, container deleted.
 	exp := cSvr.EXPECT()
 	gomock.InOrder(
-		exp.CreateContainerFromImage(cSvr, image, createReq).Return(createOp, nil),
-		exp.UpdateContainerState(spec.Name, startReq, "").Return(nil, errors.New("start failed")),
-		exp.GetContainerState(spec.Name).Return(
-			&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil),
-		exp.DeleteContainer(spec.Name).Return(deleteOp, nil),
+		exp.CreateInstanceFromImage(cSvr, image, createReq).Return(createOp, nil),
+		exp.UpdateInstanceState(spec.Name, startReq, "").Return(nil, errors.New("start failed")),
+		exp.GetInstanceState(spec.Name).Return(
+			&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil),
+		exp.DeleteInstance(spec.Name).Return(deleteOp, nil),
 	)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
@@ -516,7 +581,7 @@ func (s *containerSuite) TestRemoveContainersSuccess(c *gc.C) {
 	deleteOp := lxdtesting.NewMockOperation(ctrl)
 	deleteOp.EXPECT().Wait().Return(nil).Times(2)
 
-	stopReq := api.ContainerStatePut{
+	stopReq := api.InstanceStatePut{
 		Action:   "stop",
 		Timeout:  -1,
 		Force:    true,
@@ -525,11 +590,11 @@ func (s *containerSuite) TestRemoveContainersSuccess(c *gc.C) {
 
 	// Container c1 is already stopped. Container c2 is started and stopped before deletion.
 	exp := cSvr.EXPECT()
-	exp.GetContainerState("c1").Return(&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
-	exp.DeleteContainer("c1").Return(deleteOp, nil)
-	exp.GetContainerState("c2").Return(&api.ContainerState{StatusCode: api.Started}, lxdtesting.ETag, nil)
-	exp.UpdateContainerState("c2", stopReq, lxdtesting.ETag).Return(stopOp, nil)
-	exp.DeleteContainer("c2").Return(deleteOp, nil)
+	exp.GetInstanceState("c1").Return(&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
+	exp.DeleteInstance("c1").Return(deleteOp, nil)
+	exp.GetInstanceState("c2").Return(&api.InstanceState{StatusCode: api.Started}, lxdtesting.ETag, nil)
+	exp.UpdateInstanceState("c2", stopReq, lxdtesting.ETag).Return(stopOp, nil)
+	exp.DeleteInstance("c2").Return(deleteOp, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
 	c.Assert(err, jc.ErrorIsNil)
@@ -549,7 +614,7 @@ func (s *containerSuite) TestRemoveContainersSuccessWithNotFound(c *gc.C) {
 	deleteOp := lxdtesting.NewMockOperation(ctrl)
 	deleteOp.EXPECT().Wait().Return(nil)
 
-	stopReq := api.ContainerStatePut{
+	stopReq := api.InstanceStatePut{
 		Action:   "stop",
 		Timeout:  -1,
 		Force:    true,
@@ -558,11 +623,11 @@ func (s *containerSuite) TestRemoveContainersSuccessWithNotFound(c *gc.C) {
 
 	// Container c1 is already stopped. Container c2 is started and stopped before deletion.
 	exp := cSvr.EXPECT()
-	exp.GetContainerState("c1").Return(&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
-	exp.DeleteContainer("c1").Return(deleteOp, nil)
-	exp.GetContainerState("c2").Return(&api.ContainerState{StatusCode: api.Started}, lxdtesting.ETag, nil)
-	exp.UpdateContainerState("c2", stopReq, lxdtesting.ETag).Return(stopOp, nil)
-	exp.DeleteContainer("c2").Return(deleteOp, api.StatusErrorf(http.StatusNotFound, ""))
+	exp.GetInstanceState("c1").Return(&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
+	exp.DeleteInstance("c1").Return(deleteOp, nil)
+	exp.GetInstanceState("c2").Return(&api.InstanceState{StatusCode: api.Started}, lxdtesting.ETag, nil)
+	exp.UpdateInstanceState("c2", stopReq, lxdtesting.ETag).Return(stopOp, nil)
+	exp.DeleteInstance("c2").Return(deleteOp, api.StatusErrorf(http.StatusNotFound, ""))
 
 	jujuSvr, err := lxd.NewServer(cSvr)
 	c.Assert(err, jc.ErrorIsNil)
@@ -582,7 +647,7 @@ func (s *containerSuite) TestRemoveContainersPartialFailure(c *gc.C) {
 	deleteOp := lxdtesting.NewMockOperation(ctrl)
 	deleteOp.EXPECT().Wait().Return(nil)
 
-	stopReq := api.ContainerStatePut{
+	stopReq := api.InstanceStatePut{
 		Action:   "stop",
 		Timeout:  -1,
 		Force:    true,
@@ -591,13 +656,13 @@ func (s *containerSuite) TestRemoveContainersPartialFailure(c *gc.C) {
 
 	// Container c1, c2 already stopped, but delete fails. Container c2 is started and stopped before deletion.
 	exp := cSvr.EXPECT()
-	exp.GetContainerState("c1").Return(&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
-	exp.DeleteContainer("c1").Return(nil, errors.New("deletion failed"))
-	exp.GetContainerState("c2").Return(&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
-	exp.DeleteContainer("c2").Return(nil, errors.New("deletion failed"))
-	exp.GetContainerState("c3").Return(&api.ContainerState{StatusCode: api.Started}, lxdtesting.ETag, nil)
-	exp.UpdateContainerState("c3", stopReq, lxdtesting.ETag).Return(stopOp, nil)
-	exp.DeleteContainer("c3").Return(deleteOp, nil)
+	exp.GetInstanceState("c1").Return(&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
+	exp.DeleteInstance("c1").Return(nil, errors.New("deletion failed"))
+	exp.GetInstanceState("c2").Return(&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
+	exp.DeleteInstance("c2").Return(nil, errors.New("deletion failed"))
+	exp.GetInstanceState("c3").Return(&api.InstanceState{StatusCode: api.Started}, lxdtesting.ETag, nil)
+	exp.UpdateInstanceState("c3", stopReq, lxdtesting.ETag).Return(stopOp, nil)
+	exp.DeleteInstance("c3").Return(deleteOp, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
 	c.Assert(err, jc.ErrorIsNil)
@@ -606,7 +671,7 @@ func (s *containerSuite) TestRemoveContainersPartialFailure(c *gc.C) {
 	c.Assert(err, gc.ErrorMatches, "failed to remove containers: c1, c2")
 }
 
-func (s *containerSuite) TestDeleteContainersPartialFailure(c *gc.C) {
+func (s *containerSuite) TestDeleteInstancesPartialFailure(c *gc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServer(ctrl)
@@ -621,12 +686,12 @@ func (s *containerSuite) TestDeleteContainersPartialFailure(c *gc.C) {
 
 	// Container c1, c2 already stopped, but delete fails. Container c2 is started and stopped before deletion.
 	exp := cSvr.EXPECT()
-	exp.GetContainerState("c1").Return(&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
-	exp.DeleteContainer("c1").Return(deleteOpFail, nil)
-	exp.DeleteContainer("c1").Return(deleteOpSuccess, nil)
+	exp.GetInstanceState("c1").Return(&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
+	exp.DeleteInstance("c1").Return(deleteOpFail, nil)
+	exp.DeleteInstance("c1").Return(deleteOpSuccess, nil)
 
-	exp.GetContainerState("c2").Return(&api.ContainerState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
-	exp.DeleteContainer("c2").Return(deleteOpFail, nil).Times(retries)
+	exp.GetInstanceState("c2").Return(&api.InstanceState{StatusCode: api.Stopped}, lxdtesting.ETag, nil)
+	exp.DeleteInstance("c2").Return(deleteOpFail, nil).Times(retries)
 
 	clock := mocks.NewMockClock(ctrl)
 	ch := make(chan time.Time)
@@ -670,12 +735,6 @@ func (s *managerSuite) TestSpecApplyConstraints(c *gc.C) {
 		"limits.cpu":     "4",
 	}
 	spec.ApplyConstraints("3.10.0", cons)
-	c.Check(spec.Config, gc.DeepEquals, exp)
-	c.Check(spec.InstanceType, gc.Equals, instType)
-
-	// Uses the "MB" suffix.
-	exp["limits.memory"] = "2046MB"
-	spec.ApplyConstraints("2.0.11", cons)
 	c.Check(spec.Config, gc.DeepEquals, exp)
 	c.Check(spec.InstanceType, gc.Equals, instType)
 }

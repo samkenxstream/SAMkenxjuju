@@ -8,7 +8,6 @@ import (
 
 	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/feature"
 	"github.com/juju/juju/testing"
 )
 
@@ -20,29 +19,29 @@ var _ = gc.Suite(&HelpToolSuite{})
 
 func (suite *HelpToolSuite) SetUpTest(c *gc.C) {
 	suite.FakeJujuXDGDataHomeSuite.SetUpTest(c)
-	setFeatureFlags(feature.Secrets)
+	setFeatureFlags("")
 }
 
 func (suite *HelpToolSuite) TestHelpToolHelp(c *gc.C) {
 	output := badrun(c, 0, "help", "help-tool")
-	c.Assert(output, gc.Equals, `Usage: juju hook-tool [tool]
+	c.Assert(output, gc.Equals, `Usage: juju help-tool [tool]
 
 Summary:
 Show help on a Juju charm hook tool.
 
 Global Options:
 --debug  (= false)
-    equivalent to --show-log --logging-config=<root>=DEBUG
+    Equivalent to --show-log --logging-config=<root>=DEBUG
 -h, --help  (= false)
     Show help on a command or other topic.
 --logging-config (= "")
-    specify log levels for modules
+    Specify log levels for modules
 --quiet  (= false)
-    show no informational output
+    Show no informational output
 --show-log  (= false)
-    if set, write the log file to stderr
+    If set, write the log file to stderr
 --verbose  (= false)
-    show more verbose output
+    Show more verbose output
 
 Details:
 Juju charms can access a series of built-in helpers called 'hook-tools'.
@@ -81,6 +80,14 @@ Currently available charm hook tools are:
     relation-list            list relation units
     relation-set             set relation settings
     resource-get             get the path to the locally cached resource file
+    secret-add               add a new secret
+    secret-get               get the content of a secret
+    secret-grant             grant access to a secret
+    secret-ids               print secret ids
+    secret-info-get          get a secret's metadata info
+    secret-remove            remove a existing secret
+    secret-revoke            revoke access to a secret
+    secret-set               update an existing secret
     state-delete             delete server-side-state key value pair
     state-get                print server-side-state value
     state-set                set server-side-state values
@@ -93,11 +100,9 @@ Currently available charm hook tools are:
 
 Examples:
 
-    For help on a specific tool, supply the name of that tool, for example:
+For help on a specific tool, supply the name of that tool, for example:
 
-        juju hook-tool unit-get
-
-Aliases: help-tool, hook-tools
+        juju help-tool unit-get
 `)
 }
 
@@ -134,11 +139,14 @@ var expectedCommands = []string{
 	"relation-list",
 	"relation-set",
 	"resource-get",
-	"secret-create",
+	"secret-add",
 	"secret-get",
 	"secret-grant",
+	"secret-ids",
+	"secret-info-get",
+	"secret-remove",
 	"secret-revoke",
-	"secret-update",
+	"secret-set",
 	"state-delete",
 	"state-get",
 	"state-set",

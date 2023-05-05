@@ -8,9 +8,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
+
+	coreseries "github.com/juju/juju/core/series"
 )
 
 // DiffSide represents one side of a bundle-model diff.
@@ -143,14 +145,21 @@ func (d *differ) diffApplication(name string) *ApplicationDiff {
 		bundleSeries = d.config.Bundle.Series
 	}
 
+	modelSeries, _ := coreseries.GetSeriesFromBase(model.Base)
 	result := &ApplicationDiff{
 		Charm:            d.diffStrings(bundle.Charm, model.Charm),
 		Expose:           d.diffBools(effectiveBundleExpose, effectiveModelExpose),
 		ExposedEndpoints: d.diffExposedEndpoints(bundle.ExposedEndpoints, model.ExposedEndpoints),
-		Series:           d.diffStrings(bundleSeries, model.Series),
+		Series:           d.diffStrings(bundleSeries, modelSeries),
 		Channel:          d.diffStrings(bundle.Channel, model.Channel),
 		Constraints:      d.diffStrings(bundle.Constraints, model.Constraints),
 		Options:          d.diffOptions(bundle.Options, model.Options),
+	}
+
+	if bundle.Revision != nil {
+		result.Revision = d.diffInts(*bundle.Revision, model.Revision)
+	} else {
+		result.Revision = d.diffInts(-1, model.Revision)
 	}
 
 	if d.config.IncludeAnnotations {
@@ -204,9 +213,10 @@ func (d *differ) diffMachines() map[string]*MachineDiff {
 			bundleSeries = d.config.Bundle.Series
 		}
 
+		machineSeries, _ := coreseries.GetSeriesFromBase(modelMachine.Base)
 		diff := &MachineDiff{
 			Series: d.diffStrings(
-				bundleSeries, modelMachine.Series,
+				bundleSeries, machineSeries,
 			),
 		}
 		if d.config.IncludeAnnotations {
@@ -408,6 +418,7 @@ type ApplicationDiff struct {
 	Charm            *StringDiff                    `yaml:"charm,omitempty"`
 	Series           *StringDiff                    `yaml:"series,omitempty"`
 	Channel          *StringDiff                    `yaml:"channel,omitempty"`
+	Revision         *IntDiff                       `yaml:"revision,omitempty"`
 	Placement        *StringDiff                    `yaml:"placement,omitempty"`
 	NumUnits         *IntDiff                       `yaml:"num_units,omitempty"`
 	Scale            *IntDiff                       `yaml:"scale,omitempty"`
@@ -428,6 +439,7 @@ func (d *ApplicationDiff) Empty() bool {
 		d.Charm == nil &&
 		d.Series == nil &&
 		d.Channel == nil &&
+		d.Revision == nil &&
 		d.Placement == nil &&
 		d.NumUnits == nil &&
 		d.Scale == nil &&

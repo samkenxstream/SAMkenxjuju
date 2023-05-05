@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/version/v2"
@@ -41,6 +41,12 @@ type Client struct {
 	httpClientFactory func() (*httprequest.Client, error)
 }
 
+// BestFacadeVersion returns the best supported facade version
+// on the target controller.
+func (c *Client) BestFacadeVersion() int {
+	return c.caller.BestAPIVersion()
+}
+
 func (c *Client) Prechecks(model coremigration.ModelInfo) error {
 	args := params.MigrationModelInfo{
 		UUID:                   model.UUID,
@@ -66,8 +72,21 @@ func (c *Client) Abort(modelUUID string) error {
 }
 
 // Activate marks a migrated model as being ready to use.
-func (c *Client) Activate(modelUUID string) error {
-	args := params.ModelArgs{ModelTag: names.NewModelTag(modelUUID).String()}
+func (c *Client) Activate(modelUUID string, sourceInfo coremigration.SourceControllerInfo, relatedModels []string) error {
+	if c.caller.BestAPIVersion() < 2 {
+		args := params.ModelArgs{ModelTag: names.NewModelTag(modelUUID).String()}
+		return errors.Trace(c.caller.FacadeCall("Activate", args, nil))
+	}
+	args := params.ActivateModelArgs{
+		ModelTag: names.NewModelTag(modelUUID).String(),
+	}
+	if len(relatedModels) > 0 {
+		args.ControllerTag = sourceInfo.ControllerTag.String()
+		args.ControllerAlias = sourceInfo.ControllerAlias
+		args.SourceAPIAddrs = sourceInfo.Addrs
+		args.SourceCACert = sourceInfo.CACert
+		args.CrossModelUUIDs = relatedModels
+	}
 	return errors.Trace(c.caller.FacadeCall("Activate", args, nil))
 }
 
@@ -78,7 +97,6 @@ func (c *Client) UploadCharm(modelUUID string, curl *charm.URL, content io.ReadS
 	args.Add("name", curl.Name)
 	args.Add("schema", curl.Schema)
 	args.Add("arch", curl.Architecture)
-	args.Add("user", curl.User)
 	args.Add("series", curl.Series)
 	args.Add("revision", strconv.Itoa(curl.Revision))
 

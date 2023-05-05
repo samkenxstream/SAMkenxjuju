@@ -62,6 +62,7 @@ type CommitsCommand struct {
 }
 
 // CommitsCommandAPI defines an API interface to be used during testing.
+//
 //go:generate go run github.com/golang/mock/mockgen -package mocks -destination ./mocks/commits_mock.go github.com/juju/juju/cmd/juju/model CommitsCommandAPI
 type CommitsCommandAPI interface {
 	Close() error
@@ -169,7 +170,7 @@ func (c *CommitsCommand) printTabular(writer io.Writer, value interface{}) error
 	for _, c := range list.Commits {
 		table.AddRow(c.CommitId, c.CommittedAt, c.CommittedBy, c.BranchName)
 	}
-	_, _ = fmt.Fprint(writer, table)
+	_, _ = fmt.Fprintln(writer, table)
 	return nil
 }
 

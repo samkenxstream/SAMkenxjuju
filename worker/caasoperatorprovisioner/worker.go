@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
@@ -302,6 +302,7 @@ func (p *provisioner) updateOperatorConfig(appName, password string, prevCfg caa
 
 	cfg := &caas.OperatorConfig{
 		ImageDetails:        info.ImageDetails,
+		BaseImageDetails:    info.BaseImageDetails,
 		Version:             info.Version,
 		ResourceTags:        info.Tags,
 		CharmStorage:        charmStorageParams(info.CharmStorage),

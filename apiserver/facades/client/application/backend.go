@@ -6,8 +6,8 @@ package application
 import (
 	"time"
 
-	"github.com/juju/charm/v9"
-	csparams "github.com/juju/charmrepo/v7/csclient/params"
+	"github.com/juju/charm/v10"
+	"github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/schema"
@@ -15,6 +15,7 @@ import (
 	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/apiserver/common/storagecommon"
+	"github.com/juju/juju/apiserver/facades/client/charms/services"
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/controller"
 	coreconfig "github.com/juju/juju/core/config"
@@ -34,15 +35,19 @@ import (
 type Backend interface {
 	AllModelUUIDs() ([]string, error)
 	Application(string) (Application, error)
+	ApplicationOfferForUUID(offerUUID string) (*crossmodel.ApplicationOffer, error)
 	ApplyOperation(state.ModelOperation) error
 	AddApplication(state.AddApplicationArgs) (Application, error)
+	AddPendingResource(string, resource.Resource) (string, error)
+	RemovePendingResources(applicationID string, pendingIDs map[string]string) error
+	AddCharmMetadata(info state.CharmInfo) (Charm, error)
 	RemoteApplication(string) (RemoteApplication, error)
 	AddRemoteApplication(state.AddRemoteApplicationParams) (RemoteApplication, error)
 	AddRelation(...state.Endpoint) (Relation, error)
 	Charm(*charm.URL) (Charm, error)
-	EndpointsRelation(...state.Endpoint) (Relation, error)
 	Relation(int) (Relation, error)
 	InferEndpoints(...string) ([]state.Endpoint, error)
+	InferActiveRelation(...string) (Relation, error)
 	Machine(string) (Machine, error)
 	Model() (Model, error)
 	Unit(string) (Unit, error)
@@ -55,6 +60,8 @@ type Backend interface {
 	SaveEgressNetworks(relationKey string, cidrs []string) (state.RelationNetworks, error)
 	Branch(string) (Generation, error)
 	state.EndpointBinding
+	ModelConstraints() (constraints.Value, error)
+	services.StateBackend
 }
 
 // BlockChecker defines the block-checking functionality required by
@@ -77,7 +84,6 @@ type Application interface {
 	ApplicationTag() names.ApplicationTag
 	Charm() (Charm, bool, error)
 	CharmURL() (*string, bool)
-	Channel() csparams.Channel
 	CharmOrigin() *state.CharmOrigin
 	ClearExposed() error
 	CharmConfig(string) (charm.Settings, error)
@@ -91,14 +97,13 @@ type Application interface {
 	IsPrincipal() bool
 	IsRemote() bool
 	Life() state.Life
-	Series() string
 	SetCharm(state.SetCharmConfig) error
 	SetConstraints(constraints.Value) error
 	MergeExposeSettings(map[string]state.ExposedEndpoint) error
 	UnsetExposeSettings([]string) error
 	SetMetricCredentials([]byte) error
 	SetMinUnits(int) error
-	UpdateApplicationSeries(string, bool) error
+	UpdateApplicationBase(state.Base, bool) error
 	UpdateCharmConfig(string, charm.Settings) error
 	UpdateApplicationConfig(coreconfig.ConfigAttributes, []string, environschema.Fields, schema.Defaults) error
 	SetScale(int, int64, bool) error
@@ -122,11 +127,20 @@ type Bindings interface {
 // details on the methods, see the methods on state.Charm with
 // the same names.
 type Charm interface {
+	CharmMeta
 	Config() *charm.Config
-	Manifest() *charm.Manifest
-	Meta() *charm.Meta
+	Metrics() *charm.Metrics
+	Actions() *charm.Actions
+	Revision() int
 	URL() *charm.URL
 	String() string
+	IsUploaded() bool
+}
+
+// CharmMeta describes methods that inform charm operation.
+type CharmMeta interface {
+	Manifest() *charm.Manifest
+	Meta() *charm.Meta
 }
 
 // Machine defines a subset of the functionality provided by the
@@ -134,6 +148,8 @@ type Charm interface {
 // details on the methods, see the methods on state.Machine with
 // the same names.
 type Machine interface {
+	Base() state.Base
+	HardwareCharacteristics() (*instance.HardwareCharacteristics, error)
 	PublicAddress() (network.SpaceAddress, error)
 	IsLockedForSeriesUpgrade() (bool, error)
 	IsParentLockedForSeriesUpgrade() (bool, error)
@@ -239,13 +255,13 @@ func (s stateShim) SaveController(controllerInfo crossmodel.ControllerInfo, mode
 	return api.Save(controllerInfo, modelUUID)
 }
 
-type storageInterface interface {
+type StorageInterface interface {
 	storagecommon.StorageAccess
 	VolumeAccess() storagecommon.VolumeAccess
 	FilesystemAccess() storagecommon.FilesystemAccess
 }
 
-var getStorageState = func(st *state.State) (storageInterface, error) {
+var getStorageState = func(st *state.State) (StorageInterface, error) {
 	m, err := st.Model()
 	if err != nil {
 		return nil, err
@@ -309,6 +325,42 @@ func (s stateShim) AddApplication(args state.AddApplicationArgs) (Application, e
 	return stateApplicationShim{a, s.State}, nil
 }
 
+// Note that the usedID is only used in some of the implementations of the
+// AddPendingResource
+func (s stateShim) AddPendingResource(appName string, chRes resource.Resource) (string, error) {
+	return s.State.Resources().AddPendingResource(appName, "", chRes)
+}
+
+// RemovePendingResources removes any pending resources for the named application
+// Mainly used as a cleanup if an error is raised during the deployment
+func (s stateShim) RemovePendingResources(applicationID string, pendingIDs map[string]string) error {
+	return s.State.Resources().RemovePendingAppResources(applicationID, pendingIDs)
+}
+
+func (s stateShim) AddCharmMetadata(info state.CharmInfo) (Charm, error) {
+	c, err := s.State.AddCharmMetadata(info)
+	if err != nil {
+		return nil, err
+	}
+	return stateCharmShim{Charm: c}, nil
+}
+
+func (s stateShim) UpdateUploadedCharm(info state.CharmInfo) (services.UploadedCharm, error) {
+	c, err := s.State.UpdateUploadedCharm(info)
+	if err != nil {
+		return nil, err
+	}
+	return stateCharmShim{Charm: c}, nil
+}
+
+func (s stateShim) PrepareCharmUpload(curl *charm.URL) (services.UploadedCharm, error) {
+	c, err := s.State.PrepareCharmUpload(curl)
+	if err != nil {
+		return nil, err
+	}
+	return stateCharmShim{Charm: c}, nil
+}
+
 type remoteApplicationShim struct {
 	*state.RemoteApplication
 }
@@ -357,14 +409,6 @@ func (s stateShim) Charm(curl *charm.URL) (Charm, error) {
 	return stateCharmShim{ch}, nil
 }
 
-func (s stateShim) EndpointsRelation(eps ...state.Endpoint) (Relation, error) {
-	r, err := s.State.EndpointsRelation(eps...)
-	if err != nil {
-		return nil, err
-	}
-	return stateRelationShim{r, s.State}, nil
-}
-
 func (s stateShim) Model() (Model, error) {
 	m, err := s.State.Model()
 	if err != nil {
@@ -375,6 +419,14 @@ func (s stateShim) Model() (Model, error) {
 
 func (s stateShim) Relation(id int) (Relation, error) {
 	r, err := s.State.Relation(id)
+	if err != nil {
+		return nil, err
+	}
+	return stateRelationShim{r, s.State}, nil
+}
+
+func (s stateShim) InferActiveRelation(names ...string) (Relation, error) {
+	r, err := s.State.InferActiveRelation(names...)
 	if err != nil {
 		return nil, err
 	}
@@ -413,10 +465,18 @@ func (s stateShim) Resources() Resources {
 	return s.State.Resources()
 }
 
-type OfferConnection interface{}
+type OfferConnection interface {
+	UserName() string
+	OfferUUID() string
+}
 
 func (s stateShim) OfferConnectionForRelation(key string) (OfferConnection, error) {
 	return s.State.OfferConnectionForRelation(key)
+}
+
+func (s stateShim) ApplicationOfferForUUID(offerUUID string) (*crossmodel.ApplicationOffer, error) {
+	offers := state.NewApplicationOffers(s.State)
+	return offers.ApplicationOfferForUUID(offerUUID)
 }
 
 func (s stateShim) Branch(name string) (Generation, error) {

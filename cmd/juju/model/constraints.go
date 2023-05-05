@@ -28,47 +28,31 @@ const getConstraintsDoc = "" +
 	"with `juju set-constraints` for commands (such as 'deploy') that provision\n" +
 	"machines/containers for applications. Where model and application constraints overlap, the\n" +
 	"application constraints take precedence.\n" +
-	"Constraints for a specific application can be viewed with `juju get-constraints`.\n" + getConstraintsDocExamples
+	"Constraints for a specific application can be viewed with `juju constraints`.\n"
 
 const getConstraintsDocExamples = `
-Examples:
-
-    juju get-model-constraints
-    juju get-model-constraints -m mymodel
-
-See also:
-    models
-    get-constraints
-    set-constraints
-    set-model-constraints
+    juju model-constraints
+    juju model-constraints -m mymodel
 `
 
 // setConstraintsDoc is multi-line since we need to use ` to denote
 // commands for ease in markdown.
 const setConstraintsDoc = "" +
 	"Sets constraints on the model that can be viewed with\n" +
-	"`juju get-model-constraints`.  By default, the model is the current model.\n" +
+	"`juju model-constraints`.  By default, the model is the current model.\n" +
 	"Model constraints are combined with constraints set for an application with\n" +
 	"`juju set-constraints` for commands (such as 'deploy') that provision\n" +
 	"machines/containers for applications. Where model and application constraints overlap, the\n" +
 	"application constraints take precedence.\n" +
-	"Constraints for a specific application can be viewed with `juju get-constraints`.\n" + setConstraintsDocExamples
+	"Constraints for a specific application can be viewed with `juju constraints`.\n"
 
 const setConstraintsDocExamples = `
-Examples:
-
     juju set-model-constraints cores=8 mem=16G
     juju set-model-constraints -m mymodel root-disk=64G
-
-See also:
-    models
-    get-model-constraints
-    get-constraints
-    set-constraints
 `
 
 // ConstraintsAPI defines methods on the client API that
-// the get-constraints and set-constraints commands call
+// the constraints and set-constraints commands call
 type ConstraintsAPI interface {
 	Close() error
 	GetModelConstraints() (constraints.Value, error)
@@ -89,9 +73,16 @@ type modelGetConstraintsCommand struct {
 
 func (c *modelGetConstraintsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "get-model-constraints",
-		Purpose: "Displays machine constraints for a model.",
-		Doc:     getConstraintsDoc,
+		Name:     "model-constraints",
+		Purpose:  "Displays machine constraints for a model.",
+		Doc:      getConstraintsDoc,
+		Examples: getConstraintsDocExamples,
+		SeeAlso: []string{
+			"models",
+			"constraints",
+			"set-constraints",
+			"set-model-constraints",
+		},
 	})
 }
 
@@ -112,7 +103,7 @@ func (c *modelGetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
 }
 
 func formatConstraints(writer io.Writer, value interface{}) error {
-	fmt.Fprint(writer, value.(constraints.Value).String())
+	fmt.Fprintln(writer, value.(constraints.Value).String())
 	return nil
 }
 
@@ -153,10 +144,17 @@ type modelSetConstraintsCommand struct {
 
 func (c *modelSetConstraintsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "set-model-constraints",
-		Args:    "<constraint>=<value> ...",
-		Purpose: "Sets machine constraints on a model.",
-		Doc:     setConstraintsDoc,
+		Name:     "set-model-constraints",
+		Args:     "<constraint>=<value> ...",
+		Purpose:  "Sets machine constraints on a model.",
+		Doc:      setConstraintsDoc,
+		Examples: setConstraintsDocExamples,
+		SeeAlso: []string{
+			"models",
+			"model-constraints",
+			"constraints",
+			"set-constraints",
+		},
 	})
 }
 

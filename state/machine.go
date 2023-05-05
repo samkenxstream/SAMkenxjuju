@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
 	"github.com/kr/pretty"
@@ -102,8 +102,8 @@ type machineDoc struct {
 	DocID          string `bson:"_id"`
 	Id             string `bson:"machineid"`
 	ModelUUID      string `bson:"model-uuid"`
+	Base           Base   `bson:"base"`
 	Nonce          string
-	Series         string
 	ContainerType  string
 	Principals     []string
 	Life           Life
@@ -167,9 +167,9 @@ func (m *Machine) Principals() []string {
 	return m.doc.Principals
 }
 
-// Series returns the operating system series running on the machine.
-func (m *Machine) Series() string {
-	return m.doc.Series
+// Base returns the os base running on the machine.
+func (m *Machine) Base() Base {
+	return m.doc.Base
 }
 
 // ContainerType returns the type of container hosting this machine.
@@ -246,6 +246,7 @@ type instanceData struct {
 	CpuPower       *uint64     `bson:"cpupower,omitempty"`
 	Tags           *[]string   `bson:"tags,omitempty"`
 	AvailZone      *string     `bson:"availzone,omitempty"`
+	VirtType       *string     `bson:"virt-type,omitempty"`
 
 	// KeepInstance is set to true if, on machine removal from Juju,
 	// the cloud instance should be retained.
@@ -266,6 +267,7 @@ func hardwareCharacteristics(instData instanceData) *instance.HardwareCharacteri
 		CpuPower:         instData.CpuPower,
 		Tags:             instData.Tags,
 		AvailabilityZone: instData.AvailZone,
+		VirtType:         instData.VirtType,
 	}
 }
 
@@ -864,11 +866,8 @@ func (original *Machine) advanceLifecycle(life Life, force, dyingAllowContainers
 			if m.doc.Life == Dead {
 				return nil, jujutxn.ErrNoOperations
 			}
-			if hasVote {
-				return nil, fmt.Errorf("machine %s is still a voting controller member", m.doc.Id)
-			}
-			if m.IsManager() {
-				return nil, errors.Errorf("machine %s is still a controller member", m.Id())
+			if hasVote || m.IsManager() {
+				return nil, stateerrors.NewIsControllerMemberError(m.Id(), hasVote)
 			}
 			asserts = append(asserts, bson.DocElem{
 				Name: "jobs", Value: bson.D{{Name: "$nin", Value: []MachineJob{JobManageModel}}}})
@@ -1312,6 +1311,7 @@ func (m *Machine) InstanceStatusHistory(filter status.StatusHistoryFilter) ([]st
 		db:        m.st.db(),
 		globalKey: m.globalInstanceKey(),
 		filter:    filter,
+		clock:     m.st.clock(),
 	}
 	return statusHistory(args)
 }
@@ -1444,6 +1444,7 @@ func (m *Machine) SetProvisioned(
 		CpuPower:       characteristics.CpuPower,
 		Tags:           characteristics.Tags,
 		AvailZone:      characteristics.AvailabilityZone,
+		VirtType:       characteristics.VirtType,
 	}
 
 	ops := []txn.Op{
@@ -1967,6 +1968,7 @@ func (m *Machine) StatusHistory(filter status.StatusHistoryFilter) ([]status.Sta
 		db:        m.st.db(),
 		globalKey: m.globalKey(),
 		filter:    filter,
+		clock:     m.st.clock(),
 	}
 	return statusHistory(args)
 }
@@ -2179,16 +2181,16 @@ func (m *Machine) RunningActions() ([]Action, error) {
 	return m.st.matchingActionsRunning(m)
 }
 
-// UpdateMachineSeries updates the series for the Machine.
-func (m *Machine) UpdateMachineSeries(series string) error {
+// UpdateMachineSeries updates the base for the Machine.
+func (m *Machine) UpdateMachineSeries(base Base) error {
 	buildTxn := func(attempt int) ([]txn.Op, error) {
 		if attempt > 0 {
 			if err := m.Refresh(); err != nil {
 				return nil, errors.Trace(err)
 			}
 		}
-		// Exit early if the Machine series doesn't need to change.
-		if m.Series() == series {
+		// Exit early if the Machine base doesn't need to change.
+		if m.Base().String() == base.String() {
 			return nil, jujutxn.ErrNoOperations
 		}
 
@@ -2201,7 +2203,7 @@ func (m *Machine) UpdateMachineSeries(series string) error {
 			C:      machinesC,
 			Id:     m.doc.DocID,
 			Assert: bson.D{{"life", Alive}, {"principals", m.Principals()}},
-			Update: bson.D{{"$set", bson.D{{"series", series}}}},
+			Update: bson.D{{"$set", bson.D{{"base", base}}}},
 		}}
 		for _, unit := range units {
 			ops = append(ops, txn.Op{
@@ -2210,7 +2212,8 @@ func (m *Machine) UpdateMachineSeries(series string) error {
 				Assert: bson.D{{"life", Alive},
 					{"charmurl", unit.CharmURL()},
 					{"subordinates", unit.SubordinateNames()}},
-				Update: bson.D{{"$set", bson.D{{"series", series}}}},
+				Update: bson.D{{"$set",
+					bson.D{{"base", base}}}},
 			})
 		}
 

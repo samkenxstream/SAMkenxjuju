@@ -16,9 +16,9 @@ import (
 	"github.com/juju/utils/v3/arch"
 	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/units"
-	"github.com/lxc/lxd/shared/version"
 
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/instance"
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/network"
 )
@@ -40,11 +40,8 @@ type ContainerSpec struct {
 	Config       map[string]string
 	Profiles     []string
 	InstanceType string
+	VirtType     instance.VirtType
 }
-
-// minMiBVersion is the minimum LXD version that we are sure will recognise the
-// MiB suffix for memory constraints. By default we use "MB".
-var minMiBVersion = &version.DottedVersion{Major: 3, Minor: 10}
 
 // ApplyConstraints applies the input constraints as valid LXD container
 // configuration to the container spec.
@@ -59,14 +56,7 @@ func (c *ContainerSpec) ApplyConstraints(serverVersion string, cons constraints.
 		c.Config["limits.cpu"] = fmt.Sprintf("%d", *cons.CpuCores)
 	}
 	if cons.HasMem() {
-		// Ensure that we use the correct "MB"/"MiB" suffix.
-		template := "%dMB"
-		if current, err := version.Parse(serverVersion); err == nil {
-			if current.Compare(minMiBVersion) >= 0 {
-				template = "%dMiB"
-			}
-		}
-		c.Config["limits.memory"] = fmt.Sprintf(template, *cons.Mem)
+		c.Config["limits.memory"] = fmt.Sprintf("%dMiB", *cons.Mem)
 	}
 	if cons.HasArch() {
 		c.Architecture = *cons.Arch
@@ -91,21 +81,24 @@ func (c *ContainerSpec) ApplyConstraints(serverVersion string, cons constraints.
 		}
 
 		if cons.HasRootDisk() {
-			// Ensure that we use the correct "MB"/"MiB" suffix.
-			template := "%dMB"
-			if current, err := version.Parse(serverVersion); err == nil {
-				if current.Compare(minMiBVersion) >= 0 {
-					template = "%dMiB"
-				}
-			}
-			c.Devices["root"]["size"] = fmt.Sprintf(template, *cons.RootDisk)
+			c.Devices["root"]["size"] = fmt.Sprintf("%dMiB", *cons.RootDisk)
+		}
+	}
+
+	if cons.HasVirtType() {
+
+		virtType, err := instance.ParseVirtType(*cons.VirtType)
+		if err != nil {
+			logger.Errorf("failed to parse virt-type constraint %q, ignoring err: %v", *cons.VirtType, err)
+		} else {
+			c.VirtType = virtType
 		}
 	}
 }
 
 // Container extends the upstream LXD container type.
 type Container struct {
-	api.Container
+	api.Instance
 }
 
 // Metadata returns the value from container config for the input key.
@@ -117,6 +110,11 @@ func (c *Container) Metadata(key string) string {
 // Arch returns the architecture of the container.
 func (c *Container) Arch() string {
 	return arch.NormaliseArch(c.Architecture)
+}
+
+// VirtType returns the virtualisation type of the container.
+func (c *Container) VirtType() instance.VirtType {
+	return instance.VirtType(c.Type)
 }
 
 // CPUs returns the configured limit for number of container CPU cores.
@@ -183,6 +181,7 @@ func (c *Container) AddDisk(name, path, source, pool string, readOnly bool) erro
 // aliveStatuses is the list of status strings that indicate
 // a container is "alive".
 var aliveStatuses = []string{
+	api.Ready.String(),
 	api.Starting.String(),
 	api.Started.String(),
 	api.Running.String(),
@@ -200,13 +199,49 @@ func (s *Server) AliveContainers(prefix string) ([]Container, error) {
 // FilterContainers retrieves the list of containers from the server and filters
 // them based on the input namespace prefix and any supplied statuses.
 func (s *Server) FilterContainers(prefix string, statuses ...string) ([]Container, error) {
-	containers, err := s.GetContainers()
+	// The retry here is required here because when creating a virtual machine
+	// container type, it does not always appear in the list of containers.
+	// There doesn't seem to be a status that's available to us that indicates
+	// that the machine is being created, but not yet quite alive.
+	//
+	// As we're trying to not have any logic that differentiates between
+	// containers and virtual machines, at a higher level, we retry here to
+	// prevent leaking the difference.
+	var containers []Container
+	err := retry.Call(retry.CallArgs{
+		Func: func() error {
+			var err error
+			containers, err = s.filterContainers(prefix, statuses)
+			return err
+		},
+		IsFatalError: func(err error) bool {
+			return !errors.Is(err, errors.NotFound)
+		},
+		NotifyFunc: func(err error, attempt int) {
+			logger.Debugf("failed to retrieve containers from LXD, attempt %d: %v", attempt, err)
+		},
+		Attempts:    10,
+		Delay:       1 * time.Second,
+		MaxDelay:    5 * time.Second,
+		MaxDuration: 30 * time.Second,
+		Clock:       s.clock,
+		BackoffFunc: retry.ExpBackoff(1*time.Second, 10*time.Second, 2.0, true),
+	})
+	if err != nil && !errors.Is(err, errors.NotFound) {
+		// No containers found is not an error.
+		return nil, errors.Trace(err)
+	}
+	return containers, nil
+}
+
+func (s *Server) filterContainers(prefix string, statuses []string) ([]Container, error) {
+	instances, err := s.GetInstances(api.InstanceTypeAny)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var results []Container
-	for _, c := range containers {
+	for _, c := range instances {
 		if prefix != "" && !strings.HasPrefix(c.Name, prefix) {
 			continue
 		}
@@ -215,13 +250,16 @@ func (s *Server) FilterContainers(prefix string, statuses ...string) ([]Containe
 		}
 		results = append(results, Container{c})
 	}
+	if len(results) == 0 {
+		return nil, errors.NotFoundf("containers with prefix %q", prefix)
+	}
 	return results, nil
 }
 
 // ContainerAddresses gets usable network addresses for the container
 // identified by the input name.
 func (s *Server) ContainerAddresses(name string) ([]corenetwork.ProviderAddress, error) {
-	state, _, err := s.GetContainerState(name)
+	state, _, err := s.GetInstanceState(name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -233,7 +271,7 @@ func (s *Server) ContainerAddresses(name string) ([]corenetwork.ProviderAddress,
 
 	var results []corenetwork.ProviderAddress
 	for netName, net := range networks {
-		if netName == network.DefaultLXCBridge || netName == network.DefaultLXDBridge {
+		if netName == network.DefaultLXDBridge {
 			continue
 		}
 		for _, addr := range net.Addresses {
@@ -255,11 +293,13 @@ func (s *Server) ContainerAddresses(name string) ([]corenetwork.ProviderAddress,
 func (s *Server) CreateContainerFromSpec(spec ContainerSpec) (*Container, error) {
 	logger.Infof("starting new container %q (image %q)", spec.Name, spec.Image.Image.Filename)
 	logger.Debugf("new container has profiles %v", spec.Profiles)
+
 	ephemeral := false
-	req := api.ContainersPost{
+	req := api.InstancesPost{
 		Name:         spec.Name,
 		InstanceType: spec.InstanceType,
-		ContainerPut: api.ContainerPut{
+		Type:         instance.NormaliseVirtType(spec.VirtType),
+		InstancePut: api.InstancePut{
 			Architecture: spec.Architecture,
 			Profiles:     spec.Profiles,
 			Devices:      spec.Devices,
@@ -267,7 +307,7 @@ func (s *Server) CreateContainerFromSpec(spec ContainerSpec) (*Container, error)
 			Ephemeral:    ephemeral,
 		},
 	}
-	op, err := s.CreateContainerFromImage(spec.Image.LXDServer, *spec.Image.Image, req)
+	op, err := s.CreateInstanceFromImage(spec.Image.LXDServer, *spec.Image.Image, req)
 	if err != nil {
 		return s.handleAlreadyExistsError(err, spec, ephemeral)
 	}
@@ -292,12 +332,13 @@ func (s *Server) CreateContainerFromSpec(spec ContainerSpec) (*Container, error)
 		return nil, errors.Trace(err)
 	}
 
-	container, _, err := s.GetContainer(spec.Name)
+	container, _, err := s.GetInstance(spec.Name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	c := Container{*container}
-	return &c, nil
+	return &Container{
+		Instance: *container,
+	}, nil
 }
 
 func (s *Server) handleAlreadyExistsError(err error, spec ContainerSpec, ephemeral bool) (*Container, error) {
@@ -316,12 +357,12 @@ func (s *Server) handleAlreadyExistsError(err error, spec ContainerSpec, ephemer
 	return nil, errors.Trace(err)
 }
 
-func (s *Server) waitForRunningContainer(spec ContainerSpec, ephemeral bool) (*api.Container, error) {
-	var container *api.Container
+func (s *Server) waitForRunningContainer(spec ContainerSpec, ephemeral bool) (*api.Instance, error) {
+	var container *api.Instance
 	err := retry.Call(retry.CallArgs{
 		Func: func() error {
 			var err error
-			container, _, err = s.GetContainer(spec.Name)
+			container, _, err = s.GetInstance(spec.Name)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -350,7 +391,7 @@ func (s *Server) waitForRunningContainer(spec ContainerSpec, ephemeral bool) (*a
 	return nil, errors.Errorf("container %q does not match container spec", spec.Name)
 }
 
-func matchesContainerSpec(container *api.Container, spec ContainerSpec, ephemeral bool) bool {
+func matchesContainerSpec(container *api.Instance, spec ContainerSpec, ephemeral bool) bool {
 	// If we don't match the spec from the container, then we're not
 	// sure what we've got here. Return the original error message.
 	return container.Architecture == spec.Architecture &&
@@ -362,13 +403,13 @@ func matchesContainerSpec(container *api.Container, spec ContainerSpec, ephemera
 
 // StartContainer starts the extant container identified by the input name.
 func (s *Server) StartContainer(name string) error {
-	req := api.ContainerStatePut{
+	req := api.InstanceStatePut{
 		Action:   "start",
 		Timeout:  -1,
 		Force:    false,
 		Stateful: false,
 	}
-	op, err := s.UpdateContainerState(name, req, "")
+	op, err := s.UpdateInstanceState(name, req, "")
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -399,19 +440,19 @@ func (s *Server) RemoveContainers(names []string) error {
 // Remove container first ensures that the container is stopped,
 // then deletes it.
 func (s *Server) RemoveContainer(name string) error {
-	state, eTag, err := s.GetContainerState(name)
+	state, eTag, err := s.GetInstanceState(name)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
 	if state.StatusCode != api.Stopped {
-		req := api.ContainerStatePut{
+		req := api.InstanceStatePut{
 			Action:   "stop",
 			Timeout:  -1,
 			Force:    true,
 			Stateful: false,
 		}
-		op, err := s.UpdateContainerState(name, req, eTag)
+		op, err := s.UpdateInstanceState(name, req, eTag)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -437,7 +478,7 @@ func (s *Server) RemoveContainer(name string) error {
 			return errors.IsBadRequest(err)
 		},
 		Func: func() error {
-			op, err := s.DeleteContainer(name)
+			op, err := s.DeleteInstance(name)
 			if err != nil {
 				// sigh, LXD not found container - it's been deleted so, we
 				// just need to return nil.
@@ -460,7 +501,7 @@ func (s *Server) RemoveContainer(name string) error {
 // WriteContainer writes the current representation of the input container to
 // the server.
 func (s *Server) WriteContainer(c *Container) error {
-	resp, err := s.UpdateContainer(c.Name, c.Writable(), "")
+	resp, err := s.UpdateInstance(c.Name, c.Writable(), "")
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -479,7 +520,7 @@ func (s *Server) Clock() clock.Clock {
 
 // containerHasStatus returns true if the input container has a status
 // matching one from the input list.
-func containerHasStatus(container api.Container, statuses []string) bool {
+func containerHasStatus(container api.Instance, statuses []string) bool {
 	for _, status := range statuses {
 		if container.StatusCode.String() == status {
 			return true

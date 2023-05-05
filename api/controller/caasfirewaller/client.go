@@ -13,6 +13,7 @@ import (
 	apiwatcher "github.com/juju/juju/api/watcher"
 	"github.com/juju/juju/core/config"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
 )
@@ -44,8 +45,7 @@ type ClientSidecar struct {
 // NewClientSidecar returns a client used to access the CAAS unit provisioner API.
 func NewClientSidecar(caller base.APICaller) *ClientSidecar {
 	// TODO(sidecar): add OpenedPorts and ClosedPorts API for caasfirewallersidecar worker to fetch port mapping changes.
-	// TODO(juju3): rename to CAASFirewallerSidecar
-	facadeCaller := base.NewFacadeCaller(caller, "CAASFirewallerEmbedded")
+	facadeCaller := base.NewFacadeCaller(caller, "CAASFirewallerSidecar")
 	charmInfoClient := charmscommon.NewCharmInfoClient(facadeCaller)
 	appCharmInfoClient := charmscommon.NewApplicationCharmInfoClient(facadeCaller)
 	return &ClientSidecar{
@@ -85,6 +85,31 @@ func (c *ClientSidecar) WatchOpenedPorts() (watcher.StringsWatcher, error) {
 	}
 	w := apiwatcher.NewStringsWatcher(c.facade.RawAPICaller(), result)
 	return w, nil
+}
+
+// GetOpenedPorts returns all the opened ports for each given application.
+func (c *ClientSidecar) GetOpenedPorts(appName string) (network.GroupedPortRanges, error) {
+	arg := params.Entity{
+		Tag: names.NewApplicationTag(appName).String(),
+	}
+	var result params.ApplicationOpenedPortsResults
+	if err := c.facade.FacadeCall("GetOpenedPorts", arg, &result); err != nil {
+		return nil, errors.Trace(err)
+	}
+	if len(result.Results) != 1 {
+		return nil, errors.Errorf("expected 1 result, got %d", len(result.Results))
+	}
+	res := result.Results[0]
+	if res.Error != nil {
+		return nil, errors.Annotatef(res.Error, "unable to fetch opened ports for application %s", appName)
+	}
+	out := make(network.GroupedPortRanges)
+	for _, pgs := range res.ApplicationPortRanges {
+		for _, pg := range pgs.PortRanges {
+			out[pgs.Endpoint] = append(out[pgs.Endpoint], pg.NetworkPortRange())
+		}
+	}
+	return out, nil
 }
 
 func applicationTag(application string) (names.ApplicationTag, error) {

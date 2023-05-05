@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
@@ -173,6 +173,7 @@ func (s *FactorySuite) TestNewHookRunnerWithStorage(c *gc.C) {
 		Tracker:          &runnertesting.FakeTracker{},
 		GetRelationInfos: s.getRelationInfos,
 		Storage:          s.storage,
+		SecretsClient:    s.secrets,
 		Payloads:         s.payloads,
 		Paths:            s.paths,
 		Clock:            testclock.NewClock(time.Time{}),

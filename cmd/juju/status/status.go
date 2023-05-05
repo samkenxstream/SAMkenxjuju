@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/loggo"
+	"github.com/juju/viddy"
 
 	storageapi "github.com/juju/juju/api/client/storage"
 	jujucmd "github.com/juju/juju/cmd"
@@ -123,50 +123,55 @@ The '--format' option allows you to specify how the status report is formatted.
   --format=yaml
                     Provide information in a JSON or YAML formats for 
                     programmatic use.
+`
 
-Examples:
+const usageExamples = `
+Report the status of units hosted on machine 0:
 
-    # Report the status of units hosted on machine 0
     juju status 0
 
-    # Report the status of the the mysql application
+Report the status of the the mysql application:
+
     juju status mysql
 
-    # Report the status for applications that start with nova-
+Report the status for applications that start with nova-:
+
     juju status nova-*
 
-    # Include information about storage and relations in output
+Include information about storage and relations in output:
+
     juju status --storage --relations
 
-    # Provide output as valid JSON
+Provide output as valid JSON:
+
     juju status --format=json
 
-    # Watch the status of the mysql application every five seconds
-    # Only available for unix-based systems.
-    juju status --watch 5s mysql
+Watch the status every five seconds:
 
-    # Show only applications/units in active status
+    juju status --watch 5s
+
+Show only applications/units in active status:
+
     juju status active
 
-    # Show only applications/units in error status
+Show only applications/units in error status:
+
     juju status error
-
-See also:
-
-    machines
-    show-model
-    show-debug-log
-    show-status-log
-    storage
 `
 
 func (c *statusCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "show-status",
-		Args:    "[<selector> [...]]",
-		Purpose: usageSummary,
-		Doc:     usageDetails,
-		Aliases: []string{"status"},
+		Name:     "status",
+		Args:     "[<selector> [...]]",
+		Purpose:  usageSummary,
+		Doc:      usageDetails,
+		Examples: usageExamples,
+		SeeAlso: []string{
+			"machines",
+			"show-model",
+			"show-status-log",
+			"storage",
+		},
 	})
 }
 
@@ -182,10 +187,7 @@ func (c *statusCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.IntVar(&c.retryCount, "retry-count", 3, "Number of times to retry API failures")
 	f.DurationVar(&c.retryDelay, "retry-delay", 100*time.Millisecond, "Time to wait between retry attempts")
 
-	if runtime.GOOS != "windows" {
-		// The watch flag is only available for unix-based systems.
-		f.DurationVar(&c.watch, "watch", 0, "Watch the status every period of time")
-	}
+	f.DurationVar(&c.watch, "watch", 0, "Watch the status every period of time")
 
 	c.checkProvidedIgnoredFlagF = func() set.Strings {
 		ignoredFlagForNonTabularFormat := set.NewStrings(
@@ -350,29 +352,29 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 			ctx.Infof("provided %s always enabled in non tabular formats", joinedMsg)
 		}
 	}
-	formatterParams := newStatusFormatterParams{
-		status:         status,
-		controllerName: controllerName,
-		outputName:     c.out.Name(),
-		isoTime:        c.isoTime,
-		showRelations:  showRelations,
-		activeBranch:   activeBranch,
+	formatterParams := NewStatusFormatterParams{
+		Status:         status,
+		ControllerName: controllerName,
+		OutputName:     c.out.Name(),
+		ISOTime:        c.isoTime,
+		ShowRelations:  showRelations,
+		ActiveBranch:   activeBranch,
 	}
 	if showStorage {
 		storageInfo, err := c.getStorageInfo(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		formatterParams.storage = storageInfo
+		formatterParams.Storage = storageInfo
 		if storageInfo == nil || storageInfo.Empty() {
 			if c.out.Name() == "tabular" {
 				// hide storage section for tabular view if nothing to show.
-				formatterParams.storage = nil
+				formatterParams.Storage = nil
 			}
 		}
 	}
 
-	formatted, err := newStatusFormatter(formatterParams).format()
+	formatted, err := NewStatusFormatter(formatterParams).Format()
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -389,7 +391,10 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 		if err != nil {
 			return err
 		}
-		ctx.Infof("Model %q is empty.", modelName)
+		// A change was made in cmd/v3.0.2 output.go that broke the consistency in output for the
+		// default formatter by removing the newline delimiter. Hence we prefix '\n' in the text below.
+		// https://github.com/juju/cmd/commit/be22fa661a798055c801f1511aee226db249ef95
+		ctx.Infof("\nModel %q is empty.", modelName)
 	} else {
 		plural := func() string {
 			if len(c.patterns) == 1 {
@@ -403,29 +408,38 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 	return nil
 }
 
-// clearScreen removes any character from the terminal
-// using ANSI scape characters.
-func clearScreen() {
-	fmt.Printf("\u001Bc")
+// statusArgsWithoutWatchFlag returns all args cut off '--watch' flag of status commands
+// and the value of '--watch' flag
+func (c *statusCommand) statusArgsWithoutWatchFlag(args []string) []string {
+	var jujuStatusArgsWithoutWatchFlag []string
+
+	for i := range args {
+		if args[i] == "--watch" {
+			jujuStatusArgsWithoutWatchFlag = append(args[:i], args[i+2:]...)
+			if !c.noColor {
+				jujuStatusArgsWithoutWatchFlag = append(jujuStatusArgsWithoutWatchFlag, "--color")
+			}
+			break
+		}
+	}
+
+	return jujuStatusArgsWithoutWatchFlag
 }
 
 func (c *statusCommand) Run(ctx *cmd.Context) error {
 	defer c.close()
 
 	if c.watch != 0 {
-		clearScreen()
-	}
+		jujuStatusArgs := c.statusArgsWithoutWatchFlag(os.Args)
 
-	err := c.runStatus(ctx)
-	if err != nil || c.watch == 0 {
-		return err
-	}
+		viddyArgs := append([]string{"--no-title", "--interval", c.watch.String()}, jujuStatusArgs...)
 
-	// repeat the call using a ticker
-	ticker := time.NewTicker(c.watch)
-
-	for range ticker.C {
-		clearScreen()
+		// Define tview styles and launch preconfiged Viddy watcher
+		app := viddy.NewPreconfigedViddy(viddyArgs)
+		if err := app.Run(); err != nil {
+			return errors.Annotate(err, "unable to run Viddy (watcher for status command)")
+		}
+	} else {
 		err := c.runStatus(ctx)
 		if err != nil {
 			return err

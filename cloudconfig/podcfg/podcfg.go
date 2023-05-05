@@ -100,15 +100,17 @@ func (cfg *ControllerPodConfig) AgentConfig(tag names.Tag) (agent.ConfigSetterWr
 			LogDir:          cfg.LogDir,
 			MetricsSpoolDir: cfg.MetricsSpoolDir,
 		},
-		Tag:                tag,
-		UpgradedToVersion:  cfg.JujuVersion,
-		Password:           cfg.APIInfo.Password,
-		APIAddresses:       cfg.APIHostAddrs(),
-		CACert:             cfg.APIInfo.CACert,
-		Values:             cfg.AgentEnvironment,
-		Controller:         cfg.ControllerTag,
-		Model:              cfg.APIInfo.ModelTag,
-		MongoMemoryProfile: mongo.MemoryProfile(cfg.Controller.MongoMemoryProfile()),
+		Tag:                   tag,
+		UpgradedToVersion:     cfg.JujuVersion,
+		Password:              cfg.APIInfo.Password,
+		APIAddresses:          cfg.APIHostAddrs(),
+		CACert:                cfg.APIInfo.CACert,
+		Values:                cfg.AgentEnvironment,
+		Controller:            cfg.ControllerTag,
+		Model:                 cfg.APIInfo.ModelTag,
+		MongoMemoryProfile:    mongo.MemoryProfile(cfg.Controller.MongoMemoryProfile()),
+		QueryTracingEnabled:   cfg.Controller.QueryTracingEnabled(),
+		QueryTracingThreshold: cfg.Controller.QueryTracingThreshold(),
 	}
 	return agent.NewStateMachineConfig(configParams, cfg.Bootstrap.StateServingInfo)
 }
@@ -276,10 +278,10 @@ func NewControllerPodConfig(
 	controllerTag names.ControllerTag,
 	podID,
 	controllerName,
-	series string,
+	osName string,
 	apiInfo *api.Info,
 ) (*ControllerPodConfig, error) {
-	osType := paths.SeriesToOS(series)
+	osType := paths.OSType(osName)
 	pcfg := &ControllerPodConfig{
 		// Fixed entries.
 		DataDir:         paths.DataDir(osType),
@@ -301,13 +303,13 @@ func NewControllerPodConfig(
 func NewBootstrapControllerPodConfig(
 	config controller.Config,
 	controllerName,
-	series string,
+	osname string,
 	bootstrapConstraints constraints.Value,
 ) (*ControllerPodConfig, error) {
 	// For a bootstrap pod, the caller must provide the state.Info
 	// and the api.Info. The pod id must *always* be "0".
 	pcfg, err := NewControllerPodConfig(
-		names.NewControllerTag(config.ControllerUUID()), "0", controllerName, series, nil,
+		names.NewControllerTag(config.ControllerUUID()), "0", controllerName, osname, nil,
 	)
 	if err != nil {
 		return nil, err

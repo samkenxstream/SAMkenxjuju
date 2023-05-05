@@ -10,6 +10,7 @@ import (
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/pubsub/v2"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
@@ -76,7 +77,6 @@ func (s *ManifoldSuite) SetUpTest(c *gc.C) {
 		StateName:            "state",
 		MuxName:              "mux",
 		APIServerName:        "api-server",
-		RaftTransportName:    "raft-transport",
 		Clock:                s.clock,
 		PrometheusRegisterer: &s.prometheusRegisterer,
 		MuxShutdownWait:      1 * time.Minute,
@@ -96,10 +96,10 @@ func (s *ManifoldSuite) SetUpTest(c *gc.C) {
 func (s *ManifoldSuite) SetUpSuite(c *gc.C) {
 	s.IsolationSuite.SetUpSuite(c)
 
-	testing.MgoServer.EnableReplicaSet = true
-	err := testing.MgoServer.Start(nil)
+	mgotesting.MgoServer.EnableReplicaSet = true
+	err := mgotesting.MgoServer.Start(nil)
 	c.Assert(err, jc.ErrorIsNil)
-	s.IsolationSuite.AddCleanup(func(*gc.C) { testing.MgoServer.Destroy() })
+	s.IsolationSuite.AddCleanup(func(*gc.C) { mgotesting.MgoServer.Destroy() })
 
 	s.StateSuite.SetUpSuite(c)
 }
@@ -162,7 +162,6 @@ var expectedInputs = []string{
 	"state",
 	"mux",
 	"hub",
-	"raft-transport",
 	"api-server",
 }
 
@@ -229,9 +228,6 @@ func (s *ManifoldSuite) TestValidate(c *gc.C) {
 	}, {
 		func(cfg *httpserver.ManifoldConfig) { cfg.LogDir = "" },
 		"empty LogDir not valid",
-	}, {
-		func(cfg *httpserver.ManifoldConfig) { cfg.RaftTransportName = "" },
-		"empty RaftTransportName not valid",
 	}, {
 		func(cfg *httpserver.ManifoldConfig) { cfg.APIServerName = "" },
 		"empty APIServerName not valid",

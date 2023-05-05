@@ -4,7 +4,7 @@
 package assumes
 
 import (
-	chassumes "github.com/juju/charm/v9/assumes"
+	chassumes "github.com/juju/charm/v10/assumes"
 	"github.com/juju/errors"
 )
 
@@ -32,8 +32,8 @@ func satisfyExpr(fs FeatureSet, expr chassumes.Expression, exprTreeDepth int) er
 // The expression is matched if the feature set contains the required feature
 // name and any of the following conditions is true:
 // a) The feature set entry OR the assumes expression does not specify a version.
-// 2) Both the feature set entry AND the assumes expression specify versions
-//    AND the required version constraint (>= or <) is satisfied.
+//  2. Both the feature set entry AND the assumes expression specify versions
+//     AND the required version constraint (>= or <) is satisfied.
 func satisfyFeatureExpr(fs FeatureSet, expr chassumes.FeatureExpression) error {
 	supported, defined := fs.Get(expr.Name)
 	if !defined {

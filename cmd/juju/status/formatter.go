@@ -5,10 +5,9 @@ package status
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/names/v4"
 	"github.com/juju/naturalsort"
@@ -16,7 +15,6 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/storage"
 	coremodel "github.com/juju/juju/core/model"
-	"github.com/juju/juju/core/os"
 	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/rpc/params"
@@ -37,46 +35,41 @@ type statusFormatter struct {
 	activeBranch      string
 }
 
-// NewStatusFormatter takes stored model information (params.FullStatus) and populates
-// the statusFormatter struct used in various status formatting methods
-func NewStatusFormatter(status *params.FullStatus, isoTime bool) *statusFormatter {
-	return newStatusFormatter(
-		newStatusFormatterParams{
-			status:        status,
-			isoTime:       isoTime,
-			showRelations: true,
-		})
+// NewStatusFormatterParams contains the parameters required
+// to be formatted for CLI output.
+type NewStatusFormatterParams struct {
+	Storage        *storage.CombinedStorage
+	Status         *params.FullStatus
+	ControllerName string
+	OutputName     string
+	ActiveBranch   string
+	ISOTime        bool
+	ShowRelations  bool
 }
 
-type newStatusFormatterParams struct {
-	storage                *storage.CombinedStorage
-	status                 *params.FullStatus
-	controllerName         string
-	outputName             string
-	activeBranch           string
-	isoTime, showRelations bool
-}
-
-func newStatusFormatter(p newStatusFormatterParams) *statusFormatter {
+// NewStatusFormatter returns a new status formatter used in various
+// formatting methods.
+func NewStatusFormatter(p NewStatusFormatterParams) *statusFormatter {
 	sf := statusFormatter{
-		storage:        p.storage,
-		status:         p.status,
-		controllerName: p.controllerName,
+		storage:        p.Storage,
+		status:         p.Status,
+		controllerName: p.ControllerName,
 		relations:      make(map[int]params.RelationStatus),
-		isoTime:        p.isoTime,
-		showRelations:  p.showRelations,
-		outputName:     p.outputName,
-		activeBranch:   p.activeBranch,
+		isoTime:        p.ISOTime,
+		showRelations:  p.ShowRelations,
+		outputName:     p.OutputName,
+		activeBranch:   p.ActiveBranch,
 	}
-	if p.showRelations {
-		for _, relation := range p.status.Relations {
+	if p.ShowRelations {
+		for _, relation := range p.Status.Relations {
 			sf.relations[relation.Id] = relation
 		}
 	}
 	return &sf
 }
 
-func (sf *statusFormatter) format() (formattedStatus, error) {
+// Format returns the formatted model status.
+func (sf *statusFormatter) Format() (formattedStatus, error) {
 	if sf.status == nil {
 		return formattedStatus{}, nil
 	}
@@ -175,6 +168,13 @@ func (sf *statusFormatter) MachineFormat(machineId []string) formattedMachineSta
 func (sf *statusFormatter) formatMachine(machine params.MachineStatus) machineStatus {
 	var out machineStatus
 
+	var base *formattedBase
+	if machine.Base.Channel != "" {
+		channel, err := series.ParseChannel(machine.Base.Channel)
+		if err == nil {
+			base = &formattedBase{Name: machine.Base.Name, Channel: channel.DisplayString()}
+		}
+	}
 	out = machineStatus{
 		JujuStatus:         sf.getStatusInfoContents(machine.AgentStatus),
 		Hostname:           machine.Hostname,
@@ -184,7 +184,7 @@ func (sf *statusFormatter) formatMachine(machine params.MachineStatus) machineSt
 		DisplayName:        machine.DisplayName,
 		MachineStatus:      sf.getStatusInfoContents(machine.InstanceStatus),
 		ModificationStatus: sf.getStatusInfoContents(machine.ModificationStatus),
-		Series:             machine.Series,
+		Base:               base,
 		Id:                 machine.Id,
 		NetworkInterfaces:  make(map[string]networkInterface),
 		Containers:         make(map[string]machineStatus),
@@ -231,14 +231,6 @@ func (sf *statusFormatter) formatMachine(machine params.MachineStatus) machineSt
 }
 
 func (sf *statusFormatter) formatApplication(name string, application params.ApplicationStatus) applicationStatus {
-	var osInfo string
-	appOS, _ := series.GetOSFromSeries(application.Series)
-	osInfo = strings.ToLower(appOS.String())
-
-	// TODO(caas) - enhance GetOSFromSeries
-	if appOS == os.Unknown && sf.status.Model.Type == "caas" {
-		osInfo = application.Series
-	}
 	var (
 		charmAlias  = ""
 		charmOrigin = ""
@@ -250,14 +242,11 @@ func (sf *statusFormatter) formatApplication(name string, application params.App
 		// but if we do, don't crash.
 		logger.Errorf("failed to parse charm: %v", err)
 	} else {
-		switch curl.Schema {
-		case "ch":
+		switch {
+		case charm.CharmHub.Matches(curl.Schema):
 			charmOrigin = "charmhub"
 			charmAlias = curl.Name
-		case "cs":
-			charmOrigin = "charmstore"
-			charmAlias = application.Charm
-		case "local":
+		case charm.Local.Matches(curl.Schema):
 			charmOrigin = "local"
 			charmAlias = application.Charm
 		default:
@@ -268,11 +257,15 @@ func (sf *statusFormatter) formatApplication(name string, application params.App
 		charmName = curl.Name
 	}
 
+	var base *formattedBase
+	channel, err := series.ParseChannel(application.Base.Channel)
+	if err == nil {
+		base = &formattedBase{Name: application.Base.Name, Channel: channel.DisplayString()}
+	}
 	out := applicationStatus{
 		Err:              typedNilCheck(application.Err),
 		Charm:            charmAlias,
-		Series:           application.Series,
-		OS:               osInfo,
+		Base:             base,
 		CharmOrigin:      charmOrigin,
 		CharmName:        charmName,
 		CharmRev:         charmRev,

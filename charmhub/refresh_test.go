@@ -6,7 +6,7 @@ package charmhub
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	"github.com/golang/mock/gomock"
@@ -82,7 +82,7 @@ func (s *RefreshSuite) TestRefresh(c *gc.C) {
 	c.Assert(responses[0].Name, gc.Equals, id)
 }
 
-//	c.Assert(results.Results[0].Error, gc.ErrorMatches, `.* pool "foo" not found`)
+// c.Assert(results.Results[0].Error, gc.ErrorMatches, `.* pool "foo" not found`)
 func (s *RefreshSuite) TestRefeshConfigValidateArch(c *gc.C) {
 	err := s.testRefeshConfigValidate(c, RefreshBase{
 		Name:         "ubuntu",
@@ -138,7 +138,7 @@ func (t *metadataHTTPClient) Do(req *http.Request) (*http.Response, error) {
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Body:          ioutil.NopCloser(bytes.NewBufferString(t.responseBody)),
+		Body:          io.NopCloser(bytes.NewBufferString(t.responseBody)),
 		ContentLength: int64(len(t.responseBody)),
 		Request:       req,
 		Header:        http.Header{"Content-Type": []string{"application/json"}},

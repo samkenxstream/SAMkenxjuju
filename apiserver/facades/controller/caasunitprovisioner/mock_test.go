@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/testing"
@@ -439,8 +439,6 @@ func (m *mockStorage) SetVolumeAttachmentInfo(host names.Tag, volTag names.Volum
 
 type mockDeviceBackend struct {
 	testing.Stub
-	devices            map[names.StorageTag]names.FilesystemTag
-	storageAttachments map[names.UnitTag]names.StorageTag
 }
 
 func (d *mockDeviceBackend) DeviceConstraints(id string) (map[string]state.DeviceConstraints, error) {

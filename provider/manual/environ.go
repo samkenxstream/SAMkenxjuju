@@ -24,7 +24,7 @@ import (
 	"github.com/juju/juju/cloudconfig/instancecfg"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/network/firewall"
+	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/context"
@@ -129,9 +129,13 @@ func (e *manualEnviron) Bootstrap(ctx environs.BootstrapContext, callCtx context
 		return common.ConfigureMachine(ctx, ssh.DefaultClient, e.host, icfg, nil)
 	}
 
+	base, err := coreseries.GetBaseFromSeries(series)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	result := &environs.BootstrapResult{
 		Arch:                    *hw.Arch,
-		Series:                  series,
+		Base:                    base,
 		CloudBootstrapFinalizer: finalize,
 	}
 	return result, nil
@@ -330,6 +334,7 @@ var unsupportedConstraints = []string{
 	constraints.Tags,
 	constraints.VirtType,
 	constraints.AllocatePublicIP,
+	constraints.ImageID,
 }
 
 // ConstraintsValidator is defined on the Environs interface.
@@ -364,18 +369,6 @@ func (e *manualEnviron) seriesAndHardwareCharacteristics() (_ *instance.Hardware
 	return e.hw, e.series, nil
 }
 
-func (e *manualEnviron) OpenPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
-	return nil
-}
-
-func (e *manualEnviron) ClosePorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
-	return nil
-}
-
-func (e *manualEnviron) IngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error) {
-	return nil, nil
-}
-
 func (*manualEnviron) Provider() environs.EnvironProvider {
 	return ManualProvider{}
 }
@@ -397,4 +390,10 @@ func (e *manualEnviron) DetectSeries() (string, error) {
 func (e *manualEnviron) DetectHardware() (*instance.HardwareCharacteristics, error) {
 	hw, _, err := e.seriesAndHardwareCharacteristics()
 	return hw, err
+}
+
+// UpdateModelConstraints always returns false because we don't want to update
+// model constraints for manual env.
+func (e *manualEnviron) UpdateModelConstraints() bool {
+	return false
 }

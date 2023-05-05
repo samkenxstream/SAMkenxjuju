@@ -29,7 +29,7 @@ func ProductMetadataStoragePath() string {
 // MergeAndWriteMetadata reads the existing metadata from storage (if any),
 // and merges it with supplied metadata, writing the resulting metadata is written to storage.
 func MergeAndWriteMetadata(fetcher SimplestreamsFetcher,
-	ser string,
+	base series.Base,
 	metadata []*ImageMetadata,
 	cloudSpec *simplestreams.CloudSpec,
 	metadataStore storage.Storage) error {
@@ -38,11 +38,7 @@ func MergeAndWriteMetadata(fetcher SimplestreamsFetcher,
 	if err != nil {
 		return err
 	}
-	seriesVersion, err := series.SeriesVersion(ser)
-	if err != nil {
-		return err
-	}
-	toWrite, allCloudSpec := mergeMetadata(seriesVersion, cloudSpec, metadata, existingMetadata)
+	toWrite, allCloudSpec := mergeMetadata(base, cloudSpec, metadata, existingMetadata)
 	return writeMetadata(toWrite, allCloudSpec, metadataStore)
 }
 
@@ -72,7 +68,7 @@ func mapKey(im *ImageMetadata) string {
 }
 
 // mergeMetadata merges the newMetadata into existingMetadata, overwriting existing matching image records.
-func mergeMetadata(seriesVersion string, cloudSpec *simplestreams.CloudSpec, newMetadata,
+func mergeMetadata(base series.Base, cloudSpec *simplestreams.CloudSpec, newMetadata,
 	existingMetadata []*ImageMetadata) ([]*ImageMetadata, []simplestreams.CloudSpec) {
 
 	regions := make(map[string]bool)
@@ -98,7 +94,7 @@ func mergeMetadata(seriesVersion string, cloudSpec *simplestreams.CloudSpec, new
 	imageIds := make(map[string]bool)
 	for i, im := range newMetadata {
 		newRecord := *im
-		newRecord.Version = seriesVersion
+		newRecord.Version = base.Channel.Track
 		newRecord.RegionName = cloudSpec.Region
 		newRecord.Endpoint = cloudSpec.Endpoint
 		toWrite[i] = &newRecord

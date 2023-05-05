@@ -4,16 +4,17 @@
 package deployer
 
 import (
+	"bytes"
+
 	"github.com/golang/mock/gomock"
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/clock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/gnuflag"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/application"
@@ -22,6 +23,8 @@ import (
 	"github.com/juju/juju/api/common/charms"
 	"github.com/juju/juju/cmd/juju/application/deployer/mocks"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
 	coretesting "github.com/juju/juju/testing"
 )
@@ -57,7 +60,7 @@ func (s *charmSuite) SetUpTest(c *gc.C) {
 func (s *charmSuite) TestSimpleCharmDeploy(c *gc.C) {
 	defer s.setupMocks(c).Finish()
 	s.modelCommand.EXPECT().BakeryClient().Return(nil, nil)
-	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem)
+	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem).AnyTimes()
 	s.configFlag.EXPECT().AbsoluteFileNames(gomock.Any()).Return(nil, nil)
 	s.configFlag.EXPECT().ReadConfigPairs(gomock.Any()).Return(nil, nil)
 	s.deployerAPI.EXPECT().Deploy(gomock.Any()).Return(nil)
@@ -71,7 +74,7 @@ func (s *charmSuite) TestRepositoryCharmDeployDryRun(c *gc.C) {
 	defer ctrl.Finish()
 	s.resolver = mocks.NewMockResolver(ctrl)
 	s.expectResolveChannel()
-	s.expectDeployerAPIModelGet(c)
+	s.expectDeployerAPIModelGet(c, series.Base{})
 
 	dCharm := s.newDeployCharm()
 	dCharm.dryRun = true
@@ -84,8 +87,72 @@ func (s *charmSuite) TestRepositoryCharmDeployDryRun(c *gc.C) {
 		clock:            clock.WallClock,
 	}
 
-	err := repoCharm.PrepareAndDeploy(s.ctx, s.deployerAPI, s.resolver, nil)
+	err := repoCharm.PrepareAndDeploy(s.ctx, s.deployerAPI, s.resolver)
 	c.Assert(err, jc.ErrorIsNil)
+}
+
+func (s *charmSuite) TestRepositoryCharmDeployDryRunImageIdNoBase(c *gc.C) {
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
+	s.resolver = mocks.NewMockResolver(ctrl)
+	s.expectResolveChannel()
+	s.expectDeployerAPIModelGet(c, series.Base{})
+
+	dCharm := s.newDeployCharm()
+	dCharm.dryRun = true
+	dCharm.validateCharmSeriesWithName = func(series, name string, imageStream string) error {
+		return nil
+	}
+	dCharm.constraints = constraints.Value{
+		ImageID: strptr("ubuntu-bf2"),
+	}
+	repoCharm := &repositoryCharm{
+		deployCharm:      *dCharm,
+		userRequestedURL: s.url,
+		clock:            clock.WallClock,
+	}
+
+	err := repoCharm.PrepareAndDeploy(s.ctx, s.deployerAPI, s.resolver)
+	c.Assert(err, gc.ErrorMatches, "base must be explicitly provided when image-id constraint is used")
+}
+
+func (s *charmSuite) TestRepositoryCharmDeployDryRunDefaultSeriesForce(c *gc.C) {
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
+	s.resolver = mocks.NewMockResolver(ctrl)
+	s.expectResolveChannel()
+	s.expectDeployerAPIModelGet(c, series.MustParseBaseFromString("ubuntu@22.04"))
+
+	dCharm := s.newDeployCharm()
+	dCharm.dryRun = true
+	dCharm.force = true
+	dCharm.validateCharmSeriesWithName = func(series, name string, imageStream string) error {
+		return nil
+	}
+	repoCharm := &repositoryCharm{
+		deployCharm:      *dCharm,
+		userRequestedURL: s.url,
+		clock:            clock.WallClock,
+	}
+
+	stdOut := mocks.NewMockWriter(ctrl)
+	stdErr := mocks.NewMockWriter(ctrl)
+	output := bytes.NewBuffer([]byte{})
+	logOutput := func(p []byte) {
+		c.Logf("%q", p)
+		output.Write(p)
+	}
+	stdOut.EXPECT().Write(gomock.Any()).Return(0, nil).AnyTimes().Do(logOutput)
+	stdErr.EXPECT().Write(gomock.Any()).Return(0, nil).AnyTimes().Do(logOutput)
+
+	ctx := &cmd.Context{
+		Stderr: stdErr,
+		Stdout: stdOut,
+	}
+
+	err := repoCharm.PrepareAndDeploy(ctx, s.deployerAPI, s.resolver)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(output.String(), gc.Equals, "\"testme\" from  charm \"testme\", revision -1 on ubuntu@22.04 would be deployed\n")
 }
 
 func (s *charmSuite) newDeployCharm() *deployCharm {
@@ -94,7 +161,6 @@ func (s *charmSuite) newDeployCharm() *deployCharm {
 		deployResources: func(
 			string,
 			resources.CharmID,
-			*macaroon.Macaroon,
 			map[string]string,
 			map[string]charmresource.Meta,
 			base.APICallCloser,
@@ -104,12 +170,11 @@ func (s *charmSuite) newDeployCharm() *deployCharm {
 		},
 		id: application.CharmID{
 			URL:    s.url,
-			Origin: commoncharm.Origin{},
+			Origin: commoncharm.Origin{Base: series.MakeDefaultBase("ubuntu", "20.04")},
 		},
 		flagSet:  &gnuflag.FlagSet{},
 		model:    s.modelCommand,
 		numUnits: 0,
-		series:   "focal",
 		steps:    []DeployStep{},
 	}
 }
@@ -137,10 +202,12 @@ func (s *charmSuite) expectResolveChannel() {
 		}).AnyTimes()
 }
 
-func (s *charmSuite) expectDeployerAPIModelGet(c *gc.C) {
+func (s *charmSuite) expectDeployerAPIModelGet(c *gc.C, defaultBase series.Base) {
 	cfg, err := config.New(true, minimalModelConfig())
 	c.Assert(err, jc.ErrorIsNil)
-	s.deployerAPI.EXPECT().ModelGet().Return(cfg.AllAttrs(), nil)
+	attrs := cfg.AllAttrs()
+	attrs["default-base"] = defaultBase.String()
+	s.deployerAPI.EXPECT().ModelGet().Return(attrs, nil)
 }
 
 func minimalModelConfig() map[string]interface{} {
@@ -150,10 +217,15 @@ func minimalModelConfig() map[string]interface{} {
 		"uuid":            coretesting.ModelTag.Id(),
 		"controller-uuid": coretesting.ControllerTag.Id(),
 		"firewall-mode":   "instance",
+		"secret-backend":  "auto",
 		// While the ca-cert bits aren't entirely minimal, they avoid the need
 		// to set up a fake home.
 		"ca-cert":        coretesting.CACert,
 		"ca-private-key": coretesting.CAKey,
 		"image-stream":   "testing",
 	}
+}
+
+func strptr(s string) *string {
+	return &s
 }

@@ -5,13 +5,14 @@ package operation
 
 import (
 	"fmt"
-	"time"
 
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
+	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/worker/common/charmrunner"
 	"github.com/juju/juju/worker/uniter/hook"
@@ -51,7 +52,11 @@ func (rh *runHook) String() string {
 	case rh.info.Kind.IsStorage():
 		suffix = fmt.Sprintf(" (%s)", rh.info.StorageId)
 	case rh.info.Kind.IsSecret():
-		suffix = fmt.Sprintf(" (%s)", rh.info.SecretURL)
+		if rh.info.SecretRevision == 0 {
+			suffix = fmt.Sprintf(" (%s)", rh.info.SecretURI)
+		} else {
+			suffix = fmt.Sprintf(" (%s/%d)", rh.info.SecretURI, rh.info.SecretRevision)
+		}
 	}
 	return fmt.Sprintf("run %s%s hook", rh.info.Kind, suffix)
 }
@@ -68,8 +73,20 @@ func (rh *runHook) Prepare(state State) (*State, error) {
 		return nil, err
 	}
 
-	switch hooks.Kind(name) {
-	case hooks.LeaderElected, hooks.SecretRotate:
+	kind := hooks.Kind(name)
+	leaderNeeded := kind == hooks.LeaderElected
+	if kind == hooks.SecretRotate || kind == hooks.SecretExpired || kind == hooks.SecretRemove {
+		secretMetadata, err := rnr.Context().SecretMetadata()
+		if err != nil {
+			return nil, err
+		}
+		if uri, err := secrets.ParseURI(rh.info.SecretURI); err == nil {
+			md, ok := secretMetadata[uri.ID]
+			leaderNeeded = ok && md.Owner.Kind() != names.UnitTagKind
+		}
+	}
+
+	if leaderNeeded {
 		// Check if leadership has changed between queueing of the hook and
 		// Actual execution. Skip execution if we are no longer the leader.
 		var isLeader bool
@@ -103,7 +120,11 @@ func RunningHookMessage(hookName string, info hook.Info) string {
 		return fmt.Sprintf("running %s hook for %s", hookName, info.RemoteUnit)
 	}
 	if info.Kind.IsSecret() {
-		return fmt.Sprintf("running %s hook for %s", hookName, info.SecretURL)
+		revMsg := ""
+		if info.SecretRevision > 0 {
+			revMsg = fmt.Sprintf("/%d", info.SecretRevision)
+		}
+		return fmt.Sprintf("running %s hook for %s%s", hookName, info.SecretURI, revMsg)
 	}
 	return fmt.Sprintf("running %s hook", hookName)
 }
@@ -141,6 +162,19 @@ func (rh *runHook) Execute(state State) (*State, error) {
 		fallthrough
 	case cause == context.ErrReboot:
 		err = ErrNeedsReboot
+	case cause == runner.ErrTerminated:
+		// Queue the hook again so it is re-run.
+		// It is likely the whole process group was terminated as
+		// part of shutdown, but in case not, the unit agent will
+		// treat the hook as pending (not queued) and record a hook error.
+		rh.logger.Warningf("hook %q was terminated", rh.name)
+		step = Queued
+		return stateChange{
+			Kind:     RunHook,
+			Step:     step,
+			Hook:     &rh.info,
+			HookStep: &step,
+		}.apply(state), runner.ErrTerminated
 	case err == nil:
 	default:
 		rh.logger.Errorf("hook %q (via %s) failed: %v", rh.name, handlerType, err)
@@ -164,6 +198,7 @@ func (rh *runHook) Execute(state State) (*State, error) {
 		Kind:            RunHook,
 		Step:            step,
 		Hook:            &rh.info,
+		HookStep:        &step,
 		HasRunStatusSet: hasRunStatusSet,
 	}.apply(state), err
 }
@@ -294,7 +329,18 @@ func (rh *runHook) Commit(state State) (*State, error) {
 		message := createUpgradeSeriesStatusMessage(rh.name, rh.hookFound)
 		err = rh.callbacks.SetUpgradeSeriesStatus(model.UpgradeSeriesCompleted, message)
 	case hooks.SecretRotate:
-		err = rh.callbacks.SetSecretRotated(rh.info.SecretURL, time.Now())
+		var info map[string]jujuc.SecretMetadata
+		info, err = rh.runner.Context().SecretMetadata()
+		if err != nil {
+			break
+		}
+		originalRevision := 0
+		uri, _ := secrets.ParseURI(rh.info.SecretURI)
+		if m, ok := info[uri.ID]; ok {
+			originalRevision = m.LatestRevision
+		}
+		rh.logger.Debugf("set secret rotated for %q, original rev %v", rh.info.SecretURI, originalRevision)
+		err = rh.callbacks.SetSecretRotated(rh.info.SecretURI, originalRevision)
 	}
 	if err != nil {
 		return nil, err

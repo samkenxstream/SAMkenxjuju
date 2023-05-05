@@ -5,7 +5,6 @@ package status_test
 
 import (
 	"errors"
-	"runtime"
 	"time"
 
 	"github.com/juju/cmd/v3"
@@ -55,36 +54,6 @@ func (s *MinimalStatusSuite) TestGoodCall(c *gc.C) {
 	c.Assert(s.clock.waits, gc.HasLen, 0)
 }
 
-func (s *MinimalStatusSuite) TestWatchUntilError(c *gc.C) {
-	if runtime.GOOS == "windows" {
-		c.Skip("watch flag not available on windows")
-	}
-
-	s.statusapi.errors = []error{
-		nil,
-		nil,
-		nil,
-		errors.New("boom"),
-	}
-
-	ctx, err := s.runStatus(c, "--no-color", "--watch", "1ms", "--retry-count", "0")
-	c.Assert(err, gc.ErrorMatches, "boom")
-
-	// We expect the correct output for the first 3 nil errors before termination.
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
-Model  Controller  Cloud/Region  Version
-test   test        foo           
-
-Model  Controller  Cloud/Region  Version
-test   test        foo           
-
-Model  Controller  Cloud/Region  Version
-test   test        foo           
-
-`[1:])
-
-}
-
 func (s *MinimalStatusSuite) TestGoodCallWithStorage(c *gc.C) {
 	context, err := s.runStatus(c, "--no-color", "--storage")
 	c.Assert(err, jc.ErrorIsNil)
@@ -95,13 +64,12 @@ func (s *MinimalStatusSuite) TestGoodCallWithStorage(c *gc.C) {
 Model  Controller  Cloud/Region  Version
 test   test        foo           
 
-Storage Unit  Storage ID    Type        Pool      Mountpoint  Size    Status    Message
-              persistent/1  filesystem                                detached  
-postgresql/0  db-dir/1100   block                             3.0MiB  attached  
-transcode/0   db-dir/1000   block                                     pending   creating volume
-transcode/0   shared-fs/0   filesystem  radiance  /mnt/doom   1.0GiB  attached  
-transcode/1   shared-fs/0   filesystem  radiance  /mnt/huang  1.0GiB  attached  
-
+Storage Unit  Storage ID    Type        Pool      Mountpoint  Size     Status    Message
+              persistent/1  filesystem                                 detached  
+postgresql/0  db-dir/1100   block                             3.0 MiB  attached  
+transcode/0   db-dir/1000   block                                      pending   creating volume
+transcode/0   shared-fs/0   filesystem  radiance  /mnt/doom   1.0 GiB  attached  
+transcode/1   shared-fs/0   filesystem  radiance  /mnt/huang  1.0 GiB  attached  
 `[1:])
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/gnuflag"
+
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
@@ -24,17 +25,13 @@ var suspendHelpDetails = `
 A relation between an application in another model and an offer in this model will be suspended. 
 The relation-departed and relation-broken hooks will be run for the relation, and the relation
 status will be set to suspended. The relation is specified using its id.
+`
 
-Examples:
+const suspendHelpExamples = `
     juju suspend-relation 123
     juju suspend-relation 123 --message "reason for suspending"
     juju suspend-relation 123 456 --message "reason for suspending"
-
-See also: 
-    add-relation
-    offers
-    remove-relation
-    resume-relation`
+`
 
 // NewSuspendRelationCommand returns a command to suspend a relation.
 func NewSuspendRelationCommand() cmd.Command {
@@ -58,10 +55,17 @@ type suspendRelationCommand struct {
 
 func (c *suspendRelationCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "suspend-relation",
-		Args:    "<relation-id>[ <relation-id>...]",
-		Purpose: suspendHelpSummary,
-		Doc:     suspendHelpDetails,
+		Name:     "suspend-relation",
+		Args:     "<relation-id>[ <relation-id>...]",
+		Purpose:  suspendHelpSummary,
+		Doc:      suspendHelpDetails,
+		Examples: suspendHelpExamples,
+		SeeAlso: []string{
+			"integrate",
+			"offers",
+			"remove-relation",
+			"resume-relation",
+		},
 	})
 }
 

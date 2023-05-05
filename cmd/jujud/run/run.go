@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,7 +42,6 @@ type RunCommand struct {
 	unitName              string
 	unit                  names.UnitTag
 	commands              string
-	showHelp              bool
 	noContext             bool
 	forceRemoteUnit       bool
 	relationId            string
@@ -199,7 +197,7 @@ func (c *RunCommand) maybeGetUnitTag() (names.UnitTag, error) {
 		dataDir = paths.DataDir(paths.CurrentOS())
 	}
 	agentDir := filepath.Join(dataDir, "agents")
-	files, _ := ioutil.ReadDir(agentDir)
+	files, _ := os.ReadDir(agentDir)
 	var unitTags []names.UnitTag
 	for _, f := range files {
 		if f.IsDir() {
@@ -240,7 +238,7 @@ func (c *RunCommand) getSocket(op *caas.OperatorClientInfo) (sockets.Socket, err
 
 	baseDir := agent.Dir(config.DataDir, c.unit)
 	caCertFile := filepath.Join(baseDir, caas.CACertFile)
-	caCert, err := ioutil.ReadFile(caCertFile)
+	caCert, err := os.ReadFile(caCertFile)
 	if err != nil {
 		return sockets.Socket{}, errors.Annotatef(err, "reading %s", caCertFile)
 	}
@@ -291,7 +289,7 @@ func (c *RunCommand) executeInUnitContext() (*exec.ExecResponse, error) {
 
 	// juju-exec on k8s uses an operator yaml file
 	infoFilePath := filepath.Join(unitDir, caas.OperatorClientInfoFile)
-	infoFileBytes, err := ioutil.ReadFile(infoFilePath)
+	infoFileBytes, err := os.ReadFile(infoFilePath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, errors.Annotatef(err, "reading %s", infoFilePath)
 	}

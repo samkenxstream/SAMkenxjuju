@@ -39,11 +39,13 @@ const (
 	SuperuserAccess Access = "superuser"
 )
 
+var AllAccessLevels = []Access{NoAccess, ReadAccess, WriteAccess, ConsumeAccess, AdminAccess, LoginAccess, AddModelAccess, SuperuserAccess}
+
 // Validate returns error if the current is not a valid access level.
 func (a Access) Validate() error {
 	switch a {
 	case NoAccess, AdminAccess, ReadAccess, WriteAccess,
-		LoginAccess, AddModelAccess, SuperuserAccess:
+		LoginAccess, AddModelAccess, SuperuserAccess, ConsumeAccess:
 		return nil
 	}
 	return errors.NotValidf("access level %s", a)
@@ -79,7 +81,7 @@ func ValidateCloudAccess(access Access) error {
 	return errors.NotValidf("%q cloud access", access)
 }
 
-//ValidateControllerAccess returns error if the passed access is not a valid
+// ValidateControllerAccess returns error if the passed access is not a valid
 // controller access level.
 func ValidateControllerAccess(access Access) error {
 	switch access {

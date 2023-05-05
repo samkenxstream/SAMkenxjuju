@@ -23,6 +23,7 @@ import (
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/os"
 	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/provider/common"
@@ -102,7 +103,8 @@ const (
 )
 
 // Limits for volume parameters. See:
-//   http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
+//
+//	http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
 const (
 	// minMagneticVolumeSizeGiB is the minimum size for magnetic volumes in GiB.
 	minMagneticVolumeSizeGiB = 1
@@ -446,11 +448,6 @@ func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storag
 	if inst.Placement != nil {
 		vol.AvailabilityZone = inst.Placement.AvailabilityZone
 	}
-	resp, err := v.env.ec2Client.CreateVolume(ctx, &vol)
-	if err != nil {
-		return nil, nil, errors.Trace(maybeConvertCredentialError(err, ctx))
-	}
-	volumeId = resp.VolumeId
 
 	// Tag.
 	resourceTags := make(map[string]string)
@@ -458,9 +455,15 @@ func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storag
 		resourceTags[k] = v
 	}
 	resourceTags[tagName] = resourceName(p.Tag, v.envName)
-	if err := tagResources(v.env.ec2Client, ctx, resourceTags, *volumeId); err != nil {
-		return nil, nil, errors.Annotate(err, "tagging volume")
+	vol.TagSpecifications = []types.TagSpecification{
+		CreateTagSpecification(types.ResourceTypeVolume, resourceTags),
 	}
+
+	resp, err := v.env.ec2Client.CreateVolume(ctx, &vol)
+	if err != nil {
+		return nil, nil, errors.Trace(maybeConvertCredentialError(err, ctx))
+	}
+	volumeId = resp.VolumeId
 
 	volume := storage.Volume{
 		Tag: p.Tag,
@@ -1102,8 +1105,8 @@ func blockDeviceNamer(numbers bool) func() (requestName, actualName string, err 
 	}
 }
 
-func minRootDiskSizeMiB(series string) uint64 {
-	return gibToMib(common.MinRootDiskSizeGiB(series))
+func minRootDiskSizeMiB(osname string) uint64 {
+	return gibToMib(common.MinRootDiskSizeGiB(os.OSTypeForName(osname)))
 }
 
 // getBlockDeviceMappings translates constraints into BlockDeviceMappings.
@@ -1112,11 +1115,11 @@ func minRootDiskSizeMiB(series string) uint64 {
 // stores (ephemeral disks).
 func getBlockDeviceMappings(
 	cons constraints.Value,
-	series string,
+	osname string,
 	controller bool,
 	rootDisk *storage.VolumeParams,
 ) ([]types.BlockDeviceMapping, error) {
-	minRootDiskSizeMiB := minRootDiskSizeMiB(series)
+	minRootDiskSizeMiB := minRootDiskSizeMiB(osname)
 	rootDiskSizeMiB := minRootDiskSizeMiB
 	if controller {
 		rootDiskSizeMiB = defaultControllerDiskSizeMiB

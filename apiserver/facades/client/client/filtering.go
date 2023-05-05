@@ -8,6 +8,7 @@ import (
 	"net"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/juju/errors"
@@ -186,7 +187,7 @@ func unitMatchExposure(u *state.Unit, patterns []string) (bool, bool, error) {
 func unitMatchPort(u *state.Unit, patterns []string) (bool, bool, error) {
 	unitPortRanges, err := u.OpenedPortRanges()
 	if err != nil {
-		if errors.IsNotAssigned(err) {
+		if errors.IsNotAssigned(err) || errors.Is(err, errors.NotSupported) {
 			return false, false, nil
 		}
 		return false, false, err
@@ -280,10 +281,45 @@ func buildUnitMatcherShims(u *state.Unit, patterns []string) []closurePredicate 
 	}
 }
 
+// portsFromString gets "from port" and "to port" value from port string.
+func getPortsFromString(portStr string) (int, int, error) {
+	var portFrom, portTo int
+	var err error
+	portFromStr, portToStr, isPortRange := strings.Cut(portStr, "-")
+	if isPortRange {
+		portFrom, err = strconv.Atoi(portFromStr)
+		if err != nil {
+			return -1, -1, err
+		}
+		portTo, err = strconv.Atoi(portToStr)
+		if err != nil {
+			return -1, -1, err
+		}
+	} else {
+		portFrom, err = strconv.Atoi(portStr)
+		if err != nil {
+			return -1, -1, err
+		}
+		portTo = portFrom
+	}
+	return portFrom, portTo, nil
+}
+
 func matchPortRanges(patterns []string, portRanges ...network.PortRange) (bool, bool, error) {
 	for _, p := range portRanges {
+		pNumStr, pProto, _ := strings.Cut(p.String(), "/")
+		pFrom, pTo, err := getPortsFromString(pNumStr)
+		if err != nil {
+			return false, true, nil
+		}
 		for _, patt := range patterns {
-			if strings.HasPrefix(p.String(), patt) {
+			pattNumStr, pattProto, isPortPattern := strings.Cut(patt, "/")
+			pattFrom, pattTo, err := getPortsFromString(pattNumStr)
+			if err != nil {
+				return false, true, nil
+			}
+			isPortInRange := pattFrom <= pTo && pattTo >= pFrom
+			if isPortPattern && isPortInRange && pProto == pattProto {
 				return true, true, nil
 			}
 		}

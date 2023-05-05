@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	corecharm "github.com/juju/charm/v9"
-	"github.com/juju/charm/v9/hooks"
+	corecharm "github.com/juju/charm/v10"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	jc "github.com/juju/testing/checkers"
@@ -19,7 +19,6 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/agent/tools"
-	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/state"
@@ -174,13 +173,13 @@ func (s *UniterSuite) TestUniterBootstrap(c *gc.C) {
 			serveCharm{},
 			writeFile{"charm", 0644},
 			createUniter{},
-			waitUniterDead{err: `executing operation "install cs:quantal/wordpress-0" for u/0: .*` + errNotDir},
+			waitUniterDead{err: `executing operation "install ch:quantal/wordpress-0" for u/0: .*` + errNotDir},
 		), ut(
 			"charm cannot be downloaded",
 			createCharm{},
 			// don't serve charm
 			createUniter{},
-			waitUniterDead{err: `preparing operation "install cs:quantal/wordpress-0" for u/0: failed to download charm .* not found`},
+			waitUniterDead{err: `preparing operation "install ch:quantal/wordpress-0" for u/0: failed to download charm .* not found`},
 		),
 	})
 }
@@ -466,9 +465,42 @@ func (s *UniterSuite) TestUniterRotateSecretHook(c *gc.C) {
 			createUniter{},
 			waitHooks(startupHooks(false)),
 			waitUnitAgent{status: status.Idle},
-			createSecret{"app/u/password"},
-			rotateSecret{secrets.NewSimpleURL("app/u/password").ID()},
+			createSecret{},
+			rotateSecret{},
 			waitHooks{"secret-rotate"},
+		),
+	})
+}
+
+func (s *UniterSuite) TestUniterSecretExpiredHook(c *gc.C) {
+	s.runUniterTests(c, []uniterTest{
+		ut(
+			"secret expired hook runs when there are secret revisions to be expired",
+			createCharm{},
+			serveCharm{},
+			createUniter{},
+			waitHooks(startupHooks(false)),
+			waitUnitAgent{status: status.Idle},
+			createSecret{},
+			expireSecret{},
+			waitHooks{"secret-expired"},
+		),
+	})
+}
+
+func (s *UniterSuite) TestUniterSecretChangedHook(c *gc.C) {
+	s.runUniterTests(c, []uniterTest{
+		ut(
+			"change secret hook runs when there are secret changes",
+			createCharm{},
+			serveCharm{},
+			createUniter{},
+			waitHooks(startupHooks(false)),
+			waitUnitAgent{status: status.Idle},
+			createSecret{},
+			getSecret{},
+			changeSecret{},
+			waitHooks{"secret-changed"},
 		),
 	})
 }
@@ -1315,7 +1347,7 @@ func (s *UniterSuite) TestSubordinateDying(c *gc.C) {
 
 	// Create the subordinate application.
 	dir := testcharms.Repo.ClonedDir(c.MkDir(), "logging")
-	curl, err := corecharm.ParseURL("cs:quantal/logging")
+	curl, err := corecharm.ParseURL("ch:quantal/logging")
 	c.Assert(err, jc.ErrorIsNil)
 	curl = curl.WithRevision(dir.Revision())
 	step(c, ctx, addCharm{dir, curl})
@@ -1488,7 +1520,7 @@ storage:
 			waitUniterDead{},
 		),
 		// TODO(axw) test that storage-attached is run for new
-		// storage attachments before upgrade-charm is run. This
+		// storage attachments before refresh is run. This
 		// requires additions to state to add storage when a charm
 		// is upgraded.
 	})

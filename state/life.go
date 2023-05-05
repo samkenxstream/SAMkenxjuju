@@ -5,7 +5,7 @@ package state
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3/bson"
 
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/mongo"
@@ -63,9 +63,7 @@ var (
 
 	errDeadOrGone     = errors.New("neither alive nor dying")
 	errAlreadyDying   = errors.New("already dying")
-	errAlreadyDead    = errors.New("already dead")
 	errAlreadyRemoved = errors.New("already removed")
-	errNotDying       = errors.New("not dying")
 )
 
 var valueMap = map[life.Value]Life{

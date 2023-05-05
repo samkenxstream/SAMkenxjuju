@@ -4,14 +4,12 @@
 package machiner_test
 
 import (
-	"io/ioutil"
 	"net"
-	"path/filepath"
 	stdtesting "testing"
 
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
-	gitjujutesting "github.com/juju/testing"
+	jujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/worker/v3"
 	gc "gopkg.in/check.v1"
@@ -255,12 +253,57 @@ func (s *MachinerSuite) TestMachinerStorageAttached(c *gc.C) {
 	err = stopWorker(worker)
 	c.Check(err, jc.ErrorIsNil)
 
-	s.accessor.CheckCalls(c, []gitjujutesting.StubCall{{
+	s.accessor.CheckCalls(c, []jujutesting.StubCall{{
 		FuncName: "Machine",
 		Args:     []interface{}{s.machineTag},
 	}})
 
-	s.accessor.machine.CheckCalls(c, []gitjujutesting.StubCall{{
+	s.accessor.machine.CheckCalls(c, []jujutesting.StubCall{{
+		FuncName: "Life",
+	}, {
+		FuncName: "Watch",
+	}, {
+		FuncName: "Refresh",
+	}, {
+		FuncName: "Life",
+	}, {
+		FuncName: "SetStatus",
+		Args: []interface{}{
+			status.Stopped,
+			"",
+			map[string]interface{}(nil),
+		},
+	}, {
+		FuncName: "EnsureDead",
+	}})
+}
+
+func (s *MachinerSuite) TestMachinerTryAgain(c *gc.C) {
+	// Machine is dying. We'll respond to "EnsureDead" by
+	// saying that we need to try again;
+	// this should not cause an error.
+	s.accessor.machine.life = life.Dying
+	s.accessor.machine.SetErrors(
+		nil, // Watch
+		nil, // Refresh
+		nil, // SetStatus
+		&params.Error{Code: params.CodeTryAgain},
+	)
+
+	worker, err := machiner.NewMachiner(machiner.Config{
+		MachineAccessor: s.accessor, Tag: s.machineTag,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	s.accessor.machine.watcher.changes <- struct{}{}
+	err = stopWorker(worker)
+	c.Check(err, jc.ErrorIsNil)
+
+	s.accessor.CheckCalls(c, []jujutesting.StubCall{{
+		FuncName: "Machine",
+		Args:     []interface{}{s.machineTag},
+	}})
+
+	s.accessor.machine.CheckCalls(c, []jujutesting.StubCall{{
 		FuncName: "Life",
 	}, {
 		FuncName: "Watch",
@@ -320,48 +363,27 @@ func (s *MachinerSuite) TestSetMachineAddresses(c *gc.C) {
 	s.addresses = []net.Addr{
 		&net.IPAddr{IP: net.IPv4(10, 0, 0, 1)},
 		&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)},
-		&net.IPAddr{IP: net.IPv4(10, 0, 3, 1)}, // lxc bridge address ignored
 		&net.IPAddr{IP: net.IPv6loopback},
-		&net.UnixAddr{},                        // not IP, ignored
-		&net.IPAddr{IP: net.IPv4(10, 0, 3, 4)}, // lxc bridge address ignored
+		&net.UnixAddr{}, // not IP, ignored
 		&net.IPNet{IP: net.ParseIP("2001:db8::1")},
 		&net.IPAddr{IP: net.IPv4(169, 254, 1, 20)}, // LinkLocal Ignored
 		&net.IPNet{IP: net.ParseIP("fe80::1")},     // LinkLocal Ignored
 	}
 
-	s.PatchValue(&network.InterfaceByNameAddrs, func(name string) ([]net.Addr, error) {
-		if name == "foobar" {
-			// The addresses on the LXC bridge
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(10, 0, 3, 1)},
-				&net.IPAddr{IP: net.IPv4(10, 0, 3, 4)},
-			}, nil
-		} else if name == network.DefaultLXDBridge {
-			// The addresses on the LXD bridge
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(10, 0, 4, 1)},
-				&net.IPAddr{IP: net.IPv4(10, 0, 4, 4)},
+	s.PatchValue(&network.AddressesForInterfaceName, func(name string) ([]string, error) {
+		if name == network.DefaultLXDBridge {
+			return []string{
+				"10.0.4.1",
+				"10.0.4.4",
 			}, nil
 		} else if name == network.DefaultKVMBridge {
-			return []net.Addr{
-				&net.IPAddr{IP: net.IPv4(192, 168, 1, 1)},
+			return []string{
+				"192.168.122.1",
 			}, nil
 		}
 		c.Fatalf("unknown bridge in testing: %v", name)
 		return nil, nil
 	})
-
-	lxcFakeNetConfig := filepath.Join(c.MkDir(), "lxc-net")
-	netConf := []byte(`
-  # comments ignored
-LXC_BR= ignored
-LXC_ADDR = "fooo"
-LXC_BRIDGE="foobar" # detected
-anything else ignored
-LXC_BRIDGE="ignored"`[1:])
-	err := ioutil.WriteFile(lxcFakeNetConfig, netConf, 0644)
-	c.Assert(err, jc.ErrorIsNil)
-	s.PatchValue(&network.LXCNetDefaultConfig, lxcFakeNetConfig)
 
 	mr := s.makeMachiner(c, false)
 	c.Assert(stopWorker(mr), jc.ErrorIsNil)

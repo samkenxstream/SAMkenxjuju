@@ -40,6 +40,7 @@ import (
 	"k8s.io/utils/pointer"
 
 	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
+	jujuversion "github.com/juju/juju/version"
 
 	"github.com/juju/juju/caas"
 	k8sapplication "github.com/juju/juju/caas/kubernetes/provider/application"
@@ -57,7 +58,6 @@ import (
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/paths"
 	coreresources "github.com/juju/juju/core/resources"
-	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/docker"
@@ -78,7 +78,8 @@ const (
 
 	gpuAffinityNodeSelectorKey = "gpu"
 
-	operatorContainerName = "juju-operator"
+	operatorInitContainerName = "juju-init"
+	operatorContainerName     = "juju-operator"
 
 	dataDirVolumeName = "juju-data-dir"
 
@@ -225,30 +226,39 @@ func newK8sBroker(
 	if len(controllerUUID) > 0 {
 		client.annotations.Add(utils.AnnotationControllerUUIDKey(isLegacy), controllerUUID)
 	}
-	if namespace != "" {
-		if err := client.ensureNamespaceAnnotationForControllerUUID(controllerUUID, isLegacy); err != nil {
-			if errors.IsNotFound(err) {
-				return nil, errors.NewAlreadyExists(nil, fmt.Sprintf("namespace %q may already be in use", cfg.Name()))
-			}
-			return nil, errors.Trace(err)
-		}
+	if namespace == "" {
+		return client, nil
+	}
+
+	ns, err := client.getNamespaceByName(namespace)
+	if errors.Is(err, errors.NotFound) {
+		return client, nil
+	} else if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	if !isK8sObjectOwnedByJuju(ns.ObjectMeta) {
+		return client, nil
+	}
+
+	if err := client.ensureNamespaceAnnotationForControllerUUID(ns, controllerUUID, isLegacy); err != nil {
+		return nil, errors.Trace(err)
 	}
 	return client, nil
 }
 
-func (k *kubernetesClient) ensureNamespaceAnnotationForControllerUUID(controllerUUID string, isLegacy bool) error {
-	if k.namespace == "" {
-		return errNoNamespace
-	}
+func (k *kubernetesClient) ensureNamespaceAnnotationForControllerUUID(
+	ns *core.Namespace,
+	controllerUUID string,
+	isLegacy bool,
+) error {
 	if len(controllerUUID) == 0 {
 		// controllerUUID could be empty in add-k8s without -c because there might be no controller yet.
 		return nil
 	}
-	ns, err := k.getNamespaceByName(k.namespace)
-	if err != nil && !errors.IsNotFound(err) {
-		return errors.Trace(err)
-	}
+
 	annotationControllerUUIDKey := utils.AnnotationControllerUUIDKey(isLegacy)
+
 	if !isLegacy {
 		// Ignore the controller uuid since it is handled below for model migrations.
 		expected := k.annotations.Copy()
@@ -256,13 +266,9 @@ func (k *kubernetesClient) ensureNamespaceAnnotationForControllerUUID(controller
 		if ns != nil && !k8sannotations.New(ns.Annotations).HasAll(expected) {
 			// This should never happen unless we changed annotations for a new juju version.
 			// But in this case, we should have already managed to fix it in upgrade steps.
-			return errors.NewNotValid(nil,
-				fmt.Sprintf("annotations %v for namespace %q must include %v", ns.Annotations, k.namespace, k.annotations),
-			)
+			return fmt.Errorf("annotations %v for namespace %q %w must include %v",
+				ns.Annotations, k.namespace, errors.NotValid, k.annotations)
 		}
-	}
-	if errors.IsNotFound(err) {
-		return nil
 	}
 	if ns.Annotations[annotationControllerUUIDKey] == controllerUUID {
 		// No change needs to be done.
@@ -275,7 +281,7 @@ func (k *kubernetesClient) ensureNamespaceAnnotationForControllerUUID(controller
 	if err := k.ensureNamespaceAnnotations(ns); err != nil {
 		return errors.Trace(err)
 	}
-	_, err = k.client().CoreV1().Namespaces().Update(context.TODO(), ns, v1.UpdateOptions{})
+	_, err := k.client().CoreV1().Namespaces().Update(context.TODO(), ns, v1.UpdateOptions{})
 	return errors.Trace(err)
 }
 
@@ -524,10 +530,10 @@ please choose a different initial model name then try again.`, initialModelName)
 	if args.BootstrapConstraints.HasArch() {
 		podArch = *args.BootstrapConstraints.Arch
 	}
+	// TODO(wallyworld) - use actual series of controller pod image
 	return &environs.BootstrapResult{
-		Arch: podArch,
-		// TODO(wallyworld) - use actual series of controller pod image
-		Series:                 series.LatestLTS(),
+		Arch:                   podArch,
+		Base:                   jujuversion.DefaultSupportedLTSBase(),
 		CaasBootstrapFinalizer: finalizer,
 	}, nil
 }
@@ -659,7 +665,8 @@ func (k *kubernetesClient) GetService(appName string, mode caas.DeploymentMode, 
 	)
 	// We may have the stateful set or deployment but service not done yet.
 	if len(servicesList.Items) > 0 {
-		for _, s := range servicesList.Items {
+		for _, v := range servicesList.Items {
+			s := v
 			// Ignore any headless service for this app.
 			if !strings.HasSuffix(s.Name, "-endpoints") {
 				svc = &s
@@ -1026,7 +1033,22 @@ func (k *kubernetesClient) ensureService(
 			return errors.Annotatef(err, "configuring devices for %s", appName)
 		}
 	}
-	if err := k8sapplication.ApplyConstraints(&workloadSpec.Pod.PodSpec, appName, params.Constraints); err != nil {
+	if err := k8sapplication.ApplyConstraints(
+		&workloadSpec.Pod.PodSpec, appName, params.Constraints,
+		func(pod *core.PodSpec, resourceName core.ResourceName, value string) error {
+			if len(pod.Containers) == 0 {
+				return nil
+			}
+			// Just the first container is enough for scheduling purposes.
+			pod.Containers[0].Resources.Requests, err = k8sapplication.MergeConstraint(
+				resourceName, value, pod.Containers[0].Resources.Requests,
+			)
+			if err != nil {
+				return errors.Annotatef(err, "merging request constraint %s=%s", resourceName, value)
+			}
+			return nil
+		},
+	); err != nil {
 		return errors.Trace(err)
 	}
 

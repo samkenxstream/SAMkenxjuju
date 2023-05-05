@@ -26,7 +26,6 @@ import (
 	"github.com/juju/juju/caas/kubernetes/provider"
 	k8stesting "github.com/juju/juju/caas/kubernetes/provider/testing"
 	"github.com/juju/juju/charmhub/transport"
-	"github.com/juju/juju/charmstore"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/migration"
 	"github.com/juju/juju/core/network"
@@ -46,7 +45,7 @@ type statusSuite struct {
 var _ = gc.Suite(&statusSuite{})
 
 func (s *statusSuite) addMachine(c *gc.C) *state.Machine {
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	return machine
 }
@@ -78,7 +77,7 @@ func (s *statusSuite) TestFullStatus(c *gc.C) {
 		c.Fatalf("Missing machine with id %q", machine.Id())
 	}
 	c.Check(resultMachine.Id, gc.Equals, machine.Id())
-	c.Check(resultMachine.Series, gc.Equals, machine.Series())
+	c.Check(resultMachine.Base, jc.DeepEquals, params.Base{Name: "ubuntu", Channel: "12.10/stable"})
 	c.Check(resultMachine.LXDProfiles, gc.HasLen, 0)
 }
 
@@ -331,7 +330,7 @@ func (s *statusUnitTestSuite) TestModelMeterStatus(c *gc.C) {
 }
 
 func (s *statusUnitTestSuite) TestMeterStatus(c *gc.C) {
-	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered"})
+	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:amd64/quantal/metered"})
 	app := s.Factory.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 
 	units, err := app.AllUnits()
@@ -434,7 +433,7 @@ func (s *statusUnitTestSuite) TestMeterStatusWithCredentials(c *gc.C) {
 }
 
 func (s *statusUnitTestSuite) TestApplicationWithExposedEndpoints(c *gc.C) {
-	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered"})
+	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:amd64/quantal/metered"})
 	app := s.Factory.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 	err := app.MergeExposeSettings(map[string]state.ExposedEndpoint{
 		"": {
@@ -460,8 +459,8 @@ func (s *statusUnitTestSuite) TestApplicationWithExposedEndpoints(c *gc.C) {
 }
 
 func (s *statusUnitTestSuite) TestPrincipalUpgradingFrom(c *gc.C) {
-	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered-3"})
-	meteredCharmNew := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered-5"})
+	meteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:amd64/quantal/metered-3"})
+	meteredCharmNew := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:amd64/quantal/metered-5"})
 	app := s.Factory.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 	u := s.Factory.MakeUnit(c, &factory.UnitParams{
 		Application: app,
@@ -485,13 +484,13 @@ func (s *statusUnitTestSuite) TestPrincipalUpgradingFrom(c *gc.C) {
 	c.Assert(status, gc.NotNil)
 	unitStatus, ok = status.Applications[app.Name()].Units[u.Name()]
 	c.Assert(ok, gc.Equals, true)
-	c.Assert(unitStatus.Charm, gc.Equals, "cs:quantal/metered-3")
+	c.Assert(unitStatus.Charm, gc.Equals, "ch:amd64/quantal/metered-3")
 }
 
 func (s *statusUnitTestSuite) TestSubordinateUpgradingFrom(c *gc.C) {
-	principalCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "mysql", URL: "cs:quantal/mysql"})
-	subordCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "logging", URL: "cs:quantal/logging-1"})
-	subordCharmNew := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "logging", URL: "cs:quantal/logging-2"})
+	principalCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "mysql", URL: "ch:amd64/quantal/mysql"})
+	subordCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "logging", URL: "ch:amd64/quantal/logging-1"})
+	subordCharmNew := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "logging", URL: "ch:amd64/quantal/logging-2"})
 	app := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Charm: principalCharm,
 		Name:  "principal",
@@ -537,7 +536,7 @@ func (s *statusUnitTestSuite) TestSubordinateUpgradingFrom(c *gc.C) {
 	c.Assert(status, gc.NotNil)
 	unitStatus, ok = status.Applications["principal"].Units["principal/0"].Subordinates["subord/0"]
 	c.Assert(ok, gc.Equals, true)
-	c.Assert(unitStatus.Charm, gc.Equals, "cs:quantal/logging-1")
+	c.Assert(unitStatus.Charm, gc.Equals, "ch:amd64/quantal/logging-1")
 }
 
 func addUnitWithVersion(c *gc.C, application *state.Application, version string) *state.Unit {
@@ -553,7 +552,8 @@ func addUnitWithVersion(c *gc.C, application *state.Application, version string)
 	return unit
 }
 
-func (s *statusUnitTestSuite) checkAppVersion(c *gc.C, application *state.Application, expectedVersion string) params.ApplicationStatus {
+func (s *statusUnitTestSuite) checkAppVersion(c *gc.C, application *state.Application,
+	expectedVersion string) params.ApplicationStatus {
 	client := apiclient.NewClient(s.APIState)
 	status, err := client.Status(nil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -621,7 +621,6 @@ func (s *statusUnitTestSuite) TestMigrationInProgress(c *gc.C) {
 	model2, err := state2.Model()
 	c.Assert(err, jc.ErrorIsNil)
 
-	s.State.StartSync()
 	s.WaitForModelWatchersIdle(c, model2.UUID())
 
 	// Get API connection to hosted model.
@@ -887,7 +886,6 @@ type statusUpgradeUnitSuite struct {
 	jujutesting.JujuConnSuite
 
 	charmrevisionupdater *charmrevisionupdater.CharmRevisionUpdaterAPI
-	authoriser           apiservertesting.FakeAuthorizer
 	ctrl                 *gomock.Controller
 }
 
@@ -903,13 +901,10 @@ func (s *statusUpgradeUnitSuite) SetUpTest(c *gc.C) {
 	s.CharmSuite.SetUpTest(c)
 
 	state := charmrevisionupdater.StateShim{State: s.State}
-	newCharmstoreClient := func(st charmrevisionupdater.State) (charmstore.Client, error) {
-		return charmstore.NewCustomClient(s.Store), nil
-	}
-
 	s.ctrl = gomock.NewController(c)
 	charmhubClient := mocks.NewMockCharmhubRefreshClient(s.ctrl)
-	charmhubClient.EXPECT().RefreshWithRequestMetrics(gomock.Any(), gomock.Any(), gomock.Any()).Return([]transport.RefreshResponse{
+	charmhubClient.EXPECT().RefreshWithRequestMetrics(gomock.Any(), gomock.Any(),
+		gomock.Any()).Return([]transport.RefreshResponse{
 		{Entity: transport.RefreshEntity{Revision: 42}},
 	}, nil)
 	newCharmhubClient := func(st charmrevisionupdater.State) (charmrevisionupdater.CharmhubRefreshClient, error) {
@@ -917,35 +912,14 @@ func (s *statusUpgradeUnitSuite) SetUpTest(c *gc.C) {
 	}
 
 	var err error
-	s.charmrevisionupdater, err = charmrevisionupdater.NewCharmRevisionUpdaterAPIState(state, clock.WallClock, newCharmstoreClient, newCharmhubClient)
+	s.charmrevisionupdater, err = charmrevisionupdater.NewCharmRevisionUpdaterAPIState(state, clock.WallClock,
+		newCharmhubClient)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *statusUpgradeUnitSuite) TearDownTest(c *gc.C) {
 	s.JujuConnSuite.TearDownTest(c)
 	s.ctrl.Finish()
-}
-
-func (s *statusUpgradeUnitSuite) TestUpdateRevisionsCharmstore(c *gc.C) {
-	s.AddMachine(c, "0", state.JobManageModel)
-	s.SetupScenario(c)
-	client := apiclient.NewClient(s.APIState)
-	status, _ := client.Status(nil)
-
-	appStatus, ok := status.Applications["mysql"]
-	c.Assert(ok, gc.Equals, true)
-	c.Assert(appStatus.CanUpgradeTo, gc.Equals, "")
-
-	// Update to the latest available charm revision.
-	result, err := s.charmrevisionupdater.UpdateLatestRevisions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Error, gc.IsNil)
-
-	// Check if CanUpgradeTo suggests the latest revision.
-	status, _ = client.Status(nil)
-	appStatus, ok = status.Applications["mysql"]
-	c.Assert(ok, gc.Equals, true)
-	c.Assert(appStatus.CanUpgradeTo, gc.Equals, "cs:quantal/mysql-23")
 }
 
 func (s *statusUpgradeUnitSuite) TestUpdateRevisionsCharmhub(c *gc.C) {
@@ -971,7 +945,7 @@ func (s *statusUpgradeUnitSuite) TestUpdateRevisionsCharmhub(c *gc.C) {
 	status, _ = client.Status(nil)
 	appStatus, ok = status.Applications["charmhubby"]
 	c.Assert(ok, gc.Equals, true)
-	c.Assert(appStatus.CanUpgradeTo, gc.Equals, "ch:charmhubby-42")
+	c.Assert(appStatus.CanUpgradeTo, gc.Equals, "ch:amd64/jammy/charmhubby-42")
 }
 
 type CAASStatusSuite struct {
@@ -1018,6 +992,10 @@ func (s *CAASStatusSuite) SetUpTest(c *gc.C) {
 		Series: "kubernetes",
 	})
 	s.app = s.Factory.MakeApplication(c, &factory.ApplicationParams{
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "20.04/stable",
+		}},
 		Charm: ch,
 	})
 	s.Factory.MakeUnit(c, &factory.UnitParams{Application: s.app})
@@ -1102,7 +1080,7 @@ func (s *CAASStatusSuite) assertUnitStatus(c *gc.C, appStatus params.Application
 	}
 	c.Assert(appStatus, jc.DeepEquals, params.ApplicationStatus{
 		Charm:           *curl,
-		Series:          "kubernetes",
+		Base:            params.Base{Name: "ubuntu", Channel: "20.04/stable"},
 		WorkloadVersion: workloadVersion,
 		Relations:       map[string][]string{},
 		SubordinateTo:   []string{},
@@ -1152,9 +1130,10 @@ func (s *CAASStatusSuite) TestStatusWorkloadVersionSetByCharm(c *gc.C) {
 type filteringBranchesSuite struct {
 	baseSuite
 
-	appA string
-	appB string
-	subB string
+	appA    string
+	appB    string
+	subB    string
+	leaders map[string]string
 }
 
 var _ = gc.Suite(&filteringBranchesSuite{})
@@ -1244,6 +1223,24 @@ func (s *filteringBranchesSuite) TestFullStatusBranchFilterUnit(c *gc.C) {
 	c.Assert(status.Applications, gc.HasLen, 1)
 }
 
+func (s *filteringBranchesSuite) TestFullStatusBranchFilterUnitLeader(c *gc.C) {
+	s.assertBranchAssignUnit(c, "apple", s.appA+"/0")
+	err := s.State.AddBranch("banana", "test-user")
+	c.Assert(err, jc.ErrorIsNil)
+
+	client := s.clientForTest(c)
+
+	status, err := client.FullStatus(params.StatusParams{
+		Patterns: []string{s.appA + "/leader"},
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(status.Branches, gc.HasLen, 1)
+	b, ok := status.Branches["apple"]
+	c.Assert(ok, jc.IsTrue)
+	c.Assert(b.AssignedUnits, jc.DeepEquals, map[string][]string{s.appA: {s.appA + "/0"}})
+	c.Assert(status.Applications, gc.HasLen, 1)
+}
+
 func (s *filteringBranchesSuite) TestFullStatusBranchFilterApplication(c *gc.C) {
 	err := s.State.AddBranch("apple", "test-user")
 	c.Assert(err, jc.ErrorIsNil)
@@ -1304,7 +1301,6 @@ func (s *filteringBranchesSuite) TestFullStatusBranchFilterTwoBranchesSubordinat
 }
 
 func (s *filteringBranchesSuite) clientForTest(c *gc.C) *client.Client {
-	s.State.StartSync()
 	s.WaitForModelWatchersIdle(c, s.State.ModelUUID())
 
 	ctx := &facadetest.Context{
@@ -1315,12 +1311,23 @@ func (s *filteringBranchesSuite) clientForTest(c *gc.C) *client.Client {
 			Tag:        s.AdminUserTag(c),
 			Controller: true,
 		},
-		Resources_:        common.NewResources(),
-		LeadershipReader_: mockLeadershipReader{},
+		Resources_: common.NewResources(),
+		LeadershipReader_: mockLeadershipReader{
+			leaders: map[string]string{s.appA: s.appA + "/0"},
+		},
 	}
-	client, err := client.NewFacade(ctx)
+
+	var (
+		err     error
+		client_ *client.Client
+	)
+
+	s.leaders, err = ctx.LeadershipReader_.Leaders()
 	c.Assert(err, jc.ErrorIsNil)
-	return client
+
+	client_, err = client.NewFacade(ctx)
+	c.Assert(err, jc.ErrorIsNil)
+	return client_
 }
 
 func (s *filteringBranchesSuite) assertBranchAssignUnit(c *gc.C, bName, uName string) {
@@ -1343,10 +1350,12 @@ func (s *filteringBranchesSuite) assertBranchAssignApplication(c *gc.C, bName, a
 	c.Assert(err, jc.ErrorIsNil)
 }
 
-type mockLeadershipReader struct{}
+type mockLeadershipReader struct {
+	leaders map[string]string
+}
 
 func (m mockLeadershipReader) Leaders() (map[string]string, error) {
-	return make(map[string]string), nil
+	return m.leaders, nil
 }
 
 func setGenerationsControllerConfig(c *gc.C, st *state.State) {

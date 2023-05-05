@@ -7,14 +7,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3/bson"
 	"github.com/juju/names/v4"
 	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/mongo"
@@ -36,7 +36,7 @@ type MachineModelInfo struct {
 }
 
 // ModelSummary describe interesting information for a given model. This is meant to match the values that a user wants
-// to see as part of either show-model or list-models.
+// to see as part of either show-model or models.
 type ModelSummary struct {
 	Name           string
 	UUID           string
@@ -57,6 +57,7 @@ type ModelSummary struct {
 	// Needs Config()
 	ProviderType  string
 	DefaultSeries string
+	DefaultBase   series.Base
 	AgentVersion  *version.Number
 
 	// Needs Statuses collection
@@ -85,13 +86,6 @@ type modelSummaryProcessor struct {
 	isSuperuser bool
 	indexByUUID map[string]int
 	modelUUIDs  []string
-
-	//invalidLocalUsers are usernames that show up as we're walking the database, but ultimately are considered deleted
-	invalidLocalUsers set.Strings
-
-	// incompleteUUIDs are ones that are missing some information, we should treat them as not being available
-	// we wait to strip them out until we're done doing all the processing steps.
-	incompleteUUIDs set.Strings
 }
 
 func newProcessorFromModelDocs(st *State, modelDocs []modelDoc, user names.UserTag, isSuperuser bool) *modelSummaryProcessor {
@@ -121,8 +115,6 @@ func newProcessorFromModelDocs(st *State, modelDocs []modelDoc, user names.UserT
 			CloudTag:           names.NewCloudTag(doc.Cloud).String(),
 			CloudRegion:        doc.CloudRegion,
 			CloudCredentialTag: cloudCred,
-			/// Users:              make(map[string]UserAccessInfo),
-			/// Machines:           make(map[string]MachineModelInfo),
 		}
 		p.indexByUUID[doc.UUID] = i
 		p.modelUUIDs[i] = doc.UUID
@@ -157,7 +149,14 @@ func (p *modelSummaryProcessor) fillInFromConfig() error {
 		}
 		detail := &(p.summaries[idx])
 		detail.ProviderType = cfg.Type()
-		detail.DefaultSeries = config.PreferredSeries(cfg)
+		detail.DefaultBase = config.PreferredBase(cfg)
+
+		// TODO(stickupkid): Ensure we fill in the default series for now, we
+		// can switch that out later.
+		if detail.DefaultSeries, err = series.GetSeriesFromBase(detail.DefaultBase); err != nil {
+			return errors.Trace(err)
+		}
+
 		if agentVersion, exists := cfg.AgentVersion(); exists {
 			detail.AgentVersion = &agentVersion
 		}

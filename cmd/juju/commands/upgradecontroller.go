@@ -25,23 +25,23 @@ This command upgrades the Juju agent for a controller.
 
 A controller's agent version can be shown with `[1:] + "`juju model-config -m controller agent-\nversion`" + `.
 A version is denoted by: major.minor.patch
-The upgrade candidate will be auto-selected if '--agent-version' is not
-specified:
- - If the server major version matches the client major version, the
- version selected is minor+1. If such a minor version is not available then
- the next patch version is chosen.
- - If the server major version does not match the client major version,
- the version selected is that of the client version.
+
+You can upgrade the controller to a new patch version by specifying
+the '--agent-version' flag. If not specified, the upgrade candidate
+will default to the most recent patch version matching the current 
+major and minor version. Upgrading to a new major or minor version is
+not supported.
+
 The command will abort if an upgrade is in progress. It will also abort if
 a previous upgrade was not fully completed (e.g.: if one of the
 controllers in a high availability model failed to upgrade).
 
-Examples:
+`
+
+const usageUpgradeControllerExamples = `
     juju upgrade-controller --dry-run
     juju upgrade-controller --agent-version 2.0.1
-    
-See also: 
-    upgrade-model`
+`
 
 func newUpgradeControllerCommand(options ...modelcmd.WrapControllerOption) cmd.Command {
 	command := &upgradeControllerCommand{}
@@ -52,15 +52,17 @@ func newUpgradeControllerCommand(options ...modelcmd.WrapControllerOption) cmd.C
 type upgradeControllerCommand struct {
 	modelcmd.ControllerCommandBase
 	baseUpgradeCommand
-
-	jujuClientAPI ClientAPI
 }
 
 func (c *upgradeControllerCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "upgrade-controller",
-		Purpose: usageUpgradeControllerSummary,
-		Doc:     usageUpgradeControllerDetails,
+		Name:     "upgrade-controller",
+		Purpose:  usageUpgradeControllerSummary,
+		Doc:      usageUpgradeControllerDetails,
+		Examples: usageUpgradeControllerExamples,
+		SeeAlso: []string{
+			"upgrade-model",
+		},
 	})
 }
 
@@ -98,11 +100,9 @@ func (c *upgradeControllerCommand) Run(ctx *cmd.Context) (err error) {
 
 func (c *upgradeControllerCommand) upgradeController(ctx *cmd.Context, controllerModel string) error {
 	jcmd := &upgradeJujuCommand{
-		baseUpgradeCommand: baseUpgradeCommand{
-			upgradeMessage: "upgrade to this version by running\n    juju upgrade-controller",
-		},
-		jujuClientAPI: c.jujuClientAPI,
+		baseUpgradeCommand: c.baseUpgradeCommand,
 	}
+	jcmd.upgradeMessage = "upgrade to this version by running\n    juju upgrade-controller"
 	jcmd.SetClientStore(c.ClientStore())
 	wrapped := modelcmd.Wrap(jcmd)
 	args := append(c.rawArgs, "-m", controllerModel)

@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
@@ -28,6 +27,7 @@ import (
 	"github.com/juju/juju/cloudconfig/sshinit"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/series"
 	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
@@ -37,6 +37,7 @@ import (
 	envcontext "github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
+	"github.com/juju/juju/environs/models"
 	"github.com/juju/juju/environs/simplestreams"
 	pkissh "github.com/juju/juju/pki/ssh"
 	"github.com/juju/juju/storage"
@@ -55,14 +56,14 @@ func Bootstrap(
 	callCtx envcontext.ProviderCallContext,
 	args environs.BootstrapParams,
 ) (*environs.BootstrapResult, error) {
-	result, series, finalizer, err := BootstrapInstance(ctx, env, callCtx, args)
+	result, base, finalizer, err := BootstrapInstance(ctx, env, callCtx, args)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	bsResult := &environs.BootstrapResult{
 		Arch:                    *result.Hardware.Arch,
-		Series:                  series,
+		Base:                    *base,
 		CloudBootstrapFinalizer: finalizer,
 	}
 	return bsResult, nil
@@ -80,43 +81,61 @@ func BootstrapInstance(
 	env environs.Environ,
 	callCtx envcontext.ProviderCallContext,
 	args environs.BootstrapParams,
-) (_ *environs.StartInstanceResult, selectedSeries string, _ environs.CloudBootstrapFinalizer, err error) {
+) (_ *environs.StartInstanceResult, resultBase *series.Base, _ environs.CloudBootstrapFinalizer, err error) {
 	// TODO make safe in the case of racing Bootstraps
 	// If two Bootstraps are called concurrently, there's
 	// no way to make sure that only one succeeds.
 
 	// First thing, ensure we have tools otherwise there's no point.
-	selectedSeries, err = coreseries.ValidateSeries(
-		args.SupportedBootstrapSeries,
-		args.BootstrapSeries,
-		config.PreferredSeries(env.Config()),
+	supportedBootstrapBase := make([]series.Base, len(args.SupportedBootstrapSeries))
+	for i, b := range args.SupportedBootstrapSeries.SortedValues() {
+		sb, err := series.GetBaseFromSeries(b)
+		if err != nil {
+			return nil, nil, nil, errors.Trace(err)
+		}
+		supportedBootstrapBase[i] = sb
+	}
+
+	var bootstrapBase series.Base
+	if args.BootstrapSeries != "" {
+		b, err := series.GetBaseFromSeries(args.BootstrapSeries)
+		if err != nil {
+			return nil, nil, nil, errors.Trace(err)
+		}
+		bootstrapBase = b
+	}
+
+	requestedBootstrapBase, err := coreseries.ValidateBase(
+		supportedBootstrapBase,
+		bootstrapBase,
+		config.PreferredBase(env.Config()),
 	)
 	if !args.Force && err != nil {
-		// If the series isn't valid at all, then don't prompt users to use
+		// If the base isn't valid at all, then don't prompt users to use
 		// the --force flag.
-		if _, err := series.UbuntuSeriesVersion(selectedSeries); err != nil {
-			return nil, "", nil, errors.NotValidf("series %q", selectedSeries)
+		if _, err := series.UbuntuBaseVersion(requestedBootstrapBase); err != nil {
+			return nil, nil, nil, errors.NotValidf("base %q", requestedBootstrapBase.String())
 		}
-		return nil, "", nil, errors.Annotatef(err, "use --force to override")
+		return nil, nil, nil, errors.Annotatef(err, "use --force to override")
 	}
-	// The series we're attempting to bootstrap is empty, show a friendly
+	// The base we're attempting to bootstrap is empty, show a friendly
 	// error message, rather than the more cryptic error messages that follow
 	// onwards.
-	if selectedSeries == "" {
-		return nil, "", nil, errors.NotValidf("bootstrap instance series")
+	if requestedBootstrapBase.Empty() {
+		return nil, nil, nil, errors.NotValidf("bootstrap instance base")
 	}
 	availableTools, err := args.AvailableTools.Match(coretools.Filter{
-		OSType: coreseries.DefaultOSTypeNameFromSeries(selectedSeries),
+		OSType: requestedBootstrapBase.OS,
 	})
 	if err != nil {
-		return nil, "", nil, err
+		return nil, nil, nil, err
 	}
 
 	// Filter image metadata to the selected series.
 	var imageMetadata []*imagemetadata.ImageMetadata
-	seriesVersion, err := series.SeriesVersion(selectedSeries)
+	seriesVersion, err := series.BaseSeriesVersion(requestedBootstrapBase)
 	if err != nil {
-		return nil, "", nil, errors.Trace(err)
+		return nil, nil, nil, errors.Trace(err)
 	}
 	for _, m := range args.ImageMetadata {
 		if m.Version != seriesVersion {
@@ -131,32 +150,33 @@ func BootstrapInstance(
 	if client == nil {
 		// This should never happen: if we don't have OpenSSH, then
 		// go.crypto/ssh should be used with an auto-generated key.
-		return nil, "", nil, fmt.Errorf("no SSH client available")
+		return nil, nil, nil, fmt.Errorf("no SSH client available")
 	}
 
 	publicKey, err := simplestreams.UserPublicSigningKey()
 	if err != nil {
-		return nil, "", nil, err
+		return nil, nil, nil, err
 	}
-	envCfg := env.Config()
+
 	instanceConfig, err := instancecfg.NewBootstrapInstanceConfig(
-		args.ControllerConfig, args.BootstrapConstraints, args.ModelConstraints, selectedSeries, publicKey,
+		args.ControllerConfig, args.BootstrapConstraints, args.ModelConstraints, requestedBootstrapBase, publicKey,
 		args.ExtraAgentValuesForTesting,
 	)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, nil, nil, err
 	}
-	instanceConfig.EnableOSRefreshUpdate = env.Config().EnableOSRefreshUpdate()
-	instanceConfig.EnableOSUpgrade = env.Config().EnableOSUpgrade()
-	instanceConfig.NetBondReconfigureDelay = env.Config().NetBondReconfigureDelay()
 
+	envCfg := env.Config()
+	instanceConfig.EnableOSRefreshUpdate = envCfg.EnableOSRefreshUpdate()
+	instanceConfig.EnableOSUpgrade = envCfg.EnableOSUpgrade()
+	instanceConfig.NetBondReconfigureDelay = envCfg.NetBondReconfigureDelay()
 	instanceConfig.Tags = instancecfg.InstanceTags(envCfg.UUID(), args.ControllerConfig.ControllerUUID(), envCfg, true)
 
 	// We're creating a new instance; inject host keys so that we can then
 	// make an SSH connection with known keys.
 	initialSSHHostKeys, err := generateSSHHostKeys()
 	if err != nil {
-		return nil, "", nil, errors.Annotate(err, "generating SSH host keys")
+		return nil, nil, nil, errors.Annotate(err, "generating SSH host keys")
 	}
 	instanceConfig.Bootstrap.InitialSSHHostKeys = initialSSHHostKeys
 
@@ -236,7 +256,7 @@ func BootstrapInstance(
 			logger.Debugf("environ doesn't support zones: ignoring bootstrap zone constraints")
 		}
 	} else if err != nil {
-		return nil, "", nil, errors.Annotate(err, "cannot start bootstrap instance")
+		return nil, nil, nil, errors.Annotate(err, "cannot start bootstrap instance")
 	} else if args.BootstrapConstraints.HasZones() {
 		// TODO(hpidcock): bootstrap and worker/provisioner should probably derive
 		// from the same logic regarding placement.
@@ -250,7 +270,7 @@ func BootstrapInstance(
 			}
 		}
 		if len(filteredZones) == 0 {
-			return nil, "", nil, errors.Errorf(
+			return nil, nil, nil, errors.Errorf(
 				"no available zones (%+q) matching bootstrap zone constraints (%+q)",
 				zones,
 				*args.BootstrapConstraints.Zones,
@@ -269,12 +289,12 @@ func BootstrapInstance(
 
 		select {
 		case <-ctx.Context().Done():
-			return nil, "", nil, errors.Annotate(err, "starting controller (cancelled)")
+			return nil, nil, nil, errors.Annotate(err, "starting controller (cancelled)")
 		default:
 		}
 
 		if zone == "" || errors.Is(err, environs.ErrAvailabilityZoneIndependent) {
-			return nil, "", nil, errors.Annotate(err, "cannot start bootstrap instance")
+			return nil, nil, nil, errors.Annotate(err, "cannot start bootstrap instance")
 		}
 
 		if i < len(zones)-1 {
@@ -284,17 +304,23 @@ func BootstrapInstance(
 		}
 		// This is the last zone in the list, error.
 		if len(zones) > 1 {
-			return nil, "", nil, errors.Errorf(
+			return nil, nil, nil, errors.Errorf(
 				"cannot start bootstrap instance in any availability zone (%s)",
 				strings.Join(zones, ", "),
 			)
 		}
-		return nil, "", nil, errors.Annotatef(err, "cannot start bootstrap instance in availability zone %q", zone)
+		return nil, nil, nil, errors.Annotatef(err, "cannot start bootstrap instance in availability zone %q", zone)
+	}
+	modelFw, ok := env.(models.ModelFirewaller)
+	if ok {
+		if err := openModelSSH(callCtx, modelFw, env.Config()); err != nil {
+			return nil, nil, nil, errors.Annotate(err, "cannot open SSH")
+		}
 	}
 
 	err = statusCleanup()
 	if err != nil {
-		return nil, "", nil, errors.Annotate(err, "cleaning up status line")
+		return nil, nil, nil, errors.Annotate(err, "cleaning up status line")
 	}
 	msg := fmt.Sprintf(" - %s (%s)", result.Instance.Id(), formatHardware(result.Hardware))
 	// We need some padding below to overwrite any previous messages.
@@ -322,7 +348,7 @@ func BootstrapInstance(
 		}
 		return FinishBootstrap(ctx, client, env, callCtx, result.Instance, icfg, opts)
 	}
-	return result, selectedSeries, finalizer, nil
+	return result, &requestedBootstrapBase, finalizer, nil
 }
 
 func startInstanceZones(env environs.Environ, ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
@@ -356,6 +382,15 @@ func startInstanceZones(env environs.Environ, ctx envcontext.ProviderCallContext
 	return zones, nil
 }
 
+// openModelSSH opens port 22 on the controller to the configured allow list.
+// This is all that is required for the bootstrap to continue. Further configured
+// rules will be opened by the firewaller, Once it has started
+func openModelSSH(callCtx envcontext.ProviderCallContext, modelFw models.ModelFirewaller, cfg *config.Config) error {
+	return modelFw.OpenModelPorts(callCtx, firewall.IngressRules{
+		firewall.NewIngressRule(network.MustParsePortRange("22"), cfg.SSHAllow()...),
+	})
+}
+
 func formatHardware(hw *instance.HardwareCharacteristics) string {
 	if hw == nil {
 		return ""
@@ -369,6 +404,10 @@ func formatHardware(hw *instance.HardwareCharacteristics) string {
 	}
 	if hw.CpuCores != nil && *hw.CpuCores > 0 {
 		out = append(out, fmt.Sprintf("cores=%d", *hw.CpuCores))
+	}
+	// If the virt-type is the default, don't print it out, as it's just noise.
+	if hw.VirtType != nil && *hw.VirtType != "" && *hw.VirtType != string(instance.DefaultInstanceType) {
+		out = append(out, fmt.Sprintf("virt-type=%s", *hw.VirtType))
 	}
 	return strings.Join(out, " ")
 }
@@ -458,7 +497,7 @@ func ConfigureMachine(
 	// the terminal, which will be the ssh subprocess at this
 	// point. For that reason, we do not call StopInterruptNotify
 	// until this function completes.
-	cloudcfg, err := cloudinit.New(instanceConfig.Series)
+	cloudcfg, err := cloudinit.New(instanceConfig.Base.OS)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -490,7 +529,7 @@ func ConfigureMachine(
 		SSHOptions:     sshOptions,
 		Config:         cloudcfg,
 		ProgressWriter: ctx.GetStderr(),
-		Series:         instanceConfig.Series,
+		OS:             instanceConfig.Base.OS,
 	})
 }
 
@@ -498,9 +537,9 @@ func ConfigureMachine(
 // an ssh.Options and a cleanup function, or an error.
 type HostSSHOptionsFunc func(host string) (*ssh.Options, func(), error)
 
-// DefaultHostSSHOptions returns a a nil *ssh.Options, which means
+// DefaultHostSSHOptions returns a nil *ssh.Options, which means
 // to use the defaults; and a no-op cleanup function.
-func DefaultHostSSHOptions(host string) (*ssh.Options, func(), error) {
+func DefaultHostSSHOptions(string) (*ssh.Options, func(), error) {
 	return nil, func() {}, nil
 }
 
@@ -541,7 +580,7 @@ func hostBootstrapSSHOptions(
 	}
 
 	// Create a temporary known_hosts file.
-	f, err := ioutil.TempFile("", "juju-known-hosts")
+	f, err := os.CreateTemp("", "juju-known-hosts")
 	if err != nil {
 		return nil, cleanup, errors.Trace(err)
 	}

@@ -7,9 +7,9 @@
 package uniter
 
 import (
-	"io/ioutil"
 	"net"
 	"net/rpc"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -69,7 +69,6 @@ type RunListener struct {
 
 	mu sync.Mutex
 
-	socket *sockets.Socket
 	// commandRunners holds the CommandRunner that will run commands
 	// for each unit name.
 	commandRunners map[string]CommandRunner
@@ -184,7 +183,7 @@ func (r *RunListener) RunCommands(args RunCommandsArgs) (results *exec.ExecRespo
 		// TODO: Cache unit password
 		baseDir := agent.Dir(agentconfig.DataDir, names.NewUnitTag(args.UnitName))
 		infoFilePath := filepath.Join(baseDir, caas.OperatorClientInfoCacheFile)
-		d, err := ioutil.ReadFile(infoFilePath)
+		d, err := os.ReadFile(infoFilePath)
 		if err != nil {
 			return nil, errors.Annotatef(err, "reading %s", infoFilePath)
 		}

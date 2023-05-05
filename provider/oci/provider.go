@@ -6,7 +6,6 @@ package oci
 import (
 	stdcontext "context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"strings"
@@ -16,7 +15,7 @@ import (
 	"github.com/juju/jsonschema"
 	"github.com/juju/loggo"
 	"github.com/juju/schema"
-	ociIdentity "github.com/oracle/oci-go-sdk/v47/identity"
+	ociIdentity "github.com/oracle/oci-go-sdk/v65/identity"
 	"gopkg.in/ini.v1"
 	"gopkg.in/juju/environschema.v1"
 
@@ -357,7 +356,7 @@ func (e EnvironProvider) DetectCredentials(cloudName string) (*cloud.CloudCreden
 			continue
 		}
 
-		pemFileContent, err := ioutil.ReadFile(values.KeyFile)
+		pemFileContent, err := os.ReadFile(values.KeyFile)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

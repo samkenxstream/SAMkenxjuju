@@ -7,240 +7,139 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/juju/errors"
+	"github.com/rs/xid"
 )
-
-// SecretStatus is the status of a secret.
-type SecretStatus string
-
-const (
-	StatusStaged = SecretStatus("staged")
-	StatusActive = SecretStatus("active")
-)
-
-// IsValid returns true if s is a valid secret status.
-func (s SecretStatus) IsValid() bool {
-	switch s {
-	case StatusActive, StatusStaged:
-		return true
-	}
-	return false
-}
-
-// SecretType is the type of a secret.
-// This is used when creating a secret.
-type SecretType string
-
-const (
-	TypeBlob     = SecretType("blob")
-	TypePassword = SecretType("password")
-)
-
-// IsValid returns true if t is a valid secret type.
-func (t SecretType) IsValid() bool {
-	switch t {
-	case TypeBlob, TypePassword:
-		return true
-	}
-	return false
-}
 
 // SecretConfig is used when creating a secret.
 type SecretConfig struct {
-	Path           string
-	RotateInterval *time.Duration
-	Status         *SecretStatus
+	RotatePolicy   *RotatePolicy
+	NextRotateTime *time.Time
+	ExpireTime     *time.Time
 	Description    *string
-	Tags           *map[string]string
+	Label          *string
 	Params         map[string]interface{}
 }
 
-// NewSecretConfig is used to create an application scoped blob secret.
-func NewSecretConfig(nameParts ...string) *SecretConfig {
-	return &SecretConfig{
-		Path: strings.Join(nameParts, "/"),
-	}
-}
-
-// TODO(wallyworld) - use a schema to describe the config
-const (
-	PasswordLength       = "password-length"
-	PasswordSpecialChars = "password-special-chars"
-)
-
-// NewPasswordSecretConfig is used to create an application scoped password secret.
-func NewPasswordSecretConfig(length int, specialChars bool, nameParts ...string) *SecretConfig {
-	return &SecretConfig{
-		Path: strings.Join(nameParts, "/"),
-		Params: map[string]interface{}{
-			PasswordLength:       length,
-			PasswordSpecialChars: specialChars,
-		},
-	}
-}
-
-const (
-	// AppSnippet denotes a secret belonging to an application.
-	AppSnippet  = "app"
-	pathSnippet = AppSnippet + `/[a-zA-Z0-9-]+((/[a-zA-Z0-9-]+)*/[a-zA-Z]+[a-zA-Z0-9-]*)*`
-)
-
-var pathRegexp = regexp.MustCompile("^" + pathSnippet + "$")
-
-// Validate returns an error if the config is not valid.
+// Validate returns an error if params are invalid.
 func (c *SecretConfig) Validate() error {
-	if !pathRegexp.MatchString(c.Path) {
-		return errors.NotValidf("secret path %q", c.Path)
+	if c.RotatePolicy != nil && !c.RotatePolicy.IsValid() {
+		return errors.NotValidf("secret rotate policy %q", c.RotatePolicy)
+	}
+	if c.RotatePolicy.WillRotate() && c.NextRotateTime == nil {
+		return errors.New("cannot specify a secret rotate policy without a next rotate time")
+	}
+	if !c.RotatePolicy.WillRotate() && c.NextRotateTime != nil {
+		return errors.New("cannot specify a secret rotate time without a rotate policy")
 	}
 	return nil
 }
 
-// URL represents a reference to a secret.
-type URL struct {
-	ControllerUUID string
-	ModelUUID      string
-	Path           string
-	Attribute      string
-	Revision       int
+// URI represents a reference to a secret.
+type URI struct {
+	SourceUUID string
+	ID         string
 }
 
-/*
-Example secret URLs:
-	secret://app/gitlab/apitoken
-	secret://app/mariadb/dbpass
-	secret://app/apache/catalog/password/666
-	secret://app/proxy#key
-	secret://app/proxy/666#key
-	secret://cfed9630-053e-447a-9751-2dc4ed429d51/app/mariadb/password
-	secret://cfed9630-053e-447a-9751-2dc4ed429d51/11111111-053e-447a-6666-2dc4ed429d51/app/mariadb/password
-*/
-
 const (
-	uuidSnippet = `[0-9a-f]{8}\b-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-\b[0-9a-f]{12}`
+	idSnippet   = `[0-9a-z]{20}`
+	uuidSnippet = `[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`
 
 	// SecretScheme is the URL prefix for a secret.
 	SecretScheme = "secret"
 )
 
-var secretURLParse = regexp.MustCompile(`^` +
-	fmt.Sprintf(
-		`((?P<controllerUUID>%s)/)?((?P<modelUUID>%s)/)?(?P<path>%s)(/(?P<revision>[0-9]+))?(?P<attribute>#[0-9a-zA-Z]+)?`,
-		uuidSnippet, uuidSnippet, pathSnippet) +
+var validUUID = regexp.MustCompile(uuidSnippet)
+
+var secretURIParse = regexp.MustCompile(`^` +
+	fmt.Sprintf(`((?P<source>%s)/)?(?P<id>%s)`, uuidSnippet, idSnippet) +
 	`$`)
 
-// ParseURL parses the specified URL string into a URL.
-func ParseURL(str string) (*URL, error) {
+// ParseURI parses the specified string into a URI.
+func ParseURI(str string) (*URI, error) {
 	u, err := url.Parse(str)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if u.Scheme != SecretScheme {
-		return nil, errors.NotValidf("secret URL scheme %q", u.Scheme)
+	if u.Scheme == "" {
+		u.Scheme = SecretScheme
+	} else if u.Scheme != SecretScheme {
+		return nil, errors.NotValidf("secret URI scheme %q", u.Scheme)
 	}
-	spec := fmt.Sprintf("%s%s", u.Host, u.Path)
+	if u.Host != "" && !validUUID.MatchString(u.Host) {
+		return nil, errors.NotValidf("host controller UUID %q", u.Host)
+	}
 
-	matches := secretURLParse.FindStringSubmatch(spec)
-	if matches == nil {
-		return nil, errors.NotValidf("secret URL %q", str)
+	idStr := strings.TrimLeft(u.Path, "/")
+	if idStr == "" {
+		idStr = u.Opaque
 	}
-	revision := 0
-	revisionParam := matches[9]
-	if revisionParam != "" {
-		revision, err = strconv.Atoi(strings.Trim(revisionParam, "/"))
-		if err != nil {
-			return nil, errors.NotValidf("secret revision %q", revisionParam)
-		}
+	valid := secretURIParse.MatchString(idStr)
+	if !valid {
+		return nil, errors.NotValidf("secret URI %q", str)
 	}
-	result := &URL{
-		ControllerUUID: matches[2],
-		ModelUUID:      matches[4],
-		Path:           matches[5],
-		Attribute:      u.Fragment,
-		Revision:       revision,
+	sourceUUID := secretURIParse.ReplaceAllString(idStr, "$source")
+	if sourceUUID == "" {
+		sourceUUID = u.Host
+	}
+	idPart := secretURIParse.ReplaceAllString(idStr, "$id")
+	id, err := xid.FromString(idPart)
+	if err != nil {
+		return nil, errors.NotValidf("secret URI %q", str)
+	}
+	result := &URI{
+		SourceUUID: sourceUUID,
+		ID:         id.String(),
 	}
 	return result, nil
 }
 
-// NewSimpleURL returns a URL with the specified path.
-func NewSimpleURL(path string) *URL {
-	return &URL{
-		Path: path,
+// NewURI returns a new secret URI.
+func NewURI() *URI {
+	return &URI{
+		ID: xid.New().String(),
 	}
 }
 
-// WithRevision returns the URL with the specified revision.
-func (u *URL) WithRevision(revision int) *URL {
-	if u == nil {
-		return nil
-	}
-	uCopy := *u
-	uCopy.Revision = revision
-	return &uCopy
+// WithSource returns a secret URI with the source.
+func (u *URI) WithSource(uuid string) *URI {
+	u.SourceUUID = uuid
+	return u
 }
 
-// WithAttribute returns the URL with the specified attribute.
-func (u *URL) WithAttribute(attr string) *URL {
-	if u == nil {
-		return nil
-	}
-	uCopy := *u
-	uCopy.Attribute = attr
-	return &uCopy
+// IsLocal returns true if this URI is local
+// to the specified uuid.
+func (u *URI) IsLocal(sourceUUID string) bool {
+	return u.SourceUUID == "" || u.SourceUUID == sourceUUID
 }
 
-// OwnerApplication returns the application part of a secret URL.
-func (u *URL) OwnerApplication() (string, bool) {
-	parts := strings.Split(u.Path, "/")
-	if len(parts) < 2 || parts[0] != AppSnippet {
-		return "", false
-	}
-	return parts[1], true
+// Name generates the secret name.
+func (u URI) Name(revision int) string {
+	return fmt.Sprintf("%s-%d", u.ID, revision)
 }
 
-// ID returns the URL string without any Attribute.
-func (u *URL) ID() string {
-	if u == nil {
-		return ""
-	}
-	return u.WithAttribute("").String()
-}
-
-// ShortString prints the URL without controller or model UUID.
-func (u *URL) ShortString() string {
-	if u == nil {
-		return ""
-	}
-	uCopy := *u
-	uCopy.ControllerUUID = ""
-	uCopy.ModelUUID = ""
-	return uCopy.String()
-}
-
-// String prints the URL as a string.
-func (u *URL) String() string {
+// String prints the URI as a string.
+func (u *URI) String() string {
 	if u == nil {
 		return ""
 	}
 	var fullPath []string
-	if u.ControllerUUID != "" {
-		fullPath = append(fullPath, u.ControllerUUID)
-	}
-	if u.ModelUUID != "" {
-		fullPath = append(fullPath, u.ModelUUID)
-	}
-	fullPath = append(fullPath, u.Path)
-	if u.Revision > 0 {
-		fullPath = append(fullPath, strconv.Itoa(u.Revision))
-	}
+	fullPath = append(fullPath, u.ID)
 	str := strings.Join(fullPath, "/")
+	if u.SourceUUID == "" {
+		urlValue := url.URL{
+			Scheme: SecretScheme,
+			Opaque: str,
+		}
+		return urlValue.String()
+	}
 	urlValue := url.URL{
-		Scheme:   SecretScheme,
-		Path:     str,
-		Fragment: u.Attribute,
+		Scheme: SecretScheme,
+		Host:   u.SourceUUID,
+		Path:   str,
 	}
 	return urlValue.String()
 }
@@ -248,32 +147,79 @@ func (u *URL) String() string {
 // SecretMetadata holds metadata about a secret.
 type SecretMetadata struct {
 	// Read only after creation.
-	URL  *URL
-	Path string
+	URI *URI
 
 	// Version starts at 1 and is incremented
 	// whenever an incompatible change is made.
 	Version int
 
 	// These can be updated after creation.
-	Status         SecretStatus
-	Description    string
-	Tags           map[string]string
-	RotateInterval time.Duration
+	Description  string
+	Label        string
+	RotatePolicy RotatePolicy
 
 	// Set by service on creation/update.
 
-	// ID is a Juju ID for the secret.
-	ID int
-
-	// Provider is the name of the backend secrets store.
-	Provider string
-	// ProviderID is the ID used by the underlying secrets provider.
-	ProviderID string
-	// Revision is incremented each time the corresponding
-	// secret value is changed.
-	Revision int
+	// OwnerTag is the entity which created the secret.
+	OwnerTag string
 
 	CreateTime time.Time
 	UpdateTime time.Time
+
+	// These are denormalised here for ease of access.
+
+	// LatestRevision is the most recent secret revision.
+	LatestRevision int
+	// LatestExpireTime is the expire time of the most recent revision.
+	LatestExpireTime *time.Time
+	// NextRotateTime is when the secret should be rotated.
+	NextRotateTime *time.Time
+}
+
+// SecretRevisionMetadata holds metadata about a secret revision.
+type SecretRevisionMetadata struct {
+	Revision    int
+	ValueRef    *ValueRef
+	BackendName *string
+	CreateTime  time.Time
+	UpdateTime  time.Time
+	ExpireTime  *time.Time
+}
+
+// SecretOwnerMetadata holds a secret metadata and any backend references of revisions.
+type SecretOwnerMetadata struct {
+	Metadata  SecretMetadata
+	Revisions []int
+}
+
+// SecretMetadataForDrain holds a secret metadata and any backend references of revisions for drain.
+type SecretMetadataForDrain struct {
+	Metadata  SecretMetadata
+	Revisions []SecretRevisionMetadata
+}
+
+// SecretConsumerMetadata holds metadata about a secret
+// for a consumer of the secret.
+type SecretConsumerMetadata struct {
+	// Label is used when notifying the consumer
+	// about changes to the secret.
+	Label string
+	// CurrentRevision is current revision the
+	// consumer wants to read.
+	CurrentRevision int
+	// LatestRevision is the latest secret revision.
+	LatestRevision int
+}
+
+// SecretRevisionInfo holds info used to read a secret vale.
+type SecretRevisionInfo struct {
+	Revision int
+	Label    string
+}
+
+// Filter is used when querying secrets.
+type Filter struct {
+	URI      *URI
+	Revision *int
+	OwnerTag *string
 }

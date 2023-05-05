@@ -4,6 +4,7 @@
 package provisioner
 
 import (
+	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/version/v2"
@@ -13,7 +14,6 @@ import (
 	apiwatcher "github.com/juju/juju/api/watcher"
 	"github.com/juju/juju/core/life"
 	corenetwork "github.com/juju/juju/core/network"
-	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/network"
 	"github.com/juju/juju/rpc/params"
@@ -82,7 +82,17 @@ func (st *State) machineLife(tag names.MachineTag) (life.Value, error) {
 	return common.OneLife(st.facade, tag)
 }
 
-// Machine provides access to methods of a state.Machine through the facade
+// ProvisioningInfo implements MachineProvisioner.ProvisioningInfo.
+func (st *State) ProvisioningInfo(machineTags []names.MachineTag) (params.ProvisioningInfoResults, error) {
+	var results params.ProvisioningInfoResults
+	args := params.Entities{Entities: transform.Slice(machineTags, func(t names.MachineTag) params.Entity {
+		return params.Entity{Tag: t.String()}
+	})}
+	err := st.facade.FacadeCall("ProvisioningInfo", args, &results)
+	return results, err
+}
+
+// Machines provides access to methods of a state.Machine through the facade
 // for the given tags.
 func (st *State) Machines(tags ...names.MachineTag) ([]MachineResult, error) {
 	lenTags := len(tags)
@@ -177,12 +187,10 @@ func (st *State) MachinesWithTransientErrors() ([]MachineStatusResult, error) {
 
 // FindTools returns al ist of tools matching the specified version number and
 // series, and, arch. If arch is blank, a default will be used.
-func (st *State) FindTools(v version.Number, series string, arch string) (tools.List, error) {
+func (st *State) FindTools(v version.Number, os string, arch string) (tools.List, error) {
 	args := params.FindToolsParams{
-		Number:       v,
-		OSType:       coreseries.DefaultOSTypeNameFromSeries(series),
-		MajorVersion: -1,
-		MinorVersion: -1,
+		Number: v,
+		OSType: os,
 	}
 	if arch != "" {
 		args.Arch = arch
@@ -292,9 +300,9 @@ func (st *State) DistributionGroupByMachineId(tags ...names.MachineTag) ([]Distr
 }
 
 // CACert returns the certificate used to validate the API and state connections.
-func (a *State) CACert() (string, error) {
+func (st *State) CACert() (string, error) {
 	var result params.BytesResult
-	err := a.facade.FacadeCall("CACert", nil, &result)
+	err := st.facade.FacadeCall("CACert", nil, &result)
 	if err != nil {
 		return "", err
 	}
@@ -335,9 +343,9 @@ func (st *State) GetContainerProfileInfo(containerTag names.MachineTag) ([]*LXDP
 
 // ModelUUID returns the model UUID to connect to the model
 // that the current connection is for.
-func (a *State) ModelUUID() (string, error) {
+func (st *State) ModelUUID() (string, error) {
 	var result params.StringResult
-	err := a.facade.FacadeCall("ModelUUID", nil, &result)
+	err := st.facade.FacadeCall("ModelUUID", nil, &result)
 	if err != nil {
 		return "", err
 	}

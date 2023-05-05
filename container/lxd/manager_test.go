@@ -23,6 +23,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/lxdprofile"
 	corenetwork "github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/context"
@@ -38,7 +39,7 @@ func Test(t *stdtesting.T) {
 type managerSuite struct {
 	lxdtesting.BaseSuite
 
-	cSvr           *lxdtesting.MockContainerServer
+	cSvr           *lxdtesting.MockInstanceServer
 	createRemoteOp *lxdtesting.MockRemoteOperation
 	deleteOp       *lxdtesting.MockOperation
 	startOp        *lxdtesting.MockOperation
@@ -59,10 +60,7 @@ func (s *managerSuite) makeManager(c *gc.C) {
 }
 
 func (s *managerSuite) makeManagerForConfig(c *gc.C, cfg container.ManagerConfig) {
-	svr, err := lxd.NewServer(s.cSvr)
-	c.Assert(err, jc.ErrorIsNil)
-
-	manager, err := lxd.NewContainerManager(cfg, svr)
+	manager, err := lxd.NewContainerManager(cfg, func() (*lxd.Server, error) { return lxd.NewServer(s.cSvr) })
 	c.Assert(err, jc.ErrorIsNil)
 	s.manager = manager
 }
@@ -89,11 +87,12 @@ func prepInstanceConfig(c *gc.C) *instancecfg.InstanceConfig {
 		"123",
 		"nonce",
 		"imagestream",
-		"xenial",
+		series.MakeDefaultBase("ubuntu", "16.04"),
 		apiInfo,
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	instancecfg.PopulateInstanceConfig(
+
+	err = instancecfg.PopulateInstanceConfig(
 		icfg,
 		"lxd",
 		"",
@@ -104,6 +103,8 @@ func prepInstanceConfig(c *gc.C) *instancecfg.InstanceConfig {
 		nil,
 		nil,
 	)
+	c.Assert(err, jc.ErrorIsNil)
+
 	list := coretools.List{
 		&coretools.Tools{Version: version.MustParseBinary("2.3.4-ubuntu-amd64")},
 	}
@@ -140,12 +141,12 @@ func (s *managerSuite) TestContainerCreateDestroy(c *gc.C) {
 
 	// Arrangements for the container creation.
 	s.expectCreateContainer(ctrl)
-	exp.UpdateContainerState(hostName, lxdapi.ContainerStatePut{Action: "start", Timeout: -1}, "").Return(s.startOp, nil)
+	exp.UpdateInstanceState(hostName, lxdapi.InstanceStatePut{Action: "start", Timeout: -1}, "").Return(s.startOp, nil)
 
-	exp.GetContainerState(hostName).Return(
-		&lxdapi.ContainerState{
+	exp.GetInstanceState(hostName).Return(
+		&lxdapi.InstanceState{
 			StatusCode: lxdapi.Running,
-			Network: map[string]lxdapi.ContainerStateNetwork{
+			Network: map[string]lxdapi.InstanceStateNetwork{
 				"fan0": {
 					Type: "fan",
 				},
@@ -156,22 +157,22 @@ func (s *managerSuite) TestContainerCreateDestroy(c *gc.C) {
 			},
 		}, lxdtesting.ETag, nil).Times(2)
 
-	exp.GetContainer(hostName).Return(&lxdapi.Container{Name: hostName}, lxdtesting.ETag, nil)
+	exp.GetInstance(hostName).Return(&lxdapi.Instance{Name: hostName, Type: "container"}, lxdtesting.ETag, nil)
 
 	// Arrangements for the container destruction.
-	stopReq := lxdapi.ContainerStatePut{
+	stopReq := lxdapi.InstanceStatePut{
 		Action:   "stop",
 		Timeout:  -1,
 		Stateful: false,
 		Force:    true,
 	}
 	gomock.InOrder(
-		exp.UpdateContainerState(hostName, stopReq, lxdtesting.ETag).Return(s.stopOp, nil),
-		exp.DeleteContainer(hostName).Return(s.deleteOp, nil),
+		exp.UpdateInstanceState(hostName, stopReq, lxdtesting.ETag).Return(s.stopOp, nil),
+		exp.DeleteInstance(hostName).Return(s.deleteOp, nil),
 	)
 
 	instance, hc, err := s.manager.CreateContainer(
-		iCfg, constraints.Value{}, "xenial", prepNetworkConfig(), &container.StorageConfig{}, lxdtesting.NoOpCallback,
+		iCfg, constraints.Value{}, series.MakeDefaultBase("ubuntu", "16.04"), prepNetworkConfig(), &container.StorageConfig{}, lxdtesting.NoOpCallback,
 	)
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -213,8 +214,8 @@ func (s *managerSuite) TestContainerCreateUpdateIPv4Network(c *gc.C) {
 	s.expectCreateContainer(ctrl)
 	s.expectStartOp(ctrl)
 
-	exp.UpdateContainerState(hostName, lxdapi.ContainerStatePut{Action: "start", Timeout: -1}, "").Return(s.startOp, nil)
-	exp.GetContainer(hostName).Return(&lxdapi.Container{Name: hostName}, lxdtesting.ETag, nil)
+	exp.UpdateInstanceState(hostName, lxdapi.InstanceStatePut{Action: "start", Timeout: -1}, "").Return(s.startOp, nil)
+	exp.GetInstance(hostName).Return(&lxdapi.Instance{Name: hostName, Type: "container"}, lxdtesting.ETag, nil)
 
 	// Supplying config for a single device with default bridge and without a
 	// CIDR will cause the default bridge to be updated with IPv4 config.
@@ -225,7 +226,7 @@ func (s *managerSuite) TestContainerCreateUpdateIPv4Network(c *gc.C) {
 		ParentInterfaceName: network.DefaultLXDBridge,
 	}})
 	_, _, err = s.manager.CreateContainer(
-		iCfg, constraints.Value{}, "xenial", netConfig, &container.StorageConfig{}, lxdtesting.NoOpCallback,
+		iCfg, constraints.Value{}, series.MakeDefaultBase("ubuntu", "16.04"), netConfig, &container.StorageConfig{}, lxdtesting.NoOpCallback,
 	)
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -240,13 +241,13 @@ func (s *managerSuite) TestCreateContainerCreateFailed(c *gc.C) {
 	s.expectGetImage(image, nil)
 
 	exp := s.cSvr.EXPECT()
-	exp.CreateContainerFromImage(s.cSvr, image, gomock.Any()).Return(s.createRemoteOp, nil)
+	exp.CreateInstanceFromImage(s.cSvr, image, gomock.Any()).Return(s.createRemoteOp, nil)
 
 	s.makeManager(c)
 	_, _, err := s.manager.CreateContainer(
 		prepInstanceConfig(c),
 		constraints.Value{},
-		"xenial",
+		series.MakeDefaultBase("ubuntu", "16.04"),
 		prepNetworkConfig(),
 		&container.StorageConfig{},
 		lxdtesting.NoOpCallback,
@@ -269,7 +270,7 @@ func (s *managerSuite) TestCreateContainerSpecCreationError(c *gc.C) {
 	_, _, err := s.manager.CreateContainer(
 		prepInstanceConfig(c),
 		constraints.Value{},
-		"xenial",
+		series.MakeDefaultBase("ubuntu", "16.04"),
 		prepNetworkConfig(),
 		&container.StorageConfig{},
 		lxdtesting.NoOpCallback,
@@ -293,16 +294,16 @@ func (s *managerSuite) TestCreateContainerStartFailed(c *gc.C) {
 
 	exp := s.cSvr.EXPECT()
 	gomock.InOrder(
-		exp.UpdateContainerState(
-			hostName, lxdapi.ContainerStatePut{Action: "start", Timeout: -1}, "").Return(s.updateOp, nil),
-		exp.GetContainerState(hostName).Return(&lxdapi.ContainerState{StatusCode: lxdapi.Stopped}, lxdtesting.ETag, nil),
-		exp.DeleteContainer(hostName).Return(s.deleteOp, nil),
+		exp.UpdateInstanceState(
+			hostName, lxdapi.InstanceStatePut{Action: "start", Timeout: -1}, "").Return(s.updateOp, nil),
+		exp.GetInstanceState(hostName).Return(&lxdapi.InstanceState{StatusCode: lxdapi.Stopped}, lxdtesting.ETag, nil),
+		exp.DeleteInstance(hostName).Return(s.deleteOp, nil),
 	)
 
 	_, _, err = s.manager.CreateContainer(
 		iCfg,
 		constraints.Value{},
-		"xenial",
+		series.MakeDefaultBase("ubuntu", "16.04"),
 		prepNetworkConfig(),
 		&container.StorageConfig{},
 		lxdtesting.NoOpCallback,
@@ -317,17 +318,17 @@ func (s *managerSuite) TestListContainers(c *gc.C) {
 	prefix := s.manager.Namespace().Prefix()
 	wrongPrefix := prefix[:len(prefix)-1] + "j"
 
-	containers := []lxdapi.Container{
-		{Name: "foobar"},
-		{Name: "definitely-not-a-juju-container"},
-		{Name: wrongPrefix + "-0"},
-		{Name: prefix + "-0"},
-		{Name: "please-disperse"},
-		{Name: prefix + "-1"},
-		{Name: "nothing-to-see-here-please"},
+	containers := []lxdapi.Instance{
+		{Name: "foobar", Type: "container"},
+		{Name: "definitely-not-a-juju-container", Type: "container"},
+		{Name: wrongPrefix + "-0", Type: "container"},
+		{Name: prefix + "-0", Type: "container"},
+		{Name: "please-disperse", Type: "container"},
+		{Name: prefix + "-1", Type: "container"},
+		{Name: "nothing-to-see-here-please", Type: "container"},
 	}
 
-	s.cSvr.EXPECT().GetContainers().Return(containers, nil)
+	s.cSvr.EXPECT().GetInstances(lxdapi.InstanceTypeAny).Return(containers, nil)
 
 	result, err := s.manager.ListContainers()
 	c.Assert(err, jc.ErrorIsNil)
@@ -337,10 +338,10 @@ func (s *managerSuite) TestListContainers(c *gc.C) {
 }
 
 func (s *managerSuite) TestIsInitialized(c *gc.C) {
-	defer s.setup(c).Finish()
+	mgr, err := lxd.NewContainerManager(getBaseConfig(), nil)
+	c.Assert(err, jc.ErrorIsNil)
 
-	s.makeManager(c)
-	c.Check(s.manager.IsInitialized(), gc.Equals, true)
+	c.Check(mgr.IsInitialized(), gc.Equals, lxd.SocketPath(lxd.IsUnixSocket) != "")
 }
 
 func (s *managerSuite) TestNetworkDevicesFromConfigWithEmptyParentDevice(c *gc.C) {
@@ -605,7 +606,7 @@ func (s *managerSuite) expectCreateContainer(ctrl *gomock.Controller) {
 	s.expectGetImage(image, nil)
 
 	exp := s.cSvr.EXPECT()
-	exp.CreateContainerFromImage(s.cSvr, image, gomock.Any()).Return(s.createRemoteOp, nil)
+	exp.CreateInstanceFromImage(s.cSvr, image, gomock.Any()).Return(s.createRemoteOp, nil)
 }
 
 // expectCreateRemoteOp is a convenience function for the expectations
@@ -631,7 +632,7 @@ func (s *managerSuite) expectGetImage(image lxdapi.Image, getImageErr error) {
 
 	exp := s.cSvr.EXPECT()
 	gomock.InOrder(
-		exp.GetImageAlias("juju/xenial/"+s.Arch()).Return(alias, lxdtesting.ETag, nil),
+		exp.GetImageAlias("juju/ubuntu@16.04/"+s.Arch()).Return(alias, lxdtesting.ETag, nil),
 		exp.GetImage(target).Return(&image, lxdtesting.ETag, getImageErr),
 	)
 }
@@ -674,17 +675,17 @@ func (s *managerSuite) expectUpdateContainerProfiles(old, new string, newProfile
 		cExp.GetProfileNames().Return(oldProfiles, nil),
 		cExp.CreateProfile(post).Return(nil),
 		cExp.GetProfile(post.Name).Return(&expProfile, "etag", nil),
-		cExp.GetContainer(instId).Return(
-			&lxdapi.Container{
-				ContainerPut: lxdapi.ContainerPut{
+		cExp.GetInstance(instId).Return(
+			&lxdapi.Instance{
+				InstancePut: lxdapi.InstancePut{
 					Profiles: oldProfiles,
 				},
 			}, "", nil),
-		cExp.UpdateContainer(instId, gomock.Any(), gomock.Any()).Return(s.updateOp, nil),
+		cExp.UpdateInstance(instId, gomock.Any(), gomock.Any()).Return(s.updateOp, nil),
 		cExp.DeleteProfile(old).Return(nil),
-		cExp.GetContainer(instId).Return(
-			&lxdapi.Container{
-				ContainerPut: lxdapi.ContainerPut{
+		cExp.GetInstance(instId).Return(
+			&lxdapi.Instance{
+				InstancePut: lxdapi.InstancePut{
 					Profiles: newProfiles,
 				},
 			}, "", nil),

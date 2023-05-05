@@ -4,8 +4,12 @@
 package charmhub
 
 import (
+	"bytes"
+	"encoding/json"
+
 	"github.com/golang/mock/gomock"
 	"github.com/juju/cmd/v3/cmdtesting"
+	"github.com/juju/errors"
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
@@ -49,7 +53,7 @@ func (s *infoSuite) TestInitFailCS(c *gc.C) {
 		charmHubCommand: &charmHubCommand{},
 	}
 	err := command.Init([]string{"cs:test"})
-	c.Assert(err, gc.ErrorMatches, "\"cs:test\" is not a Charm Hub charm")
+	c.Assert(errors.Is(err, errors.NotValid), jc.IsTrue)
 }
 
 func (s *infoSuite) TestRun(c *gc.C) {
@@ -82,8 +86,122 @@ func (s *infoSuite) TestRunJSON(c *gc.C) {
 	ctx := commandContextForTest(c)
 	err = command.Run(ctx)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `{"type":"charm","id":"charmCHARMcharmCHARMcharmCHARM01","name":"wordpress","description":"This will install and setup WordPress optimized to run in the cloud.","publisher":"Wordress Charmers","summary":"WordPress is a full featured web blogging tool, this charm deploys it.","series":["bionic","xenial"],"store-url":"https://someurl.com/wordpress","tags":["app","seven"],"charm":{"config":{"Options":{"agility-ratio":{"Type":"float","Description":"A number from 0 to 1 indicating agility.","Default":null},"outlook":{"Type":"string","Description":"No default outlook.","Default":null},"reticulate-splines":{"Type":"boolean","Description":"Whether to reticulate splines on launch, or not.","Default":null},"skill-level":{"Type":"int","Description":"A number indicating skill.","Default":null},"subtitle":{"Type":"string","Description":"An optional subtitle used for the application.","Default":""},"title":{"Type":"string","Description":"A descriptive title used for the application.","Default":"My Title"},"username":{"Type":"string","Description":"The name of the initial account (given admin permissions).","Default":"admin001"}}},"relations":{"provides":{"source":"dummy-token"},"requires":{"sink":"dummy-token"}},"used-by":["wordpress-everlast","wordpress-jorge","wordpress-site"]},"channel-map":{"latest/stable":{"released-at":"2019-12-16T19:44:44.076943+00:00","track":"latest","risk":"stable","revision":16,"size":12042240,"version":"1.0.3","architectures":["amd64"],"series":["bionic","xenial"]}},"tracks":["latest"]}
-`)
+	c.Assert(indentJSON(c, cmdtesting.Stdout(ctx)), gc.Equals, `
+{
+  "type": "charm",
+  "id": "charmCHARMcharmCHARMcharmCHARM01",
+  "name": "wordpress",
+  "description": "This will install and setup WordPress optimized to run in the cloud.",
+  "publisher": "WordPress Charmers",
+  "summary": "WordPress is a full featured web blogging tool, this charm deploys it.",
+  "supports": [
+    {
+      "name": "ubuntu",
+      "channel": "18.04"
+    },
+    {
+      "name": "ubuntu",
+      "channel": "16.04"
+    }
+  ],
+  "store-url": "https://someurl.com/wordpress",
+  "tags": [
+    "app",
+    "seven"
+  ],
+  "charm": {
+    "config": {
+      "Options": {
+        "agility-ratio": {
+          "Type": "float",
+          "Description": "A number from 0 to 1 indicating agility.",
+          "Default": null
+        },
+        "outlook": {
+          "Type": "string",
+          "Description": "No default outlook.",
+          "Default": null
+        },
+        "reticulate-splines": {
+          "Type": "boolean",
+          "Description": "Whether to reticulate splines on launch, or not.",
+          "Default": null
+        },
+        "skill-level": {
+          "Type": "int",
+          "Description": "A number indicating skill.",
+          "Default": null
+        },
+        "subtitle": {
+          "Type": "string",
+          "Description": "An optional subtitle used for the application.",
+          "Default": ""
+        },
+        "title": {
+          "Type": "string",
+          "Description": "A descriptive title used for the application.",
+          "Default": "My Title"
+        },
+        "username": {
+          "Type": "string",
+          "Description": "The name of the initial account (given admin permissions).",
+          "Default": "admin001"
+        }
+      }
+    },
+    "relations": {
+      "provides": {
+        "source": "dummy-token"
+      },
+      "requires": {
+        "sink": "dummy-token"
+      }
+    },
+    "used-by": [
+      "wordpress-everlast",
+      "wordpress-jorge",
+      "wordpress-site"
+    ]
+  },
+  "channels": {
+    "latest": {
+      "stable": [
+        {
+          "track": "latest",
+          "risk": "stable",
+          "version": "1.0.3",
+          "revision": 16,
+          "released-at": "2019-12-16T19:44:44.076943+00:00",
+          "size": 12042240,
+          "architectures": [
+            "amd64"
+          ],
+          "bases": [
+            {
+              "name": "ubuntu",
+              "channel": "18.04"
+            },
+            {
+              "name": "ubuntu",
+              "channel": "16.04"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "tracks": [
+    "latest"
+  ]
+}
+`[1:])
+}
+
+func indentJSON(c *gc.C, input string) string {
+	var buf bytes.Buffer
+	err := json.Indent(&buf, []byte(input), "", "  ")
+	c.Assert(err, gc.IsNil)
+	return buf.String()
 }
 
 func (s *infoSuite) TestRunJSONSpecifySeriesNotDefault(c *gc.C) {
@@ -100,8 +218,115 @@ func (s *infoSuite) TestRunJSONSpecifySeriesNotDefault(c *gc.C) {
 	ctx := commandContextForTest(c)
 	err = command.Run(ctx)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `{"type":"charm","id":"charmCHARMcharmCHARMcharmCHARM01","name":"wordpress","description":"This will install and setup WordPress optimized to run in the cloud.","publisher":"Wordress Charmers","summary":"WordPress is a full featured web blogging tool, this charm deploys it.","series":["bionic","xenial"],"store-url":"https://someurl.com/wordpress","tags":["app","seven"],"charm":{"config":{"Options":{"agility-ratio":{"Type":"float","Description":"A number from 0 to 1 indicating agility.","Default":null},"outlook":{"Type":"string","Description":"No default outlook.","Default":null},"reticulate-splines":{"Type":"boolean","Description":"Whether to reticulate splines on launch, or not.","Default":null},"skill-level":{"Type":"int","Description":"A number indicating skill.","Default":null},"subtitle":{"Type":"string","Description":"An optional subtitle used for the application.","Default":""},"title":{"Type":"string","Description":"A descriptive title used for the application.","Default":"My Title"},"username":{"Type":"string","Description":"The name of the initial account (given admin permissions).","Default":"admin001"}}},"relations":{"provides":{"source":"dummy-token"},"requires":{"sink":"dummy-token"}},"used-by":["wordpress-everlast","wordpress-jorge","wordpress-site"]},"channel-map":{"latest/stable":{"released-at":"2019-12-16T19:44:44.076943+00:00","track":"latest","risk":"stable","revision":16,"size":12042240,"version":"1.0.3","architectures":["amd64"],"series":["bionic","xenial"]}},"tracks":["latest"]}
-`)
+	c.Assert(indentJSON(c, cmdtesting.Stdout(ctx)), gc.Equals, `
+{
+  "type": "charm",
+  "id": "charmCHARMcharmCHARMcharmCHARM01",
+  "name": "wordpress",
+  "description": "This will install and setup WordPress optimized to run in the cloud.",
+  "publisher": "WordPress Charmers",
+  "summary": "WordPress is a full featured web blogging tool, this charm deploys it.",
+  "supports": [
+    {
+      "name": "ubuntu",
+      "channel": "18.04"
+    },
+    {
+      "name": "ubuntu",
+      "channel": "16.04"
+    }
+  ],
+  "store-url": "https://someurl.com/wordpress",
+  "tags": [
+    "app",
+    "seven"
+  ],
+  "charm": {
+    "config": {
+      "Options": {
+        "agility-ratio": {
+          "Type": "float",
+          "Description": "A number from 0 to 1 indicating agility.",
+          "Default": null
+        },
+        "outlook": {
+          "Type": "string",
+          "Description": "No default outlook.",
+          "Default": null
+        },
+        "reticulate-splines": {
+          "Type": "boolean",
+          "Description": "Whether to reticulate splines on launch, or not.",
+          "Default": null
+        },
+        "skill-level": {
+          "Type": "int",
+          "Description": "A number indicating skill.",
+          "Default": null
+        },
+        "subtitle": {
+          "Type": "string",
+          "Description": "An optional subtitle used for the application.",
+          "Default": ""
+        },
+        "title": {
+          "Type": "string",
+          "Description": "A descriptive title used for the application.",
+          "Default": "My Title"
+        },
+        "username": {
+          "Type": "string",
+          "Description": "The name of the initial account (given admin permissions).",
+          "Default": "admin001"
+        }
+      }
+    },
+    "relations": {
+      "provides": {
+        "source": "dummy-token"
+      },
+      "requires": {
+        "sink": "dummy-token"
+      }
+    },
+    "used-by": [
+      "wordpress-everlast",
+      "wordpress-jorge",
+      "wordpress-site"
+    ]
+  },
+  "channels": {
+    "latest": {
+      "stable": [
+        {
+          "track": "latest",
+          "risk": "stable",
+          "version": "1.0.3",
+          "revision": 16,
+          "released-at": "2019-12-16T19:44:44.076943+00:00",
+          "size": 12042240,
+          "architectures": [
+            "amd64"
+          ],
+          "bases": [
+            {
+              "name": "ubuntu",
+              "channel": "18.04"
+            },
+            {
+              "name": "ubuntu",
+              "channel": "16.04"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "tracks": [
+    "latest"
+  ]
+}
+`[1:])
 }
 
 func (s *infoSuite) TestRunJSONSpecifyArch(c *gc.C) {
@@ -118,8 +343,115 @@ func (s *infoSuite) TestRunJSONSpecifyArch(c *gc.C) {
 	ctx := commandContextForTest(c)
 	err = command.Run(ctx)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `{"type":"charm","id":"charmCHARMcharmCHARMcharmCHARM01","name":"wordpress","description":"This will install and setup WordPress optimized to run in the cloud.","publisher":"Wordress Charmers","summary":"WordPress is a full featured web blogging tool, this charm deploys it.","series":["bionic","xenial"],"store-url":"https://someurl.com/wordpress","tags":["app","seven"],"charm":{"config":{"Options":{"agility-ratio":{"Type":"float","Description":"A number from 0 to 1 indicating agility.","Default":null},"outlook":{"Type":"string","Description":"No default outlook.","Default":null},"reticulate-splines":{"Type":"boolean","Description":"Whether to reticulate splines on launch, or not.","Default":null},"skill-level":{"Type":"int","Description":"A number indicating skill.","Default":null},"subtitle":{"Type":"string","Description":"An optional subtitle used for the application.","Default":""},"title":{"Type":"string","Description":"A descriptive title used for the application.","Default":"My Title"},"username":{"Type":"string","Description":"The name of the initial account (given admin permissions).","Default":"admin001"}}},"relations":{"provides":{"source":"dummy-token"},"requires":{"sink":"dummy-token"}},"used-by":["wordpress-everlast","wordpress-jorge","wordpress-site"]},"channel-map":{"latest/stable":{"released-at":"2019-12-16T19:44:44.076943+00:00","track":"latest","risk":"stable","revision":16,"size":12042240,"version":"1.0.3","architectures":["amd64"],"series":["bionic","xenial"]}},"tracks":["latest"]}
-`)
+	c.Assert(indentJSON(c, cmdtesting.Stdout(ctx)), gc.Equals, `
+{
+  "type": "charm",
+  "id": "charmCHARMcharmCHARMcharmCHARM01",
+  "name": "wordpress",
+  "description": "This will install and setup WordPress optimized to run in the cloud.",
+  "publisher": "WordPress Charmers",
+  "summary": "WordPress is a full featured web blogging tool, this charm deploys it.",
+  "supports": [
+    {
+      "name": "ubuntu",
+      "channel": "18.04"
+    },
+    {
+      "name": "ubuntu",
+      "channel": "16.04"
+    }
+  ],
+  "store-url": "https://someurl.com/wordpress",
+  "tags": [
+    "app",
+    "seven"
+  ],
+  "charm": {
+    "config": {
+      "Options": {
+        "agility-ratio": {
+          "Type": "float",
+          "Description": "A number from 0 to 1 indicating agility.",
+          "Default": null
+        },
+        "outlook": {
+          "Type": "string",
+          "Description": "No default outlook.",
+          "Default": null
+        },
+        "reticulate-splines": {
+          "Type": "boolean",
+          "Description": "Whether to reticulate splines on launch, or not.",
+          "Default": null
+        },
+        "skill-level": {
+          "Type": "int",
+          "Description": "A number indicating skill.",
+          "Default": null
+        },
+        "subtitle": {
+          "Type": "string",
+          "Description": "An optional subtitle used for the application.",
+          "Default": ""
+        },
+        "title": {
+          "Type": "string",
+          "Description": "A descriptive title used for the application.",
+          "Default": "My Title"
+        },
+        "username": {
+          "Type": "string",
+          "Description": "The name of the initial account (given admin permissions).",
+          "Default": "admin001"
+        }
+      }
+    },
+    "relations": {
+      "provides": {
+        "source": "dummy-token"
+      },
+      "requires": {
+        "sink": "dummy-token"
+      }
+    },
+    "used-by": [
+      "wordpress-everlast",
+      "wordpress-jorge",
+      "wordpress-site"
+    ]
+  },
+  "channels": {
+    "latest": {
+      "stable": [
+        {
+          "track": "latest",
+          "risk": "stable",
+          "version": "1.0.3",
+          "revision": 16,
+          "released-at": "2019-12-16T19:44:44.076943+00:00",
+          "size": 12042240,
+          "architectures": [
+            "amd64"
+          ],
+          "bases": [
+            {
+              "name": "ubuntu",
+              "channel": "18.04"
+            },
+            {
+              "name": "ubuntu",
+              "channel": "16.04"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "tracks": [
+    "latest"
+  ]
+}
+`[1:])
 }
 
 func (s *infoSuite) TestRunJSONWithSeriesFoundChannel(c *gc.C) {
@@ -136,8 +468,89 @@ func (s *infoSuite) TestRunJSONWithSeriesFoundChannel(c *gc.C) {
 	ctx := commandContextForTest(c)
 	err = command.Run(ctx)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `{"type":"charm","id":"charmCHARMcharmCHARMcharmCHARM01","name":"wordpress","description":"This will install and setup WordPress optimized to run in the cloud.","publisher":"Wordress Charmers","summary":"WordPress is a full featured web blogging tool, this charm deploys it.","series":["bionic","xenial"],"store-url":"https://someurl.com/wordpress","tags":["app","seven"],"charm":{"config":{"Options":{"agility-ratio":{"Type":"float","Description":"A number from 0 to 1 indicating agility.","Default":null},"outlook":{"Type":"string","Description":"No default outlook.","Default":null},"reticulate-splines":{"Type":"boolean","Description":"Whether to reticulate splines on launch, or not.","Default":null},"skill-level":{"Type":"int","Description":"A number indicating skill.","Default":null},"subtitle":{"Type":"string","Description":"An optional subtitle used for the application.","Default":""},"title":{"Type":"string","Description":"A descriptive title used for the application.","Default":"My Title"},"username":{"Type":"string","Description":"The name of the initial account (given admin permissions).","Default":"admin001"}}},"relations":{"provides":{"source":"dummy-token"},"requires":{"sink":"dummy-token"}},"used-by":["wordpress-everlast","wordpress-jorge","wordpress-site"]},"channel-map":{},"tracks":["latest"]}
-`)
+	c.Assert(indentJSON(c, cmdtesting.Stdout(ctx)), gc.Equals, `
+{
+  "type": "charm",
+  "id": "charmCHARMcharmCHARMcharmCHARM01",
+  "name": "wordpress",
+  "description": "This will install and setup WordPress optimized to run in the cloud.",
+  "publisher": "WordPress Charmers",
+  "summary": "WordPress is a full featured web blogging tool, this charm deploys it.",
+  "supports": [
+    {
+      "name": "ubuntu",
+      "channel": "18.04"
+    },
+    {
+      "name": "ubuntu",
+      "channel": "16.04"
+    }
+  ],
+  "store-url": "https://someurl.com/wordpress",
+  "tags": [
+    "app",
+    "seven"
+  ],
+  "charm": {
+    "config": {
+      "Options": {
+        "agility-ratio": {
+          "Type": "float",
+          "Description": "A number from 0 to 1 indicating agility.",
+          "Default": null
+        },
+        "outlook": {
+          "Type": "string",
+          "Description": "No default outlook.",
+          "Default": null
+        },
+        "reticulate-splines": {
+          "Type": "boolean",
+          "Description": "Whether to reticulate splines on launch, or not.",
+          "Default": null
+        },
+        "skill-level": {
+          "Type": "int",
+          "Description": "A number indicating skill.",
+          "Default": null
+        },
+        "subtitle": {
+          "Type": "string",
+          "Description": "An optional subtitle used for the application.",
+          "Default": ""
+        },
+        "title": {
+          "Type": "string",
+          "Description": "A descriptive title used for the application.",
+          "Default": "My Title"
+        },
+        "username": {
+          "Type": "string",
+          "Description": "The name of the initial account (given admin permissions).",
+          "Default": "admin001"
+        }
+      }
+    },
+    "relations": {
+      "provides": {
+        "source": "dummy-token"
+      },
+      "requires": {
+        "sink": "dummy-token"
+      }
+    },
+    "used-by": [
+      "wordpress-everlast",
+      "wordpress-jorge",
+      "wordpress-site"
+    ]
+  },
+  "channels": {},
+  "tracks": [
+    "latest"
+  ]
+}
+`[1:])
 }
 
 func (s *infoSuite) TestRunYAML(c *gc.C) {
@@ -159,11 +572,13 @@ type: charm
 id: charmCHARMcharmCHARMcharmCHARM01
 name: wordpress
 description: This will install and setup WordPress optimized to run in the cloud.
-publisher: Wordress Charmers
+publisher: WordPress Charmers
 summary: WordPress is a full featured web blogging tool, this charm deploys it.
-series:
-- bionic
-- xenial
+supports:
+- name: ubuntu
+  channel: "18.04"
+- name: ubuntu
+  channel: "16.04"
 store-url: https://someurl.com/wordpress
 tags:
 - app
@@ -204,19 +619,22 @@ charm:
   - wordpress-everlast
   - wordpress-jorge
   - wordpress-site
-channel-map:
-  latest/stable:
-    released-at: "2019-12-16T19:44:44.076943+00:00"
-    track: latest
-    risk: stable
-    revision: 16
-    size: 12042240
-    version: 1.0.3
-    architectures:
-    - amd64
-    series:
-    - bionic
-    - xenial
+channels:
+  latest:
+    stable:
+    - track: latest
+      risk: stable
+      version: 1.0.3
+      revision: 16
+      released-at: "2019-12-16T19:44:44.076943+00:00"
+      size: 12042240
+      architectures:
+      - amd64
+      bases:
+      - name: ubuntu
+        channel: "18.04"
+      - name: ubuntu
+        channel: "16.04"
 tracks:
 - latest
 `[1:])
@@ -244,7 +662,7 @@ func (s *infoSuite) expectInfo() {
 		ID:   "charmCHARMcharmCHARMcharmCHARM01",
 		Entity: transport.Entity{
 			Description: "This will install and setup WordPress optimized to run in the cloud.",
-			Publisher:   map[string]string{"display-name": "Wordress Charmers"},
+			Publisher:   map[string]string{"display-name": "WordPress Charmers"},
 			Summary:     "WordPress is a full featured web blogging tool, this charm deploys it.",
 			StoreURL:    "https://someurl.com/wordpress",
 			Categories: []transport.Category{{
@@ -260,8 +678,12 @@ func (s *infoSuite) expectInfo() {
 		},
 		DefaultRelease: transport.InfoChannelMap{
 			Revision: transport.InfoRevision{
-				MetadataYAML: entityMeta,
 				ConfigYAML:   entityConfig,
+				MetadataYAML: entityMeta,
+				Bases: []transport.Base{
+					{Name: "ubuntu", Channel: "18.04"},
+					{Name: "ubuntu", Channel: "16.04"},
+				},
 			},
 		},
 		ChannelMap: []transport.InfoChannelMap{{
@@ -299,7 +721,6 @@ description: |
   This will install and setup services optimized to run in the cloud.
   By default it will place Ngnix configured to scale horizontally
   with Nginx's reverse proxy.
-series: [bionic, xenial]
 provides:
   source:
     interface: dummy-token

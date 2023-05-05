@@ -1,13 +1,10 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package storage contains the storage subsystem for the uniter, responding
-// to changes in storage attachments (lifecycle, volume/filesystem details)
-// by queuing hooks and managing the storage attachments' lifecycle.
 package storage
 
 import (
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 
@@ -46,7 +43,6 @@ type Attachments struct {
 	st      StorageAccessor
 	unitTag names.UnitTag
 	abort   <-chan struct{}
-	stateRW UnitStateReadWriter
 
 	// pending is the set of tags for storage attachments
 	// for which no hooks have been run.

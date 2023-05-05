@@ -9,10 +9,10 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
-	jujutxn "github.com/juju/txn/v2"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
+	jujutxn "github.com/juju/txn/v3"
 
 	corenetwork "github.com/juju/juju/core/network"
 )
@@ -307,54 +307,6 @@ func parseLinkLayerDeviceParentNameAsGlobalKey(parentName string) (hostMachineID
 	return hostMachineID, parentDeviceName, nil
 }
 
-func (m *Machine) verifyHostMachineParentDeviceExistsAndIsABridgeDevice(hostMachineID, parentDeviceName string) error {
-	hostMachine, err := m.st.Machine(hostMachineID)
-	if errors.IsNotFound(err) || err == nil && hostMachine.Life() != Alive {
-		return errors.Errorf("host machine %q of parent device %q not found or not alive", hostMachineID, parentDeviceName)
-	} else if err != nil {
-		return errors.Trace(err)
-	}
-
-	parentDevice, err := hostMachine.LinkLayerDevice(parentDeviceName)
-	if errors.IsNotFound(err) {
-		return errors.NotFoundf("parent device %q on host machine %q", parentDeviceName, hostMachineID)
-	} else if err != nil {
-		return errors.Trace(err)
-	}
-
-	if !parentDevice.isBridge() {
-		errorMessage := fmt.Sprintf(
-			"parent device %q on host machine %q must be of type %q, not type %q",
-			parentDeviceName, hostMachineID, corenetwork.BridgeDevice, parentDevice.Type(),
-		)
-		return errors.NewNotValid(nil, errorMessage)
-	}
-	return nil
-}
-
-func (m *Machine) validateParentDeviceNameWhenNotAGlobalKey(args *LinkLayerDeviceArgs) error {
-	if !corenetwork.IsValidLinkLayerDeviceName(args.ParentName) {
-		logger.Warningf(
-			"parent link-layer device %q on machine %q has invalid name (using anyway)",
-			args.ParentName, m.Id(),
-		)
-	}
-	if args.Name == args.ParentName {
-		return errors.NewNotValid(nil, "Name and ParentName must be different")
-	}
-	if err := m.verifyParentDeviceExists(args.ParentName); err != nil {
-		return errors.Trace(err)
-	}
-	return nil
-}
-
-func (m *Machine) verifyParentDeviceExists(parentName string) error {
-	if _, err := m.LinkLayerDevice(parentName); err != nil {
-		return errors.Trace(err)
-	}
-	return nil
-}
-
 func (m *Machine) newLinkLayerDeviceDocFromArgs(args *LinkLayerDeviceArgs) *linkLayerDeviceDoc {
 	linkLayerDeviceDocID := linkLayerDeviceDocIDFromName(m.st, m.doc.Id, args.Name)
 
@@ -561,13 +513,13 @@ func (a *LinkLayerDeviceAddress) addressAndSubnet() (string, string, error) {
 // transaction. ProviderID field can be empty if not supported by the provider,
 // but when set must be unique within the model. Errors are returned in the
 // following cases:
-// - Machine is no longer alive or is missing;
-// - Subnet inferred from any CIDRAddress field in args is known but no longer
-//   alive (no error reported if the CIDRAddress does not match a known subnet);
-// - Model no longer alive;
-// - errors.NotValidError, when any of the fields in args contain invalid values;
-// - errors.NotFoundError, when any DeviceName in args refers to unknown device;
-// - ErrProviderIDNotUnique, when one or more specified ProviderIDs are not unique.
+//   - Machine is no longer alive or is missing;
+//   - Subnet inferred from any CIDRAddress field in args is known but no longer
+//     alive (no error reported if the CIDRAddress does not match a known subnet);
+//   - Model no longer alive;
+//   - errors.NotValidError, when any of the fields in args contain invalid values;
+//   - errors.NotFoundError, when any DeviceName in args refers to unknown device;
+//   - ErrProviderIDNotUnique, when one or more specified ProviderIDs are not unique.
 //
 // Deprecated: (manadart 2021-05-04) This method is only used by tests and is in
 // the process of removal. Do not add new usages of it.

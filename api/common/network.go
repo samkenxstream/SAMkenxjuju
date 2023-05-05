@@ -20,19 +20,19 @@ var logger = loggo.GetLogger("juju.api.common")
 // []params.NetworkConfig. In addition to what the source returns, a few
 // additional transformations are done:
 //
-// * On any OS, the state (UP/DOWN) of each interface and the DeviceIndex field,
-//   will be correctly populated. Loopback interfaces are also properly detected
-//   and will have InterfaceType set LoopbackInterface.
-// * On Linux only, the InterfaceType field will be reliably detected for a few
-//   types: BondInterface, BridgeInterface, VLAN_8021QInterface.
-// * Also on Linux, for interfaces that are discovered to be ports on a bridge,
-//   the ParentInterfaceName will be populated with the name of the bridge.
-// * ConfigType fields will be set to ConfigManual when no address is detected,
-//   or ConfigStatic when it is.
-// * NICs that correspond to the internal port of an OVS-managed switch will
-//   have their type forced to bridge and their virtual port type set to
-//   OvsPort.
-// * TODO: IPv6 link-local addresses will be ignored and treated as empty ATM.
+//   - On any OS, the state (UP/DOWN) of each interface and the DeviceIndex field,
+//     will be correctly populated. Loopback interfaces are also properly detected
+//     and will have InterfaceType set LoopbackInterface.
+//   - On Linux only, the InterfaceType field will be reliably detected for a few
+//     types: BondInterface, BridgeInterface, VLAN_8021QInterface.
+//   - Also on Linux, for interfaces that are discovered to be ports on a bridge,
+//     the ParentInterfaceName will be populated with the name of the bridge.
+//   - ConfigType fields will be set to ConfigManual when no address is detected,
+//     or ConfigStatic when it is.
+//   - NICs that correspond to the internal port of an OVS-managed switch will
+//     have their type forced to bridge and their virtual port type set to
+//     OvsPort.
+//   - TODO: IPv6 link-local addresses will be ignored and treated as empty ATM.
 func GetObservedNetworkConfig(source network.ConfigSource) ([]params.NetworkConfig, error) {
 	logger.Tracef("discovering observed machine network config...")
 
@@ -156,17 +156,18 @@ func addressesToConfig(nic params.NetworkConfig, nicAddrs []network.ConfigSource
 			continue
 		}
 
-		addr := params.Address{
-			Value:       ip.String(),
-			ConfigType:  nic.ConfigType,
-			IsSecondary: nicAddr.IsSecondary(),
+		opts := []func(mutator network.AddressMutator){
+			network.WithConfigType(network.AddressConfigType(nic.ConfigType)),
+			network.WithSecondary(nicAddr.IsSecondary()),
 		}
 
 		if ipNet := nicAddr.IPNet(); ipNet != nil && ipNet.Mask != nil {
-			addr.CIDR = network.NetworkCIDRFromIPAndMask(ip, ipNet.Mask)
+			opts = append(opts, network.WithCIDR(network.NetworkCIDRFromIPAndMask(ip, ipNet.Mask)))
 		}
 
-		res = append(res, addr)
+		// Constructing a core network.Address like this first,
+		// then converting, populates the scope and type.
+		res = append(res, params.FromMachineAddress(network.NewMachineAddress(ip.String(), opts...)))
 	}
 
 	return res, nil

@@ -9,7 +9,7 @@
 // 	- copy all tools and related to agents and setup the links
 // 	- start all the agents
 // These routines can be used by any tools/cmds trying to implement the above
-// functionality as part of the process, eg. upgrade-series.
+// functionality as part of the process, eg. upgrade-machine.
 
 // TODO (manadart 2018-07-31) This module is specific to systemd and should
 // reside in the service/systemd package.
@@ -191,24 +191,6 @@ func (s *systemdServiceManager) CreateAgentConf(name string, dataDir string) (_ 
 	srvPath := path.Join(paths.NixLogDir, "juju")
 	info := NewAgentInfo(kind, tag.Id(), dataDir, srvPath)
 	return AgentConf(info, renderer), nil
-}
-
-func (s *systemdServiceManager) startAgent(name string, kind AgentKind, dataDir string) (err error) {
-	renderer, err := shell.NewRenderer("")
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	srvPath := path.Join(paths.NixLogDir, "juju")
-	info := NewAgentInfo(kind, name, dataDir, srvPath)
-	conf := AgentConf(info, renderer)
-
-	svc, err := s.newService(serviceName(name), conf)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	return errors.Trace(svc.Start())
 }
 
 func serviceName(agent string) string {

@@ -71,7 +71,11 @@ func (s *supportedInfo) compile(now time.Time) error {
 		// false when reading in the distro information. Setting OverrideSupport
 		// to true, will force it to be the same value as the default.
 		if !version.IgnoreDistroInfoUpdate {
-			supported = distroInfo.Supported(now)
+			if current {
+				// We only want to update the previously supported to possibly deprecated.
+				// But we do not want to update a Juju deprecated LTS to supported again.
+				supported = distroInfo.Supported(now)
+			}
 		}
 
 		s.values[seriesName] = seriesVersion{
@@ -134,7 +138,6 @@ func (s *supportedInfo) controllerSeries() []string {
 		if version.WorkloadType != ControllerWorkloadType {
 			continue
 		}
-
 		if version.ESMSupported || version.Supported {
 			result = append(result, namedSeries.Name.String())
 		}
@@ -155,6 +158,24 @@ func (s *supportedInfo) workloadSeries(includeUnsupported bool) []string {
 		}
 		if includeUnsupported || version.ESMSupported || version.Supported {
 			result = append(result, namedSeries.Name.String())
+		}
+	}
+	return result
+}
+
+// workloadVersions returns a slice of versions that are supported to run on a
+// target workload (charm).
+// Note: workload series will also include controller workload types, as they
+// can also be used for workloads.
+func (s *supportedInfo) workloadVersions(includeUnsupported bool) []string {
+	var result []string
+	for _, namedSeries := range s.namedSeries() {
+		version := namedSeries.SeriesVersion
+		if version.WorkloadType == UnsupportedWorkloadType {
+			continue
+		}
+		if includeUnsupported || version.ESMSupported || version.Supported {
+			result = append(result, version.Version)
 		}
 	}
 	return result
@@ -250,6 +271,8 @@ const (
 	Hirsute SeriesName = "hirsute"
 	Impish  SeriesName = "impish"
 	Jammy   SeriesName = "jammy"
+	Kinetic SeriesName = "kinetic"
+	Lunar   SeriesName = "lunar"
 )
 
 var ubuntuSeries = map[SeriesName]seriesVersion{
@@ -273,7 +296,6 @@ var ubuntuSeries = map[SeriesName]seriesVersion{
 		WorkloadType: ControllerWorkloadType,
 		Version:      "14.04",
 		LTS:          true,
-		ESMSupported: true,
 	},
 	Utopic: {
 		WorkloadType: ControllerWorkloadType,
@@ -291,7 +313,6 @@ var ubuntuSeries = map[SeriesName]seriesVersion{
 		WorkloadType: ControllerWorkloadType,
 		Version:      "16.04",
 		LTS:          true,
-		ESMSupported: true,
 	},
 	Yakkety: {
 		WorkloadType: ControllerWorkloadType,
@@ -309,7 +330,6 @@ var ubuntuSeries = map[SeriesName]seriesVersion{
 		WorkloadType: ControllerWorkloadType,
 		Version:      "18.04",
 		LTS:          true,
-		ESMSupported: true,
 	},
 	Cosmic: {
 		WorkloadType: ControllerWorkloadType,
@@ -349,6 +369,14 @@ var ubuntuSeries = map[SeriesName]seriesVersion{
 		Supported:    true,
 		ESMSupported: true,
 	},
+	Kinetic: {
+		WorkloadType: ControllerWorkloadType,
+		Version:      "22.10",
+	},
+	Lunar: {
+		WorkloadType: ControllerWorkloadType,
+		Version:      "23.04",
+	},
 }
 
 const (
@@ -362,17 +390,17 @@ const (
 var centosSeries = map[SeriesName]seriesVersion{
 	Centos7: {
 		WorkloadType: OtherWorkloadType,
-		Version:      "centos7",
+		Version:      "7",
 		Supported:    true,
 	},
 	Centos8: {
 		WorkloadType: OtherWorkloadType,
-		Version:      "centos8",
+		Version:      "8",
 		Supported:    true,
 	},
 	Centos9: {
 		WorkloadType: OtherWorkloadType,
-		Version:      "centos9",
+		Version:      "9",
 		Supported:    true,
 	},
 }

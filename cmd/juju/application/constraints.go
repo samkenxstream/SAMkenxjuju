@@ -29,16 +29,12 @@ Application constraints are combined with model constraints, set with ` +
 	"`juju \nset-model-constraints`" + `, for commands (such as 'deploy') that provision
 machines for applications. Where model and application constraints overlap, the
 application constraints take precedence.
-Constraints for a specific model can be viewed with ` + "`juju get-model-\nconstraints`" + `.
+Constraints for a specific model can be viewed with ` + "`juju model-\nconstraints`" + `.`
 
-Examples:
-    juju get-constraints mysql
-    juju get-constraints -m mymodel apache2
-
-See also: 
-    set-constraints
-    get-model-constraints
-    set-model-constraints`
+const usageGetConstraintsExamples = `
+    juju constraints mysql
+    juju constraints -m mymodel apache2
+`
 
 var usageSetConstraintsSummary = `
 Sets machine constraints for an application.`[1:]
@@ -47,26 +43,23 @@ Sets machine constraints for an application.`[1:]
 // commands for ease in markdown.
 var usageSetConstraintsDetails = `
 Sets constraints for an application, which are used for all new machines 
-provisioned for that application. They can be viewed with `[1:] + "`juju get-\nconstraints`" + `.
+provisioned for that application. They can be viewed with `[1:] + "`juju constraints`" + `.
 By default, the model is the current model.
 Application constraints are combined with model constraints, set with ` +
 	"`juju \nset-model-constraints`" + `, for commands (such as 'juju deploy') that 
 provision machines for applications. Where model and application constraints
 overlap, the application constraints take precedence.
-Constraints for a specific model can be viewed with ` + "`juju get-model-\nconstraints`" + `.
+Constraints for a specific model can be viewed with ` + "`juju model-constraints`" + `.
 This command requires that the application to have at least one unit. To apply 
 constraints to
 the first unit set them at the model level or pass them as an argument
 when deploying.
+`
 
-Examples:
+const usageSetConstraintsExamples = `
     juju set-constraints mysql mem=8G cores=4
     juju set-constraints -m mymodel apache2 mem=8G arch=amd64
-
-See also: 
-    get-constraints
-    get-model-constraints
-    set-model-constraints`
+`
 
 // NewApplicationGetConstraintsCommand returns a command which gets application constraints.
 func NewApplicationGetConstraintsCommand() modelcmd.ModelCommand {
@@ -103,15 +96,21 @@ type applicationGetConstraintsCommand struct {
 
 func (c *applicationGetConstraintsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "get-constraints",
-		Args:    "<application>",
-		Purpose: usageGetConstraintsSummary,
-		Doc:     usageGetConstraintsDetails,
+		Name:     "constraints",
+		Args:     "<application>",
+		Purpose:  usageGetConstraintsSummary,
+		Doc:      usageGetConstraintsDetails,
+		Examples: usageGetConstraintsExamples,
+		SeeAlso: []string{
+			"set-constraints",
+			"model-constraints",
+			"set-model-constraints",
+		},
 	})
 }
 
 func formatConstraints(writer io.Writer, value interface{}) error {
-	fmt.Fprint(writer, value.(constraints.Value).String())
+	fmt.Fprintln(writer, value.(constraints.Value).String())
 	return nil
 }
 
@@ -162,10 +161,16 @@ func NewApplicationSetConstraintsCommand() modelcmd.ModelCommand {
 
 func (c *applicationSetConstraintsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "set-constraints",
-		Args:    "<application> <constraint>=<value> ...",
-		Purpose: usageSetConstraintsSummary,
-		Doc:     usageSetConstraintsDetails,
+		Name:     "set-constraints",
+		Args:     "<application> <constraint>=<value> ...",
+		Purpose:  usageSetConstraintsSummary,
+		Doc:      usageSetConstraintsDetails,
+		Examples: usageSetConstraintsExamples,
+		SeeAlso: []string{
+			"constraints",
+			"model-constraints",
+			"set-model-constraints",
+		},
 	})
 }
 

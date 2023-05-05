@@ -35,7 +35,7 @@ func (s *bridgePolicyStateSuite) SetUpTest(c *gc.C) {
 	s.StateSuite.SetUpTest(c)
 
 	var err error
-	m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	s.machine = containerizer.NewMachine(m)
 }
@@ -43,8 +43,8 @@ func (s *bridgePolicyStateSuite) SetUpTest(c *gc.C) {
 func (s *bridgePolicyStateSuite) addContainerMachine(c *gc.C) {
 	// Add a container machine with s.machine as its host.
 	containerTemplate := state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
 	container, err := s.State.AddMachineInsideMachine(containerTemplate, s.machine.Id(), instance.LXD)
 	c.Assert(err, jc.ErrorIsNil)
@@ -170,8 +170,6 @@ func (s *bridgePolicyStateSuite) createLoopbackNIC(c *gc.C, machine containerize
 func (s *bridgePolicyStateSuite) createAllDefaultDevices(c *gc.C, machine containerizer.Machine) {
 	// loopback
 	s.createLoopbackNIC(c, machine)
-	// container.DefaultLxcBridge
-	s.createBridgeWithIP(c, machine, "lxcbr0", "10.0.3.1/24")
 	// container.DefaultLxdBridge
 	s.createBridgeWithIP(c, machine, "lxdbr0", "10.0.4.1/24")
 	// container.DefaultKvmBridge
@@ -779,7 +777,9 @@ func (s *bridgePolicyStateSuite) TestFindMissingBridgesForContainerContainerNetw
 	// machine. Triggers the fallback code to have us bridge all devices.
 	missing, reconfigureDelay, err := bridgePolicy.FindMissingBridgesForContainer(s.machine, s.containerMachine)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Check(missing, jc.DeepEquals, []network.DeviceToBridge{})
+	c.Check(missing, jc.DeepEquals, []network.DeviceToBridge{
+		{DeviceName: "ens3", BridgeName: "br-ens3", MACAddress: ""},
+	})
 	c.Check(reconfigureDelay, gc.Equals, 0)
 }
 
@@ -1201,6 +1201,7 @@ func (g configGetter) Config() *config.Config {
 		config.NameKey:                    "some-model",
 		config.TypeKey:                    "some-cloud",
 		config.UUIDKey:                    utils.MustNewUUID().String(),
+		config.SecretBackendKey:           "auto",
 		config.NetBondReconfigureDelayKey: g.reconfDelay,
 		config.ContainerNetworkingMethod:  g.netMethod,
 		config.FanConfig:                  "172.16.0.0/16=253.0.0.0/8",

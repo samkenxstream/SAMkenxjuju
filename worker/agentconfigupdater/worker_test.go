@@ -40,27 +40,27 @@ func (s *WorkerSuite) SetUpTest(c *gc.C) {
 	})
 	s.agent = &mockAgent{
 		conf: mockConfig{
-			profile:                  controller.DefaultMongoMemoryProfile,
-			snapChannel:              controller.DefaultJujuDBSnapChannel,
-			nonSyncedWritesToRaftLog: controller.DefaultNonSyncedWritesToRaftLog,
-			batchRaftFSM:             controller.DefaultBatchRaftFSM,
+			profile:               controller.DefaultMongoMemoryProfile,
+			snapChannel:           controller.DefaultJujuDBSnapChannel,
+			queryTracingEnabled:   controller.DefaultQueryTracingEnabled,
+			queryTracingThreshold: controller.DefaultQueryTracingThreshold,
 		},
 	}
 	s.config = agentconfigupdater.WorkerConfig{
-		Agent:                    s.agent,
-		Hub:                      s.hub,
-		MongoProfile:             controller.DefaultMongoMemoryProfile,
-		JujuDBSnapChannel:        controller.DefaultJujuDBSnapChannel,
-		NonSyncedWritesToRaftLog: controller.DefaultNonSyncedWritesToRaftLog,
-		BatchRaftFSM:             controller.DefaultBatchRaftFSM,
-		Logger:                   s.logger,
+		Agent:                 s.agent,
+		Hub:                   s.hub,
+		MongoProfile:          controller.DefaultMongoMemoryProfile,
+		JujuDBSnapChannel:     controller.DefaultJujuDBSnapChannel,
+		QueryTracingEnabled:   controller.DefaultQueryTracingEnabled,
+		QueryTracingThreshold: controller.DefaultQueryTracingThreshold,
+		Logger:                s.logger,
 	}
 	s.initialConfigMsg = controllermsg.ConfigChangedMessage{
 		Config: controller.Config{
-			controller.MongoMemoryProfile:       controller.DefaultMongoMemoryProfile,
-			controller.JujuDBSnapChannel:        controller.DefaultJujuDBSnapChannel,
-			controller.NonSyncedWritesToRaftLog: controller.DefaultNonSyncedWritesToRaftLog,
-			controller.BatchRaftFSM:             controller.DefaultBatchRaftFSM,
+			controller.MongoMemoryProfile:    controller.DefaultMongoMemoryProfile,
+			controller.JujuDBSnapChannel:     controller.DefaultJujuDBSnapChannel,
+			controller.QueryTracingEnabled:   controller.DefaultQueryTracingEnabled,
+			controller.QueryTracingThreshold: controller.DefaultQueryTracingThreshold,
 		},
 	}
 }
@@ -189,7 +189,7 @@ func (s *WorkerSuite) TestUpdateJujuDBSnapChannel(c *gc.C) {
 	c.Assert(err, gc.Equals, jworker.ErrRestartAgent)
 }
 
-func (s *WorkerSuite) TestUpdateSyncWritesToRaftLog(c *gc.C) {
+func (s *WorkerSuite) TestUpdateQueryTracingEnabled(c *gc.C) {
 	w, err := agentconfigupdater.NewWorker(s.config)
 	c.Assert(w, gc.NotNil)
 	c.Check(err, jc.ErrorIsNil)
@@ -203,10 +203,10 @@ func (s *WorkerSuite) TestUpdateSyncWritesToRaftLog(c *gc.C) {
 		c.Fatalf("event not handled")
 	}
 
-	// No sync flag is the same, worker still alive.
+	// Query tracing enabled is the same, worker still alive.
 	workertest.CheckAlive(c, w)
 
-	newConfig.Config[controller.NonSyncedWritesToRaftLog] = !controller.DefaultNonSyncedWritesToRaftLog
+	newConfig.Config[controller.QueryTracingEnabled] = true
 	handled, err = s.hub.Publish(controllermsg.ConfigChanged, newConfig)
 	c.Assert(err, jc.ErrorIsNil)
 	select {
@@ -220,7 +220,7 @@ func (s *WorkerSuite) TestUpdateSyncWritesToRaftLog(c *gc.C) {
 	c.Assert(err, gc.Equals, jworker.ErrRestartAgent)
 }
 
-func (s *WorkerSuite) TestUpdateBatchRaftFSM(c *gc.C) {
+func (s *WorkerSuite) TestUpdateQueryTracingThreshold(c *gc.C) {
 	w, err := agentconfigupdater.NewWorker(s.config)
 	c.Assert(w, gc.NotNil)
 	c.Check(err, jc.ErrorIsNil)
@@ -234,10 +234,11 @@ func (s *WorkerSuite) TestUpdateBatchRaftFSM(c *gc.C) {
 		c.Fatalf("event not handled")
 	}
 
-	// No sync flag is the same, worker still alive.
+	// Query tracing threshold is the same, worker still alive.
 	workertest.CheckAlive(c, w)
 
-	newConfig.Config[controller.BatchRaftFSM] = !controller.DefaultBatchRaftFSM
+	d := time.Second * 2
+	newConfig.Config[controller.QueryTracingThreshold] = d.String()
 	handled, err = s.hub.Publish(controllermsg.ConfigChanged, newConfig)
 	c.Assert(err, jc.ErrorIsNil)
 	select {

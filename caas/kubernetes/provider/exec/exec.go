@@ -22,7 +22,6 @@ import (
 	core "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -30,8 +29,6 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/juju/juju/caas/kubernetes/provider"
-	k8sutils "github.com/juju/juju/caas/kubernetes/provider/utils"
-	environsbootstrap "github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/cloudspec"
 )
 
@@ -83,7 +80,7 @@ func NewInCluster(namespace string) (Executor, error) {
 
 // NewForJujuCloudSpec returns a exec client.
 func NewForJujuCloudSpec(
-	modelName string,
+	namespace string,
 	cloudSpec cloudspec.CloudSpec,
 ) (Executor, error) {
 	restCfg, err := provider.CloudSpecToK8sRestConfig(cloudSpec)
@@ -95,41 +92,7 @@ func NewForJujuCloudSpec(
 		return nil, errors.Trace(err)
 	}
 
-	legacyLabels, err := k8sutils.IsLegacyModelLabels(modelName, modelName, c.CoreV1().Namespaces())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	namespace := modelName
-	if modelName == environsbootstrap.ControllerModelName {
-		namespace, err = modelNameToNameSpace(modelName, legacyLabels, c.CoreV1().Namespaces())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
 	return New(namespace, c, restCfg), nil
-}
-
-func modelNameToNameSpace(
-	modelName string,
-	legacyLabels bool,
-	client typedcorev1.NamespaceInterface,
-) (string, error) {
-	out, err := client.List(context.TODO(), metav1.ListOptions{
-		LabelSelector: k8slabels.SelectorFromValidatedSet(
-			k8sutils.LabelsForModel(modelName, legacyLabels)).String(),
-	})
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	if len(out.Items) == 0 {
-		return "", errors.NotFoundf("namespace for model %q", modelName)
-	}
-	if len(out.Items) == 1 {
-		return out.Items[0].GetName(), nil
-	}
-	// This should never happen.
-	return "", errors.New("multiple controllers running on the cluster")
 }
 
 // New contructs an executor.

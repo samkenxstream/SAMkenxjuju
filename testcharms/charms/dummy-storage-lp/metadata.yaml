@@ -1,0 +1,13 @@
+description: description
+maintainer: juju-qa@lists.canonical.com
+name: dummy-storage-lp
+series:
+- jammy
+- focal
+- bionic
+storage:
+  disks:
+    multiple:
+      range: 0-10
+    type: block
+summary: Test charm for storage

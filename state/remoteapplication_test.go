@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
@@ -16,11 +16,13 @@ import (
 
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/state/testing"
 	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/testing/factory"
 )
 
 type remoteApplicationSuite struct {
@@ -116,23 +118,9 @@ func (s *remoteApplicationSuite) makeRemoteApplication(c *gc.C, name, url string
 		Spaces:                 spaces,
 		Bindings:               bindings,
 		Macaroon:               mac,
+		AuthToken:              "auth-token",
 	})
 	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *remoteApplicationSuite) assertApplicationRelations(c *gc.C, app *state.Application, expectedKeys ...string) []*state.Relation {
-	rels, err := app.Relations()
-	c.Assert(err, jc.ErrorIsNil)
-	if len(rels) == 0 {
-		return nil
-	}
-	relKeys := make([]string, len(expectedKeys))
-	for i, rel := range rels {
-		relKeys[i] = rel.String()
-	}
-	sort.Strings(relKeys)
-	c.Assert(relKeys, gc.DeepEquals, expectedKeys)
-	return rels
 }
 
 func (s *remoteApplicationSuite) TestNoStatusForConsumerProxy(c *gc.C) {
@@ -368,12 +356,13 @@ func (s *remoteApplicationSuite) TestMysqlEndpoints(c *gc.C) {
 	c.Assert(eps, gc.DeepEquals, []state.Endpoint{serverEP, adminEp, loggingEp})
 }
 
-func (s *remoteApplicationSuite) TestMacaroon(c *gc.C) {
+func (s *remoteApplicationSuite) TestAuth(c *gc.C) {
 	mac, err := newMacaroon("test")
 	c.Assert(err, jc.ErrorIsNil)
 	appMac, err := s.application.Macaroon()
 	c.Assert(err, jc.ErrorIsNil)
 	assertMacaroonEquals(c, appMac, mac)
+	c.Assert(s.application.AuthToken(), gc.Equals, "auth-token")
 }
 
 func (s *remoteApplicationSuite) TestApplicationRefresh(c *gc.C) {
@@ -490,6 +479,25 @@ func (s *remoteApplicationSuite) TestAddRemoteApplicationFromConsumer(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(foo.Name(), gc.Equals, "foo")
 	c.Assert(foo.IsConsumerProxy(), jc.IsTrue)
+}
+
+func (s *remoteApplicationSuite) TestSetSourceController(c *gc.C) {
+	foo, err := s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
+		Name: "foo", OfferUUID: "offer-uuid", SourceModel: s.Model.ModelTag(),
+	})
+	c.Assert(err, jc.ErrorIsNil)
+
+	err = foo.SetSourceController("source-controller-uuid")
+	c.Assert(err, jc.ErrorIsNil)
+
+	// Test results without and then with refresh.
+	for i := 0; i < 2; i++ {
+		sourceCtrl := foo.SourceController()
+		c.Assert(sourceCtrl, gc.Equals, "source-controller-uuid")
+
+		err = foo.Refresh()
+		c.Assert(err, jc.ErrorIsNil)
+	}
 }
 
 func (s *remoteApplicationSuite) TestAddEndpoints(c *gc.C) {
@@ -949,6 +957,97 @@ func (s *remoteApplicationSuite) assertDestroyWithReferencedRelation(c *gc.C, re
 	c.Assert(err, jc.Satisfies, errors.IsNotFound)
 }
 
+func (s *remoteApplicationSuite) TestDestroyAlsoDeletesSecretConsumerInfo(c *gc.C) {
+	ch := s.AddTestingCharm(c, "wordpress")
+	app := s.AddTestingApplication(c, "another", ch)
+	store := state.NewSecrets(s.State)
+	uri := secrets.NewURI()
+	cp := state.CreateSecretParams{
+		Version: 1,
+		Owner:   app.Tag(),
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &fakeToken{},
+			Label:       ptr("label"),
+			Data:        map[string]string{"foo": "bar"},
+		},
+	}
+	_, err := store.CreateSecret(uri, cp)
+	c.Assert(err, jc.ErrorIsNil)
+
+	err = s.State.SaveSecretRemoteConsumer(uri, s.application.Tag(), &secrets.SecretConsumerMetadata{CurrentRevision: 666})
+	c.Assert(err, jc.ErrorIsNil)
+
+	unit := names.NewUnitTag(s.application.Name() + "/666")
+	err = s.State.SaveSecretRemoteConsumer(uri, unit, &secrets.SecretConsumerMetadata{CurrentRevision: 667})
+	c.Assert(err, jc.ErrorIsNil)
+
+	_, err = s.State.GetSecretRemoteConsumer(uri, s.application.Tag())
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.State.GetSecretRemoteConsumer(uri, unit)
+	c.Assert(err, jc.ErrorIsNil)
+
+	err = s.application.Destroy()
+	c.Assert(err, jc.ErrorIsNil)
+
+	_, err = s.State.GetSecretRemoteConsumer(uri, s.application.Tag())
+	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	_, err = s.State.GetSecretRemoteConsumer(uri, unit)
+	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+}
+
+func (s *remoteApplicationSuite) TestDestroyAlsoDeletesSecretPermissions(c *gc.C) {
+	wpEP := []charm.Relation{
+		{Name: "db", Interface: "mysql", Role: charm.RoleRequirer, Scope: charm.ScopeGlobal},
+	}
+
+	wp, err := s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
+		Name: "remote-wordpress", OfferUUID: "offer-uuid", SourceModel: s.Model.ModelTag(),
+		Endpoints:       wpEP,
+		IsConsumerProxy: true,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	mysql := s.Factory.MakeApplication(c, &factory.ApplicationParams{Name: "mysqldb"})
+
+	store := state.NewSecrets(s.State)
+	uri := secrets.NewURI()
+	cp := state.CreateSecretParams{
+		Version: 1,
+		Owner:   mysql.Tag(),
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &fakeToken{},
+			Label:       ptr("label"),
+			Data:        map[string]string{"foo": "bar"},
+		},
+	}
+	_, err = store.CreateSecret(uri, cp)
+	c.Assert(err, jc.ErrorIsNil)
+
+	mysqlEP, err := mysql.Endpoint("server")
+	c.Assert(err, jc.ErrorIsNil)
+	rel, err := s.State.AddRelation(state.Endpoint{
+		ApplicationName: "remote-wordpress",
+		Relation:        wpEP[0],
+	}, mysqlEP)
+	c.Assert(err, jc.ErrorIsNil)
+
+	err = s.State.GrantSecretAccess(uri, state.SecretAccessParams{
+		LeaderToken: &fakeToken{},
+		Scope:       rel.Tag(),
+		Subject:     wp.Tag(),
+		Role:        secrets.RoleView,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	access, err := s.State.SecretAccess(uri, wp.Tag())
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleView)
+
+	_, err = wp.DestroyWithForce(true, time.Duration(0))
+	c.Assert(err, jc.ErrorIsNil)
+	access, err = s.State.SecretAccess(uri, wp.Tag())
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleNone)
+}
+
 func (s *remoteApplicationSuite) TestDestroyRemovesStatusHistory(c *gc.C) {
 	err := s.application.SetStatus(status.StatusInfo{
 		Status: status.Active,
@@ -1102,7 +1201,13 @@ func (s *remoteApplicationSuite) TestAddApplicationModelDying(c *gc.C) {
 
 func (s *remoteApplicationSuite) TestAddApplicationSameLocalExists(c *gc.C) {
 	charm := s.AddTestingCharm(c, "dummy")
-	_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+	_, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name: "s1", Charm: charm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "20.04/stable",
+		}},
+	})
 	c.Assert(err, jc.ErrorIsNil)
 	_, err = s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
 		Name: "s1", SourceModel: s.Model.ModelTag()})
@@ -1115,7 +1220,13 @@ func (s *remoteApplicationSuite) TestAddApplicationLocalAddedAfterInitial(c *gc.
 	// there is no conflict initially but a local application is added
 	// before the transaction is run.
 	defer state.SetBeforeHooks(c, s.State, func() {
-		_, err := s.State.AddApplication(state.AddApplicationArgs{Name: "s1", Charm: charm})
+		_, err := s.State.AddApplication(state.AddApplicationArgs{
+			Name: "s1", Charm: charm,
+			CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+				OS:      "ubuntu",
+				Channel: "20.04/stable",
+			}},
+		})
 		c.Assert(err, jc.ErrorIsNil)
 	}).Check()
 	_, err := s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
@@ -1164,29 +1275,29 @@ func (s *remoteApplicationSuite) TestAddApplicationModelDiesAfterInitial(c *gc.C
 func (s *remoteApplicationSuite) TestWatchRemoteApplications(c *gc.C) {
 	w := s.State.WatchRemoteApplications()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
-	wc.AssertChangeInSingleEvent("mysql") // initial
+	wc := testing.NewStringsWatcherC(c, w)
+	wc.AssertChange("mysql") // initial
 	wc.AssertNoChange()
 
 	db2, err := s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
 		Name: "db2", SourceModel: s.Model.ModelTag()})
 	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertChangeInSingleEvent("db2")
+	wc.AssertChange("db2")
 	wc.AssertNoChange()
 
 	err = db2.Destroy()
 	c.Assert(err, jc.ErrorIsNil)
 	err = db2.Refresh()
 	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-	wc.AssertChangeInSingleEvent("db2")
+	wc.AssertChange("db2")
 	wc.AssertNoChange()
 }
 
 func (s *remoteApplicationSuite) TestWatchRemoteApplicationsDying(c *gc.C) {
 	w := s.State.WatchRemoteApplications()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
-	wc.AssertChangeInSingleEvent("mysql") // initial
+	wc := testing.NewStringsWatcherC(c, w)
+	wc.AssertChange("mysql") // initial
 	wc.AssertNoChange()
 
 	ch := s.AddTestingCharm(c, "wordpress")
@@ -1212,7 +1323,7 @@ func (s *remoteApplicationSuite) TestWatchRemoteApplicationsDying(c *gc.C) {
 	err = s.application.Refresh()
 	c.Assert(err, jc.ErrorIsNil)
 
-	wc.AssertChangeInSingleEvent("mysql")
+	wc.AssertChange("mysql")
 	wc.AssertNoChange()
 }
 

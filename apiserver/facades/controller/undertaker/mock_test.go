@@ -10,9 +10,12 @@ import (
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/apiserver/facades/controller/undertaker"
+	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/secrets/provider"
 	"github.com/juju/juju/state"
+	coretesting "github.com/juju/juju/testing"
 )
 
 // mockState implements State interface and allows inspection of called
@@ -98,7 +101,6 @@ func (m *mockState) ModelUUID() string {
 // mockModel implements Model interface and allows inspection of called
 // methods.
 type mockModel struct {
-	tod     time.Time
 	owner   names.UserTag
 	life    state.Life
 	name    string
@@ -112,6 +114,14 @@ type mockModel struct {
 }
 
 var _ undertaker.Model = (*mockModel)(nil)
+
+func (m *mockModel) ControllerUUID() string {
+	return coretesting.ControllerTag.Id()
+}
+
+func (m *mockModel) Cloud() (cloud.Cloud, error) {
+	return cloud.Cloud{}, errors.NotImplemented
+}
 
 func (m *mockModel) Owner() names.UserTag {
 	return m.owner
@@ -160,4 +170,17 @@ type mockWatcher struct {
 
 func (w *mockWatcher) Changes() <-chan struct{} {
 	return w.changes
+}
+
+type mockSecrets struct {
+	provider.SecretBackendProvider
+	cleanedUUID string
+}
+
+func (m *mockSecrets) CleanupModel(cfg *provider.ModelBackendConfig) error {
+	if cfg.BackendType != "some-backend" {
+		return errors.New("unknown backend " + cfg.BackendType)
+	}
+	m.cleanedUUID = cfg.ModelUUID
+	return nil
 }

@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/juju/collections/set"
+	"github.com/juju/errors"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
@@ -35,35 +35,38 @@ import (
 	coretools "github.com/juju/juju/tools"
 )
 
-func GetMockBundleTools(c *gc.C, expectedForceVersion *version.Number) tools.BundleToolsFunc {
-	return func(build bool, w io.Writer, forceVersion *version.Number) (version.Binary, bool, string, error) {
-		if expectedForceVersion != nil {
-			c.Assert(forceVersion, jc.DeepEquals, expectedForceVersion)
-		} else {
-			c.Assert(forceVersion, gc.IsNil)
+func GetMockBundleTools(expectedForceVersion version.Number) tools.BundleToolsFunc {
+	return func(
+		build bool, w io.Writer,
+		getForceVersion func(version.Number) version.Number,
+	) (version.Binary, version.Number, bool, string, error) {
+		vers := coretesting.CurrentVersion()
+		forceVersion := getForceVersion(vers.Number)
+		if forceVersion.Compare(expectedForceVersion) != 0 {
+			return version.Binary{}, version.Number{}, false, "", errors.Errorf("%#v != expected %#v", forceVersion, expectedForceVersion)
 		}
-		vers := coretesting.CurrentVersion(c)
 		sha256Hash := fmt.Sprintf("%x", sha256.New().Sum(nil))
-		return vers, false, sha256Hash, nil
+		return vers, forceVersion, false, sha256Hash, nil
 	}
 }
 
 // GetMockBuildTools returns a sync.BuildAgentTarballFunc implementation which generates
 // a fake tools tarball.
 func GetMockBuildTools(c *gc.C) sync.BuildAgentTarballFunc {
-	return func(build bool, forceVersion *version.Number, stream string) (*sync.BuiltAgent, error) {
-		vers := coretesting.CurrentVersion(c)
-		if forceVersion != nil {
-			vers.Number = *forceVersion
-		}
+	return func(
+		build bool, stream string,
+		getForceVersion func(version.Number) version.Number,
+	) (*sync.BuiltAgent, error) {
+		vers := coretesting.CurrentVersion()
+		vers.Number = getForceVersion(vers.Number)
 
 		tgz, checksum := coretesting.TarGz(
 			coretesting.NewTarFile(names.Jujud, 0777, "jujud contents "+vers.String()))
 
-		toolsDir, err := ioutil.TempDir("", "juju-tools-"+stream)
+		toolsDir, err := os.MkdirTemp("", "juju-tools-"+stream)
 		c.Assert(err, jc.ErrorIsNil)
 		name := "name"
-		_ = ioutil.WriteFile(filepath.Join(toolsDir, name), tgz, 0777)
+		_ = os.WriteFile(filepath.Join(toolsDir, name), tgz, 0777)
 
 		return &sync.BuiltAgent{
 			Dir:         toolsDir,
@@ -96,7 +99,7 @@ func makeTools(c *gc.C, metadataDir, stream string, versionStrings []string, wit
 		}
 		path := filepath.Join(toolsDir, fmt.Sprintf("juju-%s.tgz", binary))
 		data := binary.String()
-		err = ioutil.WriteFile(path, []byte(data), 0644)
+		err = os.WriteFile(path, []byte(data), 0644)
 		c.Assert(err, jc.ErrorIsNil)
 		tool := &coretools.Tools{
 			Version: binary,
@@ -160,7 +163,7 @@ func ParseMetadataFromStorage(c *gc.C, stor storage.StorageReader, stream string
 	r, err := stor.Get(path.Join("tools", toolsIndexMetadata.ProductsFilePath))
 	defer func() { _ = r.Close() }()
 	c.Assert(err, jc.ErrorIsNil)
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
 	c.Assert(err, jc.ErrorIsNil)
 
 	url, err := source.URL(toolsIndexMetadata.ProductsFilePath)
@@ -196,7 +199,7 @@ func ParseMetadataFromStorage(c *gc.C, stor storage.StorageReader, stream string
 		r, err = stor.Get(path.Join("tools", simplestreams.UnsignedMirror("v1")))
 		c.Assert(err, jc.ErrorIsNil)
 		defer r.Close()
-		data, err = ioutil.ReadAll(r)
+		data, err = io.ReadAll(r)
 		c.Assert(err, jc.ErrorIsNil)
 		c.Assert(string(data), jc.Contains, `"mirrors":`)
 		c.Assert(string(data), jc.Contains, tools.ToolsContentId(stream))
@@ -301,7 +304,7 @@ func UploadToDirectory(c *gc.C, dir string, streamVersions StreamVersions) map[s
 		if err := os.MkdirAll(dir, 0755); err != nil && !os.IsExist(err) {
 			c.Assert(err, jc.ErrorIsNil)
 		}
-		err := ioutil.WriteFile(path, object.data, 0644)
+		err := os.WriteFile(path, object.data, 0644)
 		c.Assert(err, jc.ErrorIsNil)
 	}
 	return allUploaded

@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
@@ -64,6 +64,7 @@ func (s *ContextFactorySuite) SetUpTest(c *gc.C) {
 		Tracker:          &runnertesting.FakeTracker{},
 		GetRelationInfos: s.getRelationInfos,
 		Storage:          s.storage,
+		SecretsClient:    s.secrets,
 		Payloads:         s.payloads,
 		Paths:            s.paths,
 		Clock:            testclock.NewClock(time.Time{}),
@@ -277,6 +278,7 @@ func (s *ContextFactorySuite) TestNewHookContextWithStorage(c *gc.C) {
 		Tracker:          &runnertesting.FakeTracker{},
 		GetRelationInfos: s.getRelationInfos,
 		Storage:          s.storage,
+		SecretsClient:    s.secrets,
 		Payloads:         s.payloads,
 		Paths:            s.paths,
 		Clock:            testclock.NewClock(time.Time{}),
@@ -301,13 +303,14 @@ func (s *ContextFactorySuite) TestNewHookContextWithStorage(c *gc.C) {
 
 func (s *ContextFactorySuite) TestSecretHookContext(c *gc.C) {
 	hi := hook.Info{
-		Kind:      hooks.SecretRotate,
-		SecretURL: "secret://app/mariadb/password",
+		Kind:        hooks.SecretRotate,
+		SecretURI:   "secret:9m4e2mr0ui3e8a215n4g",
+		SecretLabel: "label",
 	}
 	ctx, err := s.factory.HookContext(hi)
 	c.Assert(err, jc.ErrorIsNil)
 	s.AssertCoreContext(c, ctx)
-	s.AssertSecretContext(c, ctx, hi.SecretURL)
+	s.AssertSecretContext(c, ctx, hi.SecretURI, hi.SecretLabel)
 	s.AssertNotWorkloadContext(c, ctx)
 	s.AssertNotActionContext(c, ctx)
 	s.AssertNotRelationContext(c, ctx)
@@ -369,6 +372,7 @@ func (s *ContextFactorySuite) setupPodSpec(c *gc.C) (*state.State, context.Conte
 		},
 		GetRelationInfos: s.getRelationInfos,
 		Storage:          s.storage,
+		SecretsClient:    s.secrets,
 		Payloads:         s.payloads,
 		Paths:            s.paths,
 		Clock:            testclock.NewClock(time.Time{}),
@@ -518,7 +522,7 @@ func (s *ContextFactorySuite) TestHookContextCAASNilPodSpecNilRawPodSpecButUpgra
 	appTag := names.NewApplicationTag(appName)
 	w, err := cm.WatchPodSpec(appTag)
 	c.Assert(err, jc.ErrorIsNil)
-	wc := statetesting.NewNotifyWatcherC(c, s.State, w)
+	wc := statetesting.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange() // initial event.
 
 	// No change for non upgrade-hook.
@@ -578,6 +582,7 @@ func (s *ContextFactorySuite) TestNewHookContextCAASModel(c *gc.C) {
 		},
 		GetRelationInfos: s.getRelationInfos,
 		Storage:          s.storage,
+		SecretsClient:    s.secrets,
 		Payloads:         s.payloads,
 		Paths:            s.paths,
 		Clock:            testclock.NewClock(time.Time{}),
@@ -892,9 +897,10 @@ func (s *ContextFactorySuite) TestReadApplicationSettings(c *gc.C) {
 type StubLeadershipContext struct {
 	context.LeadershipContext
 	*testing.Stub
+	isLeader bool
 }
 
 func (stub *StubLeadershipContext) IsLeader() (bool, error) {
 	stub.MethodCall(stub, "IsLeader")
-	return false, stub.NextErr()
+	return stub.isLeader, stub.NextErr()
 }

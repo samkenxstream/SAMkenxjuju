@@ -1,7 +1,6 @@
 // Copyright 2013 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// The jsoncodec package provides a JSON codec for the rpc package.
 package jsoncodec
 
 import (
@@ -32,11 +31,10 @@ type JSONConn interface {
 type Codec struct {
 	// msg holds the message that's just been read by ReadHeader, so
 	// that the body can be read by ReadBody.
-	msg         inMsgV1
-	conn        JSONConn
-	logMessages int32
-	mu          sync.Mutex
-	closing     bool
+	msg     inMsgV1
+	conn    JSONConn
+	mu      sync.Mutex
+	closing bool
 }
 
 // New returns an rpc codec that uses conn to send and receive

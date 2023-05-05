@@ -4,7 +4,7 @@
 package application
 
 import (
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/schema"
 	"gopkg.in/juju/environschema.v1"
 
@@ -14,6 +14,7 @@ import (
 	"github.com/juju/juju/core/config"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -83,25 +84,32 @@ func (api *APIBase) getConfig(
 		return params.ApplicationGetResults{}, err
 	}
 
-	appChannel := string(app.Channel())
+	var appChannel string
 
 	// If the applications charm origin is from charm-hub, then build the real
 	// channel and send that back.
 	origin := app.CharmOrigin()
-	if origin != nil && corecharm.CharmHub.Matches(origin.Source) && origin.Channel != nil {
+	if corecharm.CharmHub.Matches(origin.Source) && origin.Channel != nil {
 		ch := charm.MakePermissiveChannel(origin.Channel.Track, origin.Channel.Risk, origin.Channel.Branch)
 		appChannel = ch.String()
 	}
 
+	base, err := series.ParseBase(origin.Platform.OS, origin.Platform.Channel)
+	if err != nil {
+		return params.ApplicationGetResults{}, err
+	}
 	return params.ApplicationGetResults{
 		Application:       args.ApplicationName,
 		Charm:             ch.Meta().Name,
 		CharmConfig:       configInfo,
 		ApplicationConfig: appConfigInfo,
 		Constraints:       cons,
-		Series:            app.Series(),
-		Channel:           appChannel,
-		EndpointBindings:  bindingMap,
+		Base: params.Base{
+			Name:    base.OS,
+			Channel: base.Channel.String(),
+		},
+		Channel:          appChannel,
+		EndpointBindings: bindingMap,
 	}, nil
 }
 

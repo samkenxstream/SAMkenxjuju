@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3/bson"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
@@ -38,6 +38,7 @@ import (
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
@@ -45,6 +46,7 @@ import (
 	"github.com/juju/juju/feature"
 	"github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
+	_ "github.com/juju/juju/secrets/provider/all"
 	"github.com/juju/juju/state"
 	statetesting "github.com/juju/juju/state/testing"
 	coretesting "github.com/juju/juju/testing"
@@ -115,17 +117,17 @@ func (s *uniterSuiteBase) SetUpTest(c *gc.C) {
 // setupState creates 2 machines, 2 services and adds a unit to each service.
 func (s *uniterSuiteBase) setupState(c *gc.C) {
 	s.machine0 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits, state.JobManageModel},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits, state.JobManageModel},
 	})
 	s.machine1 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	})
 
 	s.wpCharm = s.Factory.MakeCharm(c, &factory.CharmParams{
-		Name: "wordpress",
-		URL:  "cs:quantal/wordpress-3",
+		Name:     "wordpress",
+		Revision: "3",
 	})
 	s.wordpress = s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "wordpress",
@@ -188,7 +190,7 @@ func (s *uniterSuiteBase) assertInScope(c *gc.C, relUnit *state.RelationUnit, in
 // in a new suite.
 // If we are testing a CAAS model, it is a waste of resources to do preamble
 // for an IAAS model.
-func (s *uniterSuiteBase) setupCAASModel(c *gc.C) (*apiuniter.State, *state.CAASModel, *state.Application, *state.Unit) {
+func (s *uniterSuiteBase) setupCAASModel(c *gc.C, isSidecar bool) (*apiuniter.State, *state.CAASModel, *state.Application, *state.Unit) {
 	st := s.Factory.MakeCAASModel(c, nil)
 	m, err := st.Model()
 	c.Assert(err, jc.ErrorIsNil)
@@ -198,12 +200,27 @@ func (s *uniterSuiteBase) setupCAASModel(c *gc.C) (*apiuniter.State, *state.CAAS
 	c.Assert(err, jc.ErrorIsNil)
 
 	f := factory.NewFactory(st, s.StatePool)
-	ch := f.MakeCharm(c, &factory.CharmParams{Name: "gitlab", Series: "kubernetes"})
-	app := f.MakeApplication(c, &factory.ApplicationParams{Name: "gitlab", Charm: ch})
+	var app *state.Application
+	if isSidecar {
+		ch := f.MakeCharm(c, &factory.CharmParams{Name: "cockroach", Series: "focal"})
+		app = f.MakeApplication(c, &factory.ApplicationParams{Name: "cockroachdb", Charm: ch})
+	} else {
+		ch := f.MakeCharm(c, &factory.CharmParams{Name: "gitlab", Series: "kubernetes"})
+		app = f.MakeApplication(c, &factory.ApplicationParams{Name: "gitlab", Charm: ch})
+	}
 	unit := f.MakeUnit(c, &factory.UnitParams{
 		Application: app,
 		SetCharmURL: true,
 	})
+	if isSidecar {
+		s.authorizer = apiservertesting.FakeAuthorizer{
+			Tag: unit.Tag(),
+		}
+	} else {
+		s.authorizer = apiservertesting.FakeAuthorizer{
+			Tag: app.Tag(),
+		}
+	}
 
 	password, err := utils.RandomPassword()
 	c.Assert(err, jc.ErrorIsNil)
@@ -225,9 +242,6 @@ func (s *uniterSuiteBase) setupCAASModel(c *gc.C) (*apiuniter.State, *state.CAAS
 	c.Assert(err, jc.ErrorIsNil)
 	s.CleanupSuite.AddCleanup(func(*gc.C) { _ = apiState.Close() })
 
-	s.authorizer = apiservertesting.FakeAuthorizer{
-		Tag: app.Tag(),
-	}
 	u, err := apiuniter.NewFromConnection(apiState)
 	c.Assert(err, jc.ErrorIsNil)
 	return u, cm, app, unit
@@ -538,9 +552,9 @@ func (s *uniterSuite) TestWatch(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewNotifyWatcherC(c, s.State, resource1.(state.NotifyWatcher))
+	wc := statetesting.NewNotifyWatcherC(c, resource1.(state.NotifyWatcher))
 	wc.AssertNoChange()
-	wc = statetesting.NewNotifyWatcherC(c, s.State, resource2.(state.NotifyWatcher))
+	wc = statetesting.NewNotifyWatcherC(c, resource2.(state.NotifyWatcher))
 	wc.AssertNoChange()
 }
 
@@ -917,9 +931,9 @@ func (s *uniterSuite) TestSetCharmURL(c *gc.C) {
 	c.Assert(charmURL, gc.IsNil)
 
 	args := params.EntitiesCharmURL{Entities: []params.EntityCharmURL{
-		{Tag: "unit-mysql-0", CharmURL: "cs:quantal/application-42"},
+		{Tag: "unit-mysql-0", CharmURL: "ch:amd64/quantal/application-42"},
 		{Tag: "unit-wordpress-0", CharmURL: s.wpCharm.String()},
-		{Tag: "unit-foo-42", CharmURL: "cs:quantal/foo-321"},
+		{Tag: "unit-foo-42", CharmURL: "ch:amd64/quantal/foo-321"},
 	}}
 	result, err := s.uniter.SetCharmURL(args)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1016,63 +1030,6 @@ func (s *uniterSuite) TestCharmModifiedVersion(c *gc.C) {
 	})
 }
 
-func (s *uniterSuite) TestOpenPorts(c *gc.C) {
-	unitPortRanges, err := s.wordpressUnit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitPortRanges.UniquePortRanges(), gc.HasLen, 0, gc.Commentf("expected unit not to have any port ranges open"))
-
-	args := params.EntitiesPortRanges{Entities: []params.EntityPortRange{
-		{Tag: "unit-mysql-0", Protocol: "tcp", FromPort: 1234, ToPort: 1400},
-		{Tag: "unit-wordpress-0", Protocol: "udp", FromPort: 4321, ToPort: 5000},
-		{Tag: "unit-foo-42", Protocol: "tcp", FromPort: 42, ToPort: 42},
-	}}
-	result, err := s.uniter.OpenPorts(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the wordpressUnit's port is opened.
-	unitPortRanges, err = s.wordpressUnit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitPortRanges.UniquePortRanges(), gc.DeepEquals, []network.PortRange{
-		network.MustParsePortRange("4321-5000/udp"),
-	})
-}
-
-func (s *uniterSuite) TestClosePorts(c *gc.C) {
-	// Open port udp:4321 in advance on wordpressUnit.
-	unitPortRanges, err := s.wordpressUnit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	unitPortRanges.Open(allEndpoints, network.MustParsePortRange("4321-5000/udp"))
-	c.Assert(s.State.ApplyOperation(unitPortRanges.Changes()), jc.ErrorIsNil)
-
-	// Issue close ports call
-	args := params.EntitiesPortRanges{Entities: []params.EntityPortRange{
-		{Tag: "unit-mysql-0", Protocol: "tcp", FromPort: 1234, ToPort: 1400},
-		{Tag: "unit-wordpress-0", Protocol: "udp", FromPort: 4321, ToPort: 5000},
-		{Tag: "unit-foo-42", Protocol: "tcp", FromPort: 42, ToPort: 42},
-	}}
-	result, err := s.uniter.ClosePorts(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the wordpressUnit's port is closed.
-	unitPortRanges, err = s.wordpressUnit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitPortRanges.UniquePortRanges(), gc.HasLen, 0)
-}
-
 func (s *uniterSuite) TestWatchConfigSettingsHash(c *gc.C) {
 	err := s.wordpressUnit.SetCharmURL(s.wpCharm.URL())
 	c.Assert(err, jc.ErrorIsNil)
@@ -1094,7 +1051,7 @@ func (s *uniterSuite) TestWatchConfigSettingsHash(c *gc.C) {
 			{Error: apiservertesting.ErrUnauthorized},
 			{
 				StringsWatcherId: "1",
-				Changes:          []string{"af35e298300150f2c357b4a1c40c1109bde305841c6343113b634b9dada22d00"},
+				Changes:          []string{"7579d9a32a0af2e5459c21b9a6ada743db4ed33662f5230d3ca8283518268746"},
 			},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
@@ -1107,7 +1064,7 @@ func (s *uniterSuite) TestWatchConfigSettingsHash(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }
 
@@ -1147,7 +1104,7 @@ func (s *uniterSuite) TestWatchTrustConfigSettingsHash(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }
 
@@ -1243,7 +1200,7 @@ func (s *uniterSuite) TestWatchActionNotifications(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 
 	operationID, err := s.Model.EnqueueOperation("a test", 1)
@@ -1293,7 +1250,7 @@ func (s *uniterSuite) TestWatchPreexistingActions(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 
 	addedAction, err := s.Model.AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
@@ -1415,7 +1372,7 @@ func (s *uniterSuite) TestWatchUnitRelations(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }
 
@@ -1423,7 +1380,7 @@ func (s *uniterSuite) TestWatchSubordinateUnitRelations(c *gc.C) {
 	// The logging charm is subordinate (and the info endpoint is scope=container).
 	loggingCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "logging",
-		URL:  "cs:quantal/logging-1",
+		URL:  "ch:amd64/quantal/logging-1",
 	})
 	loggingApp := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "logging",
@@ -1453,7 +1410,7 @@ func (s *uniterSuite) TestWatchSubordinateUnitRelations(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 
 	// We get notified about the mysql relation going away but not the
@@ -1480,7 +1437,7 @@ func (s *uniterSuite) TestWatchUnitRelationsSubordinateWithGlobalEndpoint(c *gc.
 	// The logging charm is subordinate (and the info endpoint is scope=container).
 	loggingCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "logging",
-		URL:  "cs:quantal/logging-1",
+		URL:  "ch:amd64/quantal/logging-1",
 	})
 	loggingApp := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "logging",
@@ -1489,7 +1446,7 @@ func (s *uniterSuite) TestWatchUnitRelationsSubordinateWithGlobalEndpoint(c *gc.
 
 	uiCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "logging-frontend",
-		URL:  "cs:quantal/logging-frontend-1",
+		URL:  "ch:amd64/quantal/logging-frontend-1",
 	})
 	uiApp := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "logging-frontend",
@@ -1516,7 +1473,7 @@ func (s *uniterSuite) TestWatchUnitRelationsSubordinateWithGlobalEndpoint(c *gc.
 	resource := s.resources.Get("1")
 	defer statetesting.AssertStop(c, resource)
 
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 
 	// Should be notified about the relation to logging frontend, since it's global scope.
@@ -1538,7 +1495,7 @@ func (s *uniterSuite) TestWatchUnitRelationsWithSubSubRelation(c *gc.C) {
 	// container).
 	loggingCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "logging",
-		URL:  "cs:quantal/logging-1",
+		URL:  "ch:amd64/quantal/logging-1",
 	})
 	loggingApp := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "logging",
@@ -1546,7 +1503,7 @@ func (s *uniterSuite) TestWatchUnitRelationsWithSubSubRelation(c *gc.C) {
 	})
 	monitoringCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "monitoring",
-		URL:  "cs:quantal/monitoring-1",
+		URL:  "ch:amd64/quantal/monitoring-1",
 	})
 	monitoringApp := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "monitoring",
@@ -1577,7 +1534,7 @@ func (s *uniterSuite) TestWatchUnitRelationsWithSubSubRelation(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 
 	// Now we relate logging and monitoring together.
@@ -2071,7 +2028,7 @@ func (s *uniterSuite) TestEnterScope(c *gc.C) {
 func (s *uniterSuite) TestEnterScopeIgnoredForInvalidPrincipals(c *gc.C) {
 	loggingCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "logging",
-		URL:  "cs:quantal/logging-1",
+		URL:  "ch:amd64/quantal/logging-1",
 	})
 	logging := s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Name:  "logging",
@@ -2805,18 +2762,19 @@ func (s *uniterSuite) TestReadRemoteApplicationSettingsForPeerRelation(c *gc.C) 
 	})
 }
 
-func (s *uniterSuite) TestReadRemoteSettingsForCAASApplicationInPeerRelation(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
+func (s *uniterSuite) assertReadRemoteSettingsForCAASApplicationInPeerRelation(c *gc.C, isSidecar bool) {
+	_, cm, app, unit := s.setupCAASModel(c, isSidecar)
 	c.Assert(s.resources.Count(), gc.Equals, 0)
 
-	unit2, err := app.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
 	ep, err := app.Endpoint("ring")
 	c.Assert(err, jc.ErrorIsNil)
 	rel, err := cm.State().EndpointsRelation(ep)
 	c.Assert(err, jc.ErrorIsNil)
 
-	relUnit, err := rel.Unit(unit)
+	unit2, err := app.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+
+	relUnit, err := rel.Unit(unit2)
 	c.Assert(err, jc.ErrorIsNil)
 	err = relUnit.EnterScope(map[string]interface{}{
 		"black midi": "ducter",
@@ -2824,11 +2782,10 @@ func (s *uniterSuite) TestReadRemoteSettingsForCAASApplicationInPeerRelation(c *
 	c.Assert(err, jc.ErrorIsNil)
 
 	uniterAPI := s.newUniterAPI(c, cm.State(), s.authorizer)
-
 	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{{
 		Relation:   rel.Tag().String(),
-		LocalUnit:  unit2.Tag().String(),
-		RemoteUnit: unit.Tag().String(),
+		LocalUnit:  unit.Tag().String(),
+		RemoteUnit: unit2.Tag().String(),
 	}}}
 	result, err := uniterAPI.ReadRemoteSettings(args)
 	c.Assert(err, jc.ErrorIsNil)
@@ -2841,153 +2798,12 @@ func (s *uniterSuite) TestReadRemoteSettingsForCAASApplicationInPeerRelation(c *
 	})
 }
 
-func (s *uniterSuite) TestUpdateSettings(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some":  "settings",
-		"other": "stuff",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	newSettings := params.Settings{
-		"some":  "different",
-		"other": "",
-	}
-
-	s.leadershipChecker.isLeader = false
-
-	args := params.RelationUnitsSettings{RelationUnits: []params.RelationUnitSettings{
-		{Relation: "relation-42", Unit: "unit-foo-0", Settings: nil},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0", Settings: newSettings},
-		{Relation: "relation-42", Unit: "unit-wordpress-0", Settings: nil},
-		{Relation: "relation-foo", Unit: "unit-wordpress-0", Settings: nil},
-		{Relation: "application-wordpress", Unit: "unit-foo-0", Settings: nil},
-		{Relation: "foo", Unit: "bar", Settings: nil},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0", Settings: nil},
-		{Relation: rel.Tag().String(), Unit: "application-wordpress", Settings: nil},
-		{Relation: rel.Tag().String(), Unit: "application-mysql", Settings: nil},
-		{Relation: rel.Tag().String(), Unit: "user-foo", Settings: nil},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0", ApplicationSettings: newSettings},
-	}}
-	result, err := s.uniter.UpdateSettings(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the settings were saved.
-	s.assertInScope(c, relUnit, true)
-	readSettings, err := relUnit.ReadSettings(s.wordpressUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"some": "different",
-	})
+func (s *uniterSuite) TestReadRemoteSettingsForCAASApplicationInPeerRelationOperator(c *gc.C) {
+	s.assertReadRemoteSettingsForCAASApplicationInPeerRelation(c, false)
 }
 
-func (s *uniterSuite) TestUpdateSettingsWithAppSettings(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some":  "settings",
-		"other": "stuff",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	newSettings := params.Settings{
-		"some":  "different",
-		"other": "",
-	}
-
-	appSettings := map[string]interface{}{
-		"black midi": "ducter",
-		"battles":    "the yabba",
-	}
-	err = rel.UpdateApplicationSettings("wordpress", &token{isLeader: true}, appSettings)
-	c.Assert(err, jc.ErrorIsNil)
-
-	newAppSettings := params.Settings{
-		"black midi": "of schlagenheim",
-		"battles":    "",
-	}
-
-	s.leadershipChecker.isLeader = true
-
-	args := params.RelationUnitsSettings{RelationUnits: []params.RelationUnitSettings{{
-		Relation:            rel.Tag().String(),
-		Unit:                "unit-wordpress-0",
-		Settings:            newSettings,
-		ApplicationSettings: newAppSettings,
-	}}}
-	result, err := s.uniter.UpdateSettings(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{nil}},
-	})
-
-	readSettings, err := rel.ApplicationSettings("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"black midi": "of schlagenheim",
-	})
-}
-
-func (s *uniterSuite) TestUpdateSettingsWithAppSettingsOnly(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	appSettings := map[string]interface{}{
-		"black midi": "ducter",
-		"battles":    "the yabba",
-	}
-	err = rel.UpdateApplicationSettings("wordpress", &token{isLeader: true}, appSettings)
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.leadershipChecker.isLeader = true
-
-	newAppSettings := params.Settings{
-		"black midi": "of schlagenheim",
-		"battles":    "",
-	}
-
-	args := params.RelationUnitsSettings{RelationUnits: []params.RelationUnitSettings{{
-		Relation:            rel.Tag().String(),
-		Unit:                "unit-wordpress-0",
-		ApplicationSettings: newAppSettings,
-	}}}
-	result, err := s.uniter.UpdateSettings(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{nil}},
-	})
-
-	readSettings, err := rel.ApplicationSettings("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"black midi": "of schlagenheim",
-	})
+func (s *uniterSuite) TestReadRemoteSettingsForCAASApplicationInPeerRelationSidecar(c *gc.C) {
+	s.assertReadRemoteSettingsForCAASApplicationInPeerRelation(c, true)
 }
 
 func (s *uniterSuite) TestWatchRelationUnits(c *gc.C) {
@@ -3062,7 +2878,6 @@ func (s *uniterSuite) TestWatchRelationUnits(c *gc.C) {
 	// the Watch call)
 	w, ok := resource.(common.RelationUnitsWatcher)
 	c.Assert(ok, gc.Equals, true)
-	s.State.StartSync()
 	select {
 	case actual, ok := <-w.Changes():
 		c.Fatalf("watcher sent unexpected change: (%v, %v)", actual, ok)
@@ -3088,7 +2903,6 @@ func (s *uniterSuite) assertRUWChange(c *gc.C, w common.RelationUnitsWatcher, ch
 	// Get all items in changed in a map for easy lookup.
 	changedNames := set.NewStrings(changed...)
 	appChangedNames := set.NewStrings(appChanged...)
-	s.State.StartSync()
 	timeout := time.After(coretesting.LongWait)
 	select {
 	case actual, ok := <-w.Changes():
@@ -3160,12 +2974,12 @@ func (s *uniterSuite) TestWatchUnitAddressesHash(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }
 
 func (s *uniterSuite) TestWatchCAASUnitAddressesHash(c *gc.C) {
-	_, cm, _, _ := s.setupCAASModel(c)
+	_, cm, _, _ := s.setupCAASModel(c, false)
 	c.Assert(s.resources.Count(), gc.Equals, 0)
 
 	args := params.Entities{Entities: []params.Entity{
@@ -3201,7 +3015,7 @@ func (s *uniterSuite) TestWatchCAASUnitAddressesHash(c *gc.C) {
 
 	// Check that the Watch has consumed the initial event ("returned" in
 	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, s.State, resource.(state.StringsWatcher))
+	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
 	wc.AssertNoChange()
 }
 
@@ -3477,8 +3291,8 @@ func (s *uniterSuite) TestOpenedMachinePortRangesByEndpoint(c *gc.C) {
 	}
 	result, err := s.uniter.OpenedMachinePortRangesByEndpoint(args)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.OpenMachinePortRangesByEndpointResults{
-		Results: []params.OpenMachinePortRangesByEndpointResult{
+	c.Assert(result, gc.DeepEquals, params.OpenPortRangesByEndpointResults{
+		Results: []params.OpenPortRangesByEndpointResult{
 			{Error: apiservertesting.ErrUnauthorized},
 			{
 				UnitPortRanges: expectPortRanges,
@@ -3713,7 +3527,7 @@ spec:
 `[1:]
 
 func (s *uniterSuite) TestSetRawK8sSpec(c *gc.C) {
-	u, cm, app, unit := s.setupCAASModel(c)
+	u, cm, app, unit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = true
 
@@ -3744,7 +3558,7 @@ func (s *uniterSuite) TestSetRawK8sSpec(c *gc.C) {
 }
 
 func (s *uniterSuite) TestSetRawK8sSpecNil(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
+	_, cm, app, unit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = true
 
@@ -3788,7 +3602,7 @@ func (s *uniterSuite) TestSetRawK8sSpecNil(c *gc.C) {
 }
 
 func (s *uniterSuite) TestGetRawPodSpec(c *gc.C) {
-	u, cm, app, _ := s.setupCAASModel(c)
+	u, cm, app, _ := s.setupCAASModel(c, false)
 
 	modelOp := cm.SetRawK8sSpecOperation(nil, app.ApplicationTag(), &rawK8sSpec)
 	err := cm.State().ApplyOperation(modelOp)
@@ -3813,7 +3627,7 @@ containers:
 `[1:]
 
 func (s *uniterSuite) TestSetPodSpec(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
+	_, cm, app, unit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = true
 
@@ -3840,7 +3654,7 @@ func (s *uniterSuite) TestSetPodSpec(c *gc.C) {
 }
 
 func (s *uniterSuite) TestSetPodSpecNil(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
+	_, cm, app, unit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = true
 
@@ -3884,13 +3698,98 @@ func (s *uniterSuite) TestSetPodSpecNil(c *gc.C) {
 }
 
 func (s *uniterSuite) TestGetPodSpec(c *gc.C) {
-	u, cm, app, _ := s.setupCAASModel(c)
+	u, cm, app, _ := s.setupCAASModel(c, false)
 
 	err := cm.SetPodSpec(nil, app.ApplicationTag(), &podSpec)
 	c.Assert(err, jc.ErrorIsNil)
 	spec, err := u.GetPodSpec(app.Name())
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(spec, gc.Equals, podSpec)
+}
+
+func (s *uniterSuite) TestOpenedApplicationPortRangesByEndpoint(c *gc.C) {
+	_, cm, app, unit := s.setupCAASModel(c, true)
+	st := cm.State()
+
+	appPortRanges, err := app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 0)
+
+	portRanges, err := unit.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+
+	// Open some ports using different endpoints.
+	portRanges.Open(allEndpoints, network.MustParsePortRange("1000/tcp"))
+	portRanges.Open("db", network.MustParsePortRange("1111/udp"))
+
+	c.Assert(st.ApplyOperation(portRanges.Changes()), jc.ErrorIsNil)
+
+	// Get the open port ranges
+	arg := params.Entity{Tag: "application-cockroachdb"}
+	expectPortRanges := []params.ApplicationOpenedPorts{
+		{
+			Endpoint:   "",
+			PortRanges: []params.PortRange{{FromPort: 1000, ToPort: 1000, Protocol: "tcp"}},
+		},
+		{
+			Endpoint:   "db",
+			PortRanges: []params.PortRange{{FromPort: 1111, ToPort: 1111, Protocol: "udp"}},
+		},
+	}
+
+	uniterAPI := s.newUniterAPI(c, st, s.authorizer)
+
+	result, err := uniterAPI.OpenedApplicationPortRangesByEndpoint(arg)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result, gc.DeepEquals, params.ApplicationOpenedPortsResults{
+		Results: []params.ApplicationOpenedPortsResult{
+			{ApplicationPortRanges: expectPortRanges},
+		},
+	})
+}
+
+func (s *uniterSuite) TestOpenedPortRangesByEndpoint(c *gc.C) {
+	_, cm, app, unit := s.setupCAASModel(c, true)
+	st := cm.State()
+
+	appPortRanges, err := app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 0)
+
+	portRanges, err := unit.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+
+	// Open some ports using different endpoints.
+	portRanges.Open(allEndpoints, network.MustParsePortRange("1000/tcp"))
+	portRanges.Open("db", network.MustParsePortRange("1111/udp"))
+
+	c.Assert(st.ApplyOperation(portRanges.Changes()), jc.ErrorIsNil)
+
+	// Get the open port ranges
+	expectPortRanges := []params.OpenUnitPortRangesByEndpoint{
+		{
+			Endpoint:   "",
+			PortRanges: []params.PortRange{{FromPort: 1000, ToPort: 1000, Protocol: "tcp"}},
+		},
+		{
+			Endpoint:   "db",
+			PortRanges: []params.PortRange{{FromPort: 1111, ToPort: 1111, Protocol: "udp"}},
+		},
+	}
+
+	uniterAPI := s.newUniterAPI(c, st, s.authorizer)
+
+	result, err := uniterAPI.OpenedPortRangesByEndpoint()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result, gc.DeepEquals, params.OpenPortRangesByEndpointResults{
+		Results: []params.OpenPortRangesByEndpointResult{
+			{
+				UnitPortRanges: map[string][]params.OpenUnitPortRangesByEndpoint{
+					"unit-cockroachdb-0": expectPortRanges,
+				},
+			},
+		},
+	})
 }
 
 type unitMetricBatchesSuite struct {
@@ -3910,7 +3809,7 @@ func (s *unitMetricBatchesSuite) SetUpTest(c *gc.C) {
 
 	s.meteredCharm = s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "metered",
-		URL:  "cs:quantal/metered",
+		URL:  "ch:amd64/quantal/metered",
 	})
 	s.meteredApplication = s.Factory.MakeApplication(c, &factory.ApplicationParams{
 		Charm: s.meteredCharm,
@@ -4081,12 +3980,13 @@ func (s *uniterNetworkInfoSuite) SetUpTest(c *gc.C) {
 
 	s.wpCharm = s.Factory.MakeCharm(c, &factory.CharmParams{
 		Name: "wordpress-extra-bindings",
-		URL:  "cs:quantal/wordpress-extra-bindings-4",
+		URL:  "ch:amd64/quantal/wordpress-extra-bindings-4",
 	})
 	var err error
 	s.wordpress, err = s.State.AddApplication(state.AddApplicationArgs{
-		Name:  "wordpress",
-		Charm: s.wpCharm,
+		Name:        "wordpress",
+		Charm:       s.wpCharm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{OS: "ubuntu", Channel: "12.10/stable"}},
 		EndpointBindings: map[string]string{
 			"db":        "internal",   // relation name
 			"admin-api": "public",     // extra-binding name
@@ -4131,7 +4031,7 @@ func (s *uniterNetworkInfoSuite) SetUpTest(c *gc.C) {
 }
 
 func (s *uniterNetworkInfoSuite) addProvisionedMachineWithDevicesAndAddresses(c *gc.C, addrSuffix int) *state.Machine {
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = machine.SetInstanceInfo("i-am", "", "fake_nonce", nil, nil, nil, nil, nil, nil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -4768,9 +4668,110 @@ func (s *uniterNetworkInfoSuite) TestCommitHookChangesWhenNotLeader(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(result, gc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
-			{Error: &params.Error{Message: `prerequisites failed: "wordpress/1" is not leader of "wordpress"`}},
+			{Error: &params.Error{Message: `checking leadership continuity: "wordpress/1" is not leader of "wordpress"`}},
 		},
 	})
+}
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func (s *uniterSuite) TestCommitHookChangesWithSecrets(c *gc.C) {
+	s.addRelatedApplication(c, "wordpress", "logging", s.wordpressUnit)
+	s.leadershipChecker.isLeader = true
+	store := state.NewSecrets(s.State)
+	uri2 := secrets.NewURI()
+	_, err := store.CreateSecret(uri2, state.CreateSecretParams{
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &token{isLeader: true},
+			Data:        map[string]string{"foo2": "bar"},
+		},
+		Owner: s.wordpress.Tag(),
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	err = s.State.GrantSecretAccess(uri2, state.SecretAccessParams{
+		LeaderToken: &token{isLeader: true},
+		Scope:       s.wordpress.Tag(),
+		Subject:     s.wordpress.Tag(),
+		Role:        secrets.RoleManage,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	uri3 := secrets.NewURI()
+	_, err = store.CreateSecret(uri3, state.CreateSecretParams{
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &token{isLeader: true},
+			Data:        map[string]string{"foo3": "bar"},
+		},
+		Owner: s.wordpress.Tag(),
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	err = s.State.GrantSecretAccess(uri3, state.SecretAccessParams{
+		LeaderToken: &token{isLeader: true},
+		Scope:       s.wordpress.Tag(),
+		Subject:     s.wordpress.Tag(),
+		Role:        secrets.RoleManage,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+
+	b := apiuniter.NewCommitHookParamsBuilder(s.wordpressUnit.UnitTag())
+	uri := secrets.NewURI()
+	b.AddSecretCreates([]apiuniter.SecretCreateArg{{
+		SecretUpsertArg: apiuniter.SecretUpsertArg{
+			URI:   uri,
+			Label: ptr("foobar"),
+			Value: secrets.NewSecretValue(map[string]string{"foo": "bar"}),
+		},
+		OwnerTag: s.wordpress.Tag(),
+	}})
+	b.AddSecretUpdates([]apiuniter.SecretUpsertArg{{
+		URI:          uri,
+		RotatePolicy: ptr(secrets.RotateDaily),
+		Description:  ptr("a secret"),
+		Label:        ptr("foobar"),
+		Value:        secrets.NewSecretValue(map[string]string{"foo": "bar2"}),
+	}})
+	b.AddSecretDeletes([]apiuniter.SecretDeleteArg{{URI: uri3, Revision: ptr(1)}})
+	b.AddSecretGrants([]apiuniter.SecretGrantRevokeArgs{{
+		URI:             uri,
+		ApplicationName: ptr(s.mysql.Name()),
+		Role:            secrets.RoleView,
+	}, {
+		URI:             uri2,
+		ApplicationName: ptr(s.mysql.Name()),
+		Role:            secrets.RoleView,
+	}})
+	b.AddSecretRevokes([]apiuniter.SecretGrantRevokeArgs{{
+		URI:             uri2,
+		ApplicationName: ptr(s.mysql.Name()),
+	}})
+	req, _ := b.Build()
+
+	result, err := s.uniter.CommitHookChanges(req)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{Error: nil},
+		},
+	})
+
+	// Verify state
+	_, err = store.GetSecret(uri3)
+	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	md, err := store.GetSecret(uri)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(md.Description, gc.Equals, "a secret")
+	c.Assert(md.Label, gc.Equals, "foobar")
+	c.Assert(md.RotatePolicy, gc.Equals, secrets.RotateDaily)
+	val, _, err := store.GetSecretValue(uri, 2)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(val.EncodedValues(), jc.DeepEquals, map[string]string{"foo": "bar2"})
+	access, err := s.State.SecretAccess(uri, s.mysql.Tag())
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleView)
+	access, err = s.State.SecretAccess(uri2, s.mysql.Tag())
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleNone)
 }
 
 func (s *uniterSuite) TestCommitHookChangesWithStorage(c *gc.C) {
@@ -4831,8 +4832,45 @@ func (s *uniterSuite) TestCommitHookChangesWithStorage(c *gc.C) {
 	c.Assert(newVolumeAttachments, gc.HasLen, len(oldVolumeAttachments)+1, gc.Commentf("expected an additional instance of block storage to be added"))
 }
 
+func (s *uniterSuite) TestCommitHookChangesWithPortsSidecarApplication(c *gc.C) {
+	_, cm, app, unit := s.setupCAASModel(c, true)
+
+	b := apiuniter.NewCommitHookParamsBuilder(unit.UnitTag())
+	b.UpdateNetworkInfo()
+	b.UpdateCharmState(map[string]string{"charm-key": "charm-value"})
+
+	b.OpenPortRange("db", network.MustParsePortRange("80/tcp"))
+	b.OpenPortRange("db", network.MustParsePortRange("7337/tcp")) // same port closed below; this should be a no-op
+	b.ClosePortRange("db", network.MustParsePortRange("7337/tcp"))
+	req, _ := b.Build()
+
+	s.State = cm.State()
+	s.authorizer = apiservertesting.FakeAuthorizer{Tag: unit.Tag()}
+	uniterAPI, err := uniter.NewUniterAPI(s.facadeContext())
+	c.Assert(err, jc.ErrorIsNil)
+
+	result, err := uniterAPI.CommitHookChanges(req)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{Error: nil},
+		},
+	})
+
+	appPortRanges, err := app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), jc.DeepEquals, []network.PortRange{{Protocol: "tcp", FromPort: 80, ToPort: 80}})
+
+	portRanges, err := unit.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+
+	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
+		"db": []network.PortRange{network.MustParsePortRange("80/tcp")},
+	})
+}
+
 func (s *uniterNetworkInfoSuite) assertCommitHookChangesCAAS(c *gc.C, isRaw bool) {
-	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c)
+	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = true
 
@@ -4844,6 +4882,7 @@ func (s *uniterNetworkInfoSuite) assertCommitHookChangesCAAS(c *gc.C, isRaw bool
 	} else {
 		b.SetPodSpec(gitlab.ApplicationTag(), &podSpec)
 	}
+
 	req, _ := b.Build()
 
 	s.State = cm.State()
@@ -4892,7 +4931,7 @@ func (s *uniterNetworkInfoSuite) TestCommitHookChangesCAASRawK8sSpec(c *gc.C) {
 }
 
 func (s *uniterNetworkInfoSuite) TestCommitHookChangesCAASNotLeader(c *gc.C) {
-	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c)
+	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = false
 
@@ -4911,13 +4950,13 @@ func (s *uniterNetworkInfoSuite) TestCommitHookChangesCAASNotLeader(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(result, gc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
-			{Error: &params.Error{Message: `prerequisites failed: "` + gitlabUnit.Tag().Id() + `" is not leader of "` + gitlab.Name() + `"`}},
+			{Error: &params.Error{Message: `checking leadership continuity: "` + gitlabUnit.Tag().Id() + `" is not leader of "` + gitlab.Name() + `"`}},
 		},
 	})
 }
 
 func (s *uniterNetworkInfoSuite) TestCommitHookChangesCAASNotAllowSetPodSpecAndSetRawK8sSpec(c *gc.C) {
-	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c)
+	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c, false)
 
 	s.leadershipChecker.isLeader = true
 
@@ -4948,7 +4987,7 @@ func (s *uniterNetworkInfoSuite) TestCommitHookChangesCAASNotAllowSetPodSpecAndS
 }
 
 func (s *uniterSuite) TestNetworkInfoCAASModelRelation(c *gc.C) {
-	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c)
+	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c, false)
 
 	st := cm.State()
 	f := factory.NewFactory(st, s.StatePool)
@@ -5004,7 +5043,7 @@ func (s *uniterSuite) TestNetworkInfoCAASModelRelation(c *gc.C) {
 }
 
 func (s *uniterSuite) TestNetworkInfoCAASModelNoRelation(c *gc.C) {
-	_, cm, wp, wpUnit := s.setupCAASModel(c)
+	_, cm, wp, wpUnit := s.setupCAASModel(c, false)
 
 	st := cm.State()
 	f := factory.NewFactory(st, s.StatePool)
@@ -5098,7 +5137,7 @@ func (*fakeBroker) APIVersion() (string, error) {
 }
 
 func (s *cloudSpecUniterSuite) TestCloudAPIVersion(c *gc.C) {
-	_, cm, _, _ := s.setupCAASModel(c)
+	_, cm, _, _ := s.setupCAASModel(c, false)
 
 	uniterAPI := s.newUniterAPI(c, cm.State(), s.authorizer)
 	uniter.SetNewContainerBrokerFunc(uniterAPI, func(stdcontext.Context, environs.OpenParams) (caas.Broker, error) {
@@ -5139,7 +5178,7 @@ type fakeToken struct {
 	err error
 }
 
-func (t *fakeToken) Check(int, interface{}) error {
+func (t *fakeToken) Check() error {
 	return t.err
 }
 
@@ -5152,7 +5191,7 @@ type token struct {
 	unit, application string
 }
 
-func (t *token) Check(attempt int, trapdoorKey interface{}) error {
+func (t *token) Check() error {
 	if !t.isLeader {
 		return leadership.NewNotLeaderError(t.unit, t.application)
 	}

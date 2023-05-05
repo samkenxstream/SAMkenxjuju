@@ -9,14 +9,15 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/hashicorp/go-uuid"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3"
 
 	"github.com/juju/juju/core/crossmodel"
@@ -85,9 +86,13 @@ func ApplicationOfferEndpoint(offer crossmodel.ApplicationOffer, relationName st
 }
 
 // TODO(wallyworld) - remove when we use UUID everywhere
-func applicationOfferUUID(st *State, offerName string) (string, error) {
+func applicationOfferUUID(st *State, offerNameOrUUID string) (string, error) {
+	_, err := uuid.ParseUUID(offerNameOrUUID)
+	if err == nil {
+		return offerNameOrUUID, nil
+	}
 	appOffers := &applicationOffers{st: st}
-	offer, err := appOffers.ApplicationOffer(offerName)
+	offer, err := appOffers.ApplicationOffer(offerNameOrUUID)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -143,7 +148,7 @@ func (s *applicationOffers) AllApplicationOffers() (offers []*crossmodel.Applica
 	var docs []applicationOfferDoc
 	err := applicationOffersCollection.Find(bson.D{}).All(&docs)
 	if err != nil {
-		return nil, errors.Errorf("cannot get all application offers")
+		return nil, errors.Annotate(err, "getting application offer documents")
 	}
 	for _, doc := range docs {
 		offer, err := s.makeApplicationOffer(doc)

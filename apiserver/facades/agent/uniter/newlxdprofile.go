@@ -4,7 +4,7 @@
 package uniter
 
 import (
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 
 	"github.com/juju/loggo"
@@ -128,7 +128,7 @@ func (c *lxdProfileCharmV2) LXDProfile() lxdprofile.Profile {
 	}
 }
 
-// ExternalLXDProfileAPIv2 can be used for API registration.
+// NewExternalLXDProfileAPIv2 can be used for API registration.
 func NewExternalLXDProfileAPIv2(
 	st *state.State,
 	resources facade.Resources,

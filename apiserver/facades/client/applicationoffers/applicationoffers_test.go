@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/checkers"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
@@ -57,7 +57,7 @@ func (s *applicationOffersSuite) SetUpTest(c *gc.C) {
 	var err error
 	s.bakery = &mockBakeryService{caveats: make(map[string][]checkers.Caveat)}
 	thirdPartyKey := bakery.MustGenerateKey()
-	s.authContext, err = crossmodel.NewAuthContext(&mockCommonStatePool{s.mockStatePool}, thirdPartyKey, s.bakery)
+	s.authContext, err = crossmodel.NewAuthContext(s.mockState, thirdPartyKey, s.bakery, nil, nil)
 	c.Assert(err, jc.ErrorIsNil)
 	api, err := applicationoffers.CreateOffersAPI(
 		getApplicationOffers, getEnviron, getFakeControllerInfo,
@@ -295,7 +295,7 @@ func (s *applicationOffersSuite) assertList(c *gc.C, expectedErr error, expected
 				},
 			},
 			ApplicationName: "test",
-			CharmURL:        "cs:db2-2",
+			CharmURL:        "ch:db2-2",
 			Connections: []params.OfferConnection{{
 				SourceModelTag: testing.ModelTag.String(),
 				RelationId:     1,
@@ -450,7 +450,7 @@ func (s *applicationOffersSuite) TestShow(c *gc.C) {
 				},
 			},
 			ApplicationName: "test",
-			CharmURL:        "cs:db2-2",
+			CharmURL:        "ch:db2-2",
 			Connections: []params.OfferConnection{{
 				SourceModelTag: "model-deadbeef-0bad-400d-8000-4b1d0d06f00d",
 				RelationId:     1, Username: "fred@external", Endpoint: "db",
@@ -464,6 +464,7 @@ func (s *applicationOffersSuite) TestShow(c *gc.C) {
 	s.assertShow(c, "fred@external/prod.hosted-db2", expected)
 	// Again with an unqualified model path.
 	s.mockState.AdminTag = names.NewUserTag("fred@external")
+	s.authorizer.AdminTag = s.mockState.AdminTag
 	s.authorizer.Tag = s.mockState.AdminTag
 	expected[0].Result.Users[0].UserName = "fred@external"
 	s.applicationOffers.ResetCalls()
@@ -767,7 +768,7 @@ func (s *applicationOffersSuite) TestFind(c *gc.C) {
 					{UserName: "admin", DisplayName: "", Access: "admin"},
 				}},
 			ApplicationName: "test",
-			CharmURL:        "cs:db2-2",
+			CharmURL:        "ch:db2-2",
 			Connections: []params.OfferConnection{{
 				SourceModelTag: "model-deadbeef-0bad-400d-8000-4b1d0d06f00d",
 				RelationId:     1, Username: "fred@external", Endpoint: "db",
@@ -894,7 +895,7 @@ func (s *applicationOffersSuite) TestFindMulti(c *gc.C) {
 		"db2": &mockApplication{
 			name:  "db2",
 			charm: ch,
-			curl:  "cs:db2-2",
+			curl:  "ch:db2-2",
 			bindings: map[string]string{
 				"db2": "myspace",
 			},
@@ -942,14 +943,14 @@ func (s *applicationOffersSuite) TestFindMulti(c *gc.C) {
 		"mysql": &mockApplication{
 			name:  "mysql",
 			charm: ch,
-			curl:  "cs:mysql-2",
+			curl:  "ch:mysql-2",
 			bindings: map[string]string{
 				"mysql": "anotherspace",
 			},
 		},
 		"postgresql": &mockApplication{
 			charm: ch,
-			curl:  "cs:postgresql-2",
+			curl:  "ch:postgresql-2",
 			bindings: map[string]string{
 				"postgresql": "anotherspace",
 			},
@@ -1076,7 +1077,7 @@ func (s *applicationOffersSuite) TestFindMulti(c *gc.C) {
 						{UserName: "someone", DisplayName: "someone", Access: "admin"},
 					},
 				},
-				CharmURL: "cs:postgresql-2",
+				CharmURL: "ch:postgresql-2",
 			},
 		},
 	})
@@ -1149,7 +1150,7 @@ func (s *consumeSuite) SetUpTest(c *gc.C) {
 	}
 	var err error
 	thirdPartyKey := bakery.MustGenerateKey()
-	s.authContext, err = crossmodel.NewAuthContext(&mockCommonStatePool{s.mockStatePool}, thirdPartyKey, s.bakery)
+	s.authContext, err = crossmodel.NewAuthContext(s.mockState, thirdPartyKey, s.bakery, nil, nil)
 	c.Assert(err, jc.ErrorIsNil)
 	api, err := applicationoffers.CreateOffersAPI(
 		getApplicationOffers, getEnviron, getFakeControllerInfo,
@@ -1192,18 +1193,24 @@ func (s *consumeSuite) TestConsumeDetailsNoPermission(c *gc.C) {
 }
 
 func (s *consumeSuite) TestConsumeDetailsWithPermission(c *gc.C) {
-	s.assertConsumeDetailsWithPermission(c, false)
+	s.assertConsumeDetailsWithPermission(c, false, "")
 }
 
 func (s *consumeSuite) TestConsumeDetailsSpecifiedUser(c *gc.C) {
-	s.assertConsumeDetailsWithPermission(c, true)
+	s.assertConsumeDetailsWithPermission(c, true, "")
 }
 
-func (s *consumeSuite) assertConsumeDetailsWithPermission(c *gc.C, specifiedUser bool) {
+func (s *consumeSuite) TestConsumeDetailsWithAuthToken(c *gc.C) {
+	s.authorizer.AuthToken = "auth-token"
+	s.assertConsumeDetailsWithPermission(c, true, "auth-token")
+}
+
+func (s *consumeSuite) assertConsumeDetailsWithPermission(c *gc.C, specifiedUser bool, authToken string) {
 	s.setupOffer()
 	st := s.mockStatePool.st[testing.ModelTag.Id()]
 	st.(*mockState).users["someone"] = &mockUser{"someone"}
 	apiUser := names.NewUserTag("someone")
+	s.authorizer.HasConsumeTag = apiUser
 	offer := names.NewApplicationOfferTag("hosted-mysql")
 	err := st.CreateOfferAccess(offer, apiUser, permission.ConsumeAccess)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1249,6 +1256,11 @@ func (s *consumeSuite) assertConsumeDetailsWithPermission(c *gc.C, specifiedUser
 		Addrs:         []string{"192.168.1.1:17070"},
 		CACert:        testing.CACert,
 	})
+	c.Assert(results.Results[0].AuthToken, gc.Equals, authToken)
+	if authToken != "" {
+		c.Assert(results.Results[0].Macaroon, gc.IsNil)
+		return
+	}
 	c.Assert(results.Results[0].Macaroon.Id(), jc.DeepEquals, []byte("id"))
 
 	cav := s.bakery.caveats[string(results.Results[0].Macaroon.Id())]
@@ -1296,6 +1308,7 @@ func (s *consumeSuite) TestConsumeDetailsDefaultEndpoint(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	s.authorizer.Tag = apiUser
+	s.authorizer.HasConsumeTag = apiUser
 	results, err := s.api.GetConsumeDetails(params.ConsumeOfferDetailsArg{
 		OfferURLs: params.OfferURLs{
 			OfferURLs: []string{"fred@external/prod.hosted-mysql"},

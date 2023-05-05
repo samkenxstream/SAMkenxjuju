@@ -6,14 +6,15 @@ package bundlechanges_test
 import (
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/loggo"
 	jujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
+	"github.com/kr/pretty"
 	gc "gopkg.in/check.v1"
-	"gopkg.in/yaml.v2"
 
 	bundlechanges "github.com/juju/juju/core/bundle/changes"
+	"github.com/juju/juju/core/series"
 )
 
 type diffSuite struct {
@@ -48,7 +49,10 @@ func (s *diffSuite) TestApplicationExposedEndpointsDiff(c *gc.C) {
 	bundleContent := `
 applications:
   prometheus:
-    charm: cs:xenial/prometheus-7
+    charm: ch:prometheus
+    revision: 7
+    series: xenial
+    channel: stable
     exposed-endpoints:
       foo:
         expose-to-spaces:
@@ -70,8 +74,11 @@ applications:
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				ExposedEndpoints: map[string]bundlechanges.ExposedEndpoint{
 					"foo": { // Same space and CIDRs
 						ExposeToSpaces: []string{"outer"},
@@ -158,7 +165,10 @@ func (s *diffSuite) TestModelMissingApplication(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
         machines:
@@ -183,7 +193,10 @@ func (s *diffSuite) TestBundleMissingApplication(c *gc.C) {
 	bundleContent := `
         applications:
             memcached:
-                charm: cs:xenial/memcached-7
+                charm: ch:memcached
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
         machines:
@@ -193,15 +206,21 @@ func (s *diffSuite) TestBundleMissingApplication(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
 			},
 			"memcached": {
-				Name:  "memcached",
-				Charm: "cs:xenial/memcached-7",
+				Name:     "memcached",
+				Charm:    "ch:memcached",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "memcached/0", Machine: "0"},
 					{Name: "memcached/1", Machine: "1"},
@@ -225,7 +244,10 @@ func (s *diffSuite) TestMissingApplicationBoth(c *gc.C) {
 	bundleContent := `
         applications:
             memcached:
-                charm: cs:xenial/memcached-7
+                charm: ch:memcached
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
         machines:
@@ -235,8 +257,11 @@ func (s *diffSuite) TestMissingApplicationBoth(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
@@ -260,7 +285,10 @@ func (s *diffSuite) TestApplicationCharm(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
         machines:
@@ -270,8 +298,11 @@ func (s *diffSuite) TestApplicationCharm(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-8",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 8,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 					{Name: "prometheus/1", Machine: "1"},
@@ -286,9 +317,9 @@ func (s *diffSuite) TestApplicationCharm(c *gc.C) {
 	expectedDiff := &bundlechanges.BundleDiff{
 		Applications: map[string]*bundlechanges.ApplicationDiff{
 			"prometheus": {
-				Charm: &bundlechanges.StringDiff{
-					Bundle: "cs:xenial/prometheus-7",
-					Model:  "cs:xenial/prometheus-8",
+				Revision: &bundlechanges.IntDiff{
+					Bundle: 7,
+					Model:  8,
 				},
 			},
 		},
@@ -300,7 +331,10 @@ func (s *diffSuite) TestApplicationSeries(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 series: bionic
                 num_units: 2
                 to: [0, 1]
@@ -311,9 +345,11 @@ func (s *diffSuite) TestApplicationSeries(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:   "prometheus",
-				Charm:  "cs:prometheus-7",
-				Series: "xenial",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Channel:  "stable",
+				Revision: 7,
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 					{Name: "prometheus/1", Machine: "1"},
@@ -342,8 +378,9 @@ func (s *diffSuite) TestApplicationChannel(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:prometheus-7
+                charm: ch:prometheus
                 series: bionic
+                revision: 7
                 channel: 1.0/stable
                 num_units: 2
                 to: [0, 1]
@@ -354,10 +391,11 @@ func (s *diffSuite) TestApplicationChannel(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:    "prometheus",
-				Charm:   "cs:prometheus-7",
-				Channel: "2.0/edge",
-				Series:  "bionic",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Revision: 7,
+				Channel:  "2.0/edge",
+				Base:     series.MakeDefaultBase("ubuntu", "18.04"),
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 					{Name: "prometheus/1", Machine: "1"},
@@ -386,7 +424,10 @@ func (s *diffSuite) TestApplicationNumUnits(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
         machines:
@@ -396,8 +437,11 @@ func (s *diffSuite) TestApplicationNumUnits(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
@@ -426,7 +470,10 @@ func (s *diffSuite) TestApplicationScale(c *gc.C) {
         bundle: kubernetes
         applications:
             prometheus:
-                charm: cs:prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 scale: 2
                 placement: foo=bar
             `
@@ -434,7 +481,10 @@ func (s *diffSuite) TestApplicationScale(c *gc.C) {
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
 				Name:      "prometheus",
-				Charm:     "cs:prometheus-7",
+				Charm:     "ch:prometheus",
+				Base:      series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:   "stable",
+				Revision:  7,
 				Scale:     1,
 				Placement: "foo=bar",
 			},
@@ -457,11 +507,17 @@ func (s *diffSuite) TestApplicationSubordinateNumUnits(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
             nrpe:
-                charm: cs:xenial/nrpe-12
+                charm: ch:nrpe
+                revision: 12
+                series: xenial
+                channel: stable
         machines:
             0:
             1:
@@ -472,8 +528,11 @@ func (s *diffSuite) TestApplicationSubordinateNumUnits(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 					{Name: "prometheus/1", Machine: "1"},
@@ -481,7 +540,10 @@ func (s *diffSuite) TestApplicationSubordinateNumUnits(c *gc.C) {
 			},
 			"nrpe": {
 				Name:          "nrpe",
-				Charm:         "cs:xenial/nrpe-12",
+				Charm:         "ch:nrpe",
+				Base:          series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:       "stable",
+				Revision:      12,
 				SubordinateTo: []string{"prometheus"},
 				Units: []bundlechanges.Unit{
 					{Name: "nrpe/0", Machine: "0"},
@@ -510,7 +572,10 @@ func (s *diffSuite) TestApplicationConstraints(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 constraints: something
                 to: [0]
@@ -520,8 +585,12 @@ func (s *diffSuite) TestApplicationConstraints(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:        "prometheus",
-				Charm:       "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
+
 				Constraints: "else",
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
@@ -550,7 +619,10 @@ func (s *diffSuite) TestBundleSeries(c *gc.C) {
         series: focal
         applications:
             prometheus:
-                charm: cs:focal/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: focal
+                channel: stable
                 num_units: 1
                 constraints: something
                 to: [0]
@@ -561,8 +633,10 @@ func (s *diffSuite) TestBundleSeries(c *gc.C) {
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
 				Name:        "prometheus",
-				Charm:       "cs:focal/prometheus-7",
-				Series:      "focal",
+				Charm:       "ch:prometheus",
+				Channel:     "stable",
+				Revision:    7,
+				Base:        series.MakeDefaultBase("ubuntu", "20.04"),
 				Constraints: "something",
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
@@ -571,8 +645,8 @@ func (s *diffSuite) TestBundleSeries(c *gc.C) {
 		},
 		Machines: map[string]*bundlechanges.Machine{
 			"0": {
-				ID:     "0",
-				Series: "focal",
+				ID:   "0",
+				Base: series.MakeDefaultBase("ubuntu", "20.04"),
 			},
 		},
 	}
@@ -584,7 +658,10 @@ func (s *diffSuite) TestNoBundleSeries(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:focal/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: focal
+                channel: stable
                 num_units: 1
                 constraints: something
                 to: [0]
@@ -595,8 +672,10 @@ func (s *diffSuite) TestNoBundleSeries(c *gc.C) {
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
 				Name:        "prometheus",
-				Charm:       "cs:focal/prometheus-7",
-				Series:      "focal",
+				Charm:       "ch:prometheus",
+				Channel:     "stable",
+				Revision:    7,
+				Base:        series.MakeDefaultBase("ubuntu", "20.04"),
 				Constraints: "something",
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
@@ -605,20 +684,12 @@ func (s *diffSuite) TestNoBundleSeries(c *gc.C) {
 		},
 		Machines: map[string]*bundlechanges.Machine{
 			"0": {
-				ID:     "0",
-				Series: "focal",
+				ID:   "0",
+				Base: series.MakeDefaultBase("ubuntu", "20.04"),
 			},
 		},
 	}
 	expectedDiff := &bundlechanges.BundleDiff{
-		Applications: map[string]*bundlechanges.ApplicationDiff{
-			"prometheus": {
-				Series: &bundlechanges.StringDiff{
-					Bundle: "",
-					Model:  "focal",
-				},
-			},
-		},
 		Machines: map[string]*bundlechanges.MachineDiff{
 			"0": {
 				Series: &bundlechanges.StringDiff{
@@ -635,7 +706,10 @@ func (s *diffSuite) TestApplicationOptions(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 options:
                     griffin: [shoes, undies]
@@ -648,8 +722,11 @@ func (s *diffSuite) TestApplicationOptions(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Options: map[string]interface{}{
 					"griffin": []interface{}{"shoes", "undies"},
 					"justin":  "tshirt",
@@ -682,7 +759,10 @@ func (s *diffSuite) TestApplicationAnnotations(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 annotations:
                     griffin: shoes
@@ -694,8 +774,11 @@ func (s *diffSuite) TestApplicationAnnotations(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Annotations: map[string]string{
 					"griffin": "shorts",
 					"justin":  "tshirt",
@@ -727,7 +810,10 @@ func (s *diffSuite) TestApplicationAnnotationsWithOptionOff(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 annotations:
                     clint: hat
@@ -740,8 +826,11 @@ func (s *diffSuite) TestApplicationAnnotationsWithOptionOff(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Annotations: map[string]string{
 					"clint":   "hat",
 					"griffin": "shorts",
@@ -770,7 +859,10 @@ func (s *diffSuite) TestApplicationExpose(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
         machines:
@@ -779,9 +871,12 @@ func (s *diffSuite) TestApplicationExpose(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:    "prometheus",
-				Charm:   "cs:xenial/prometheus-7",
-				Exposed: true,
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
+				Exposed:  true,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
@@ -819,7 +914,10 @@ func (s *diffSuite) TestApplicationExposeImplicitCIDRs(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 expose: true
                 to: [0]
@@ -829,9 +927,12 @@ func (s *diffSuite) TestApplicationExposeImplicitCIDRs(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:    "prometheus",
-				Charm:   "cs:xenial/prometheus-7",
-				Exposed: true,
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
+				Exposed:  true,
 				ExposedEndpoints: map[string]bundlechanges.ExposedEndpoint{
 					"": {
 						ExposeToCIDRs: []string{"10.0.0.0/24"},
@@ -873,7 +974,10 @@ func (s *diffSuite) TestApplicationPlacement(c *gc.C) {
         bundle: kubernetes
         applications:
             prometheus:
-                charm: cs:prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 scale: 2
                 placement: foo=bar
             `
@@ -881,7 +985,10 @@ func (s *diffSuite) TestApplicationPlacement(c *gc.C) {
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
 				Name:      "prometheus",
-				Charm:     "cs:prometheus-7",
+				Charm:     "ch:prometheus",
+				Base:      series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:   "stable",
+				Revision:  7,
 				Scale:     2,
 				Placement: "foo=baz",
 			},
@@ -904,7 +1011,10 @@ func (s *diffSuite) TestModelMissingMachine(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0, 1]
         machines:
@@ -914,8 +1024,11 @@ func (s *diffSuite) TestModelMissingMachine(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "2"},
 					{Name: "prometheus/1", Machine: "2"},
@@ -941,7 +1054,10 @@ func (s *diffSuite) TestBundleMissingMachine(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 2
                 to: [0]
         machines:
@@ -950,8 +1066,11 @@ func (s *diffSuite) TestBundleMissingMachine(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 					{Name: "prometheus/1", Machine: "1"},
@@ -978,7 +1097,10 @@ func (s *diffSuite) TestMachineSeries(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
         machines:
@@ -988,8 +1110,11 @@ func (s *diffSuite) TestMachineSeries(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
@@ -997,8 +1122,8 @@ func (s *diffSuite) TestMachineSeries(c *gc.C) {
 		},
 		Machines: map[string]*bundlechanges.Machine{
 			"0": {
-				ID:     "0",
-				Series: "xenial",
+				ID:   "0",
+				Base: series.MakeDefaultBase("ubuntu", "16.04"),
 			},
 		},
 	}
@@ -1019,7 +1144,10 @@ func (s *diffSuite) TestMachineAnnotations(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
         machines:
@@ -1031,8 +1159,11 @@ func (s *diffSuite) TestMachineAnnotations(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
@@ -1065,7 +1196,10 @@ func (s *diffSuite) TestMachineAnnotationsWithOptionOff(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
         machines:
@@ -1077,8 +1211,11 @@ func (s *diffSuite) TestMachineAnnotationsWithOptionOff(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
@@ -1108,11 +1245,17 @@ func (s *diffSuite) TestRelations(c *gc.C) {
 	bundleContent := `
         applications:
             memcached:
-                charm: cs:xenial/memcached-7
+                charm: ch:memcached
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [1]
         machines:
@@ -1125,15 +1268,21 @@ func (s *diffSuite) TestRelations(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
 			},
 			"memcached": {
-				Name:  "memcached",
-				Charm: "cs:xenial/memcached-7",
+				Name:     "memcached",
+				Charm:    "ch:memcached",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "memcached/1", Machine: "1"},
 				},
@@ -1178,11 +1327,17 @@ func (s *diffSuite) TestRelationsWithMissingEndpoints(c *gc.C) {
 	bundleContent := `
         applications:
             memcached:
-                charm: cs:xenial/memcached-7
+                charm: ch:memcached
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [1]
         machines:
@@ -1194,15 +1349,21 @@ func (s *diffSuite) TestRelationsWithMissingEndpoints(c *gc.C) {
 	model := &bundlechanges.Model{
 		Applications: map[string]*bundlechanges.Application{
 			"prometheus": {
-				Name:  "prometheus",
-				Charm: "cs:xenial/prometheus-7",
+				Name:     "prometheus",
+				Charm:    "ch:prometheus",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "prometheus/0", Machine: "0"},
 				},
 			},
 			"memcached": {
-				Name:  "memcached",
-				Charm: "cs:xenial/memcached-7",
+				Name:     "memcached",
+				Charm:    "ch:memcached",
+				Base:     series.MakeDefaultBase("ubuntu", "16.04"),
+				Channel:  "stable",
+				Revision: 7,
 				Units: []bundlechanges.Unit{
 					{Name: "memcached/1", Machine: "1"},
 				},
@@ -1245,7 +1406,10 @@ func (s *diffSuite) TestValidationMissingModel(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
         machines:
@@ -1263,7 +1427,10 @@ func (s *diffSuite) TestValidationMissingLogger(c *gc.C) {
 	bundleContent := `
         applications:
             prometheus:
-                charm: cs:xenial/prometheus-7
+                charm: ch:prometheus
+                revision: 7
+                series: xenial
+                channel: stable
                 num_units: 1
                 to: [0]
         machines:
@@ -1304,12 +1471,12 @@ func (s *diffSuite) checkDiffImpl(c *gc.C, config bundlechanges.DiffConfig, expe
 		c.Assert(diff, gc.IsNil)
 	} else {
 		c.Assert(err, jc.ErrorIsNil)
-		diffOut, err := yaml.Marshal(diff)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Logf("actual: %s", diffOut)
-		expectedOut, err := yaml.Marshal(expected)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Logf("expected: %s", expectedOut)
+		//diffOut, err := yaml.Marshal(diff)
+		//c.Assert(err, jc.ErrorIsNil)
+		c.Logf("actual: %s", pretty.Sprint(diff))
+		//expectedOut, err := yaml.Marshal(expected)
+		//c.Assert(err, jc.ErrorIsNil)
+		c.Logf("expected: %s", pretty.Sprint(expected))
 		c.Assert(diff, gc.DeepEquals, expected)
 	}
 }

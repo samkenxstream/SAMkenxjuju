@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
-	charmresource "github.com/juju/charm/v9/resource"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 	"github.com/juju/utils/v3"
 	"github.com/kr/pretty"
@@ -93,6 +93,11 @@ const (
 	resourcesCharmstoreIDSuffix = "#charmstore"
 )
 
+// A change in CharmModifiedVersion triggers the uniter to run the upgrade_charm
+// hook (and config hook). Increment required for a running unit to pick up
+// new resources from `attach` or when a charm is upgraded without a new charm
+// revision.
+//
 // IncrementCharmModifiedVersionType is the argument type for incrementing CharmModifiedVersion or not.
 type IncrementCharmModifiedVersionType bool
 

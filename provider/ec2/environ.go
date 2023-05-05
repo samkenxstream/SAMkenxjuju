@@ -39,12 +39,13 @@ import (
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
-	coreseries "github.com/juju/juju/core/series"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/context"
+	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/tags"
@@ -91,8 +92,9 @@ var _ Client = (*ec2.Client)(nil)
 type environ struct {
 	environs.NoSpaceDiscoveryEnviron
 
-	name  string
-	cloud environscloudspec.CloudSpec
+	name           string
+	cloud          environscloudspec.CloudSpec
+	controllerUUID string
 
 	iamClient     IAMClient
 	iamClientFunc IAMClientFunc
@@ -255,6 +257,7 @@ var unsupportedConstraints = []string{
 	// use virt-type in StartInstances
 	constraints.VirtType,
 	constraints.AllocatePublicIP,
+	constraints.ImageID,
 }
 
 // ConstraintsValidator is defined on the Environs interface.
@@ -476,14 +479,23 @@ func (e *environ) PrecheckInstance(ctx context.ProviderCallContext, args environ
 
 // AgentMetadataLookupParams returns parameters which are used to query agent simple-streams metadata.
 func (e *environ) AgentMetadataLookupParams(region string) (*simplestreams.MetadataLookupParams, error) {
-	series := config.PreferredSeries(e.ecfg())
-	hostOSType := coreseries.DefaultOSTypeNameFromSeries(series)
-	return e.metadataLookupParams(region, hostOSType)
+	base := config.PreferredBase(e.ecfg())
+	return e.metadataLookupParams(region, base.OS)
 }
 
 // ImageMetadataLookupParams returns parameters which are used to query image simple-streams metadata.
 func (e *environ) ImageMetadataLookupParams(region string) (*simplestreams.MetadataLookupParams, error) {
-	return e.metadataLookupParams(region, config.PreferredSeries(e.ecfg()))
+	base := config.PreferredBase(e.ecfg())
+	baseSeries, err := series.GetSeriesFromBase(base)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	release, err := imagemetadata.ImageRelease(baseSeries)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return e.metadataLookupParams(region, release)
 }
 
 // MetadataLookupParams returns parameters which are used to query simple-streams metadata.
@@ -600,7 +612,7 @@ func (e *environ) StartInstance(
 		instanceTypes,
 		&instances.InstanceConstraint{
 			Region:      e.cloud.Region,
-			Series:      args.InstanceConfig.Series,
+			Base:        args.InstanceConfig.Base,
 			Arch:        arch,
 			Constraints: args.Constraints,
 			Storage:     []string{ssdStorage, ebsStorage},
@@ -619,28 +631,17 @@ func (e *environ) StartInstance(
 	if err != nil {
 		return nil, environs.ZoneIndependentError(fmt.Errorf("constructing user data: %w", err))
 	}
-
 	logger.Debugf("ec2 user data; %d bytes", len(userData))
-	apiPorts := make([]int, 0, 2)
-	if args.InstanceConfig.IsController() {
-		apiPorts = append(apiPorts, args.InstanceConfig.ControllerConfig.APIPort())
-		if args.InstanceConfig.ControllerConfig.AutocertDNSName() != "" {
-			// Open port 80 as well as it handles Let's Encrypt HTTP challenge.
-			apiPorts = append(apiPorts, 80)
-		}
-	} else {
-		apiPorts = append(apiPorts, args.InstanceConfig.APIInfo.Ports()[0])
-	}
 
 	_ = callback(status.Allocating, "Setting up groups", nil)
-	groupIDs, err := e.setUpGroups(ctx, args.ControllerUUID, args.InstanceConfig.MachineId, apiPorts)
+	groupIDs, err := e.setUpGroups(ctx, args.ControllerUUID, args.InstanceConfig.MachineId)
 	if err != nil {
 		return nil, annotateWrapError(err, "cannot set up groups")
 	}
 
 	blockDeviceMappings, err := getBlockDeviceMappings(
 		args.Constraints,
-		args.InstanceConfig.Series,
+		args.InstanceConfig.Base.OS,
 		args.InstanceConfig.IsController(),
 		args.RootDisk,
 	)
@@ -648,6 +649,22 @@ func (e *environ) StartInstance(
 		return nil, annotateWrapError(err, "cannot get block device mapping")
 	}
 	rootDiskSize := uint64(aws.ToInt32(blockDeviceMappings[0].Ebs.VolumeSize)) * 1024
+
+	instanceName := resourceName(
+		names.NewMachineTag(args.InstanceConfig.MachineId), e.Config().Name(),
+	)
+	args.InstanceConfig.Tags[tagName] = instanceName
+
+	instanceTags := CreateTagSpecification(types.ResourceTypeInstance, args.InstanceConfig.Tags)
+
+	cfg := e.Config()
+	rootVolumeTags := tags.ResourceTags(
+		names.NewModelTag(cfg.UUID()),
+		names.NewControllerTag(args.ControllerUUID),
+		cfg,
+	)
+	rootVolumeTags[tagName] = instanceName + "-root"
+	volumeTags := CreateTagSpecification(types.ResourceTypeVolume, rootVolumeTags)
 
 	var instResp *ec2.RunInstancesOutput
 	commonRunArgs := &ec2.RunInstancesInput{
@@ -658,6 +675,17 @@ func (e *environ) StartInstance(
 		SecurityGroupIds:    groupIDs,
 		BlockDeviceMappings: blockDeviceMappings,
 		ImageId:             aws.String(spec.Image.Id),
+		MetadataOptions: &types.InstanceMetadataOptionsRequest{
+			HttpEndpoint: types.InstanceMetadataEndpointStateEnabled,
+			// By forcing HTTP tokens here we move all created instances over to
+			// IMDSv2.
+			// Fixes lp1960568
+			HttpTokens: types.HttpTokensStateRequired,
+		},
+		TagSpecifications: []types.TagSpecification{
+			instanceTags,
+			volumeTags,
+		},
 	}
 
 	runArgs := commonRunArgs
@@ -703,29 +731,6 @@ func (e *environ) StartInstance(
 		logger.Infof("started instance %q in AZ %q, subnet %q, VPC %q", inst.Id(), instAZ, instSubnet, instVPC)
 	} else {
 		logger.Infof("started instance %q in AZ %q", inst.Id(), instAZ)
-	}
-
-	// Tag instance, for accounting and identification.
-	instanceName := resourceName(
-		names.NewMachineTag(args.InstanceConfig.MachineId), e.Config().Name(),
-	)
-	args.InstanceConfig.Tags[tagName] = instanceName
-	if err := tagResources(e.ec2Client, ctx, args.InstanceConfig.Tags, string(inst.Id())); err != nil {
-		return nil, annotateWrapError(err, "tagging instance")
-	}
-
-	// Tag the machine's root EBS volume, if it has one.
-	if inst.i.RootDeviceType == "ebs" {
-		cfg := e.Config()
-		tags := tags.ResourceTags(
-			names.NewModelTag(cfg.UUID()),
-			names.NewControllerTag(args.ControllerUUID),
-			cfg,
-		)
-		tags[tagName] = instanceName + "-root"
-		if err := tagRootDisk(e.ec2Client, ctx, tags, &inst.i); err != nil {
-			return nil, annotateWrapError(err, "tagging root disk")
-		}
 	}
 
 	hc := instance.HardwareCharacteristics{
@@ -1138,70 +1143,6 @@ func tagResources(e Client, ctx context.ProviderCallContext, tags map[string]str
 	return maybeConvertCredentialError(err, ctx)
 }
 
-func tagRootDisk(e Client, ctx context.ProviderCallContext, tags map[string]string, inst *types.Instance) error {
-	if len(tags) == 0 {
-		return nil
-	}
-	findVolumeID := func(inst *types.Instance) string {
-		for _, m := range inst.BlockDeviceMappings {
-			if aws.ToString(m.DeviceName) != aws.ToString(inst.RootDeviceName) {
-				continue
-			}
-			if m.Ebs == nil {
-				continue
-			}
-			return aws.ToString(m.Ebs.VolumeId)
-		}
-		return ""
-	}
-	var volumeID string
-
-	retryStrategy := retry.CallArgs{
-		Clock:       clock.WallClock,
-		MaxDuration: 5 * time.Minute,
-		Delay:       5 * time.Second,
-	}
-	retryStrategy.IsFatalError = func(err error) bool {
-		if strings.HasSuffix(ec2ErrCode(err), ".NotFound") {
-			// EC2 calls are eventually consistent; if we get a
-			// NotFound error when looking up the instance we
-			// should retry until it appears or we run out of
-			// attempts.
-			logger.Debugf("instance %v is not available yet; retrying fetch of instance information", inst.InstanceId)
-			return false
-		} else if errors.IsNotFound(err) {
-			// Volume ID not found
-			return false
-		}
-		// No need to retry for other error types
-		return true
-	}
-	retryStrategy.Func = func() error {
-		// Refresh instance
-		resp, err := e.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: []string{aws.ToString(inst.InstanceId)},
-		})
-		if err != nil {
-			return err
-		}
-		if len(resp.Reservations) > 0 && len(resp.Reservations[0].Instances) > 0 {
-			inst = &resp.Reservations[0].Instances[0]
-		}
-
-		volumeID = findVolumeID(inst)
-		if volumeID == "" {
-			return errors.NewNotFound(nil, "Volume ID not found")
-		}
-		return nil
-	}
-	err := retry.Call(retryStrategy)
-	if retry.IsAttemptsExceeded(err) || retry.IsDurationExceeded(err) {
-		return errors.New("timed out waiting for EBS volume to be associated")
-	}
-
-	return tagResources(e, ctx, tags, volumeID)
-}
-
 var runInstances = _runInstances
 
 // runInstances calls ec2.RunInstances for a fixed number of attempts until
@@ -1571,12 +1512,14 @@ func mapNetworkInterface(iface types.NetworkInterface, subnet types.Subnet) netw
 	}
 
 	for _, privAddr := range iface.PrivateIpAddresses {
-		if ip := aws.ToString(privAddr.Association.PublicIp); ip != "" {
-			ni.ShadowAddresses = append(ni.ShadowAddresses, network.NewMachineAddress(
-				ip,
-				network.WithScope(network.ScopePublic),
-				network.WithConfigType(network.ConfigDHCP),
-			).AsProviderAddress())
+		if privAddr.Association != nil {
+			if ip := aws.ToString(privAddr.Association.PublicIp); ip != "" {
+				ni.ShadowAddresses = append(ni.ShadowAddresses, network.NewMachineAddress(
+					ip,
+					network.WithScope(network.ScopePublic),
+					network.WithConfigType(network.ConfigDHCP),
+				).AsProviderAddress())
+			}
 		}
 
 		if aws.ToString(privAddr.PrivateIpAddress) == privateAddress {
@@ -2059,6 +2002,10 @@ func (e *environ) ingressRulesInGroup(ctx context.ProviderCallContext, name stri
 		return nil, err
 	}
 	for _, p := range group.IpPermissions {
+		if len(p.UserIdGroupPairs) == 1 && aws.ToString(p.UserIdGroupPairs[0].GroupId) == aws.ToString(group.GroupId) {
+			// hide internal sec group rules
+			continue
+		}
 		var sourceCIDRs []string
 		for _, r := range p.IpRanges {
 			sourceCIDRs = append(sourceCIDRs, aws.ToString(r.CidrIp))
@@ -2088,7 +2035,11 @@ func (e *environ) OpenPorts(ctx context.ProviderCallContext, rules firewall.Ingr
 	if e.Config().FirewallMode() != config.FwGlobal {
 		return errors.Errorf("invalid firewall mode %q for opening ports on model", e.Config().FirewallMode())
 	}
-	if err := e.openPortsInGroup(ctx, e.globalGroupName(), rules); err != nil {
+	groupName := e.globalGroupName()
+	if _, err := e.ensureGroup(ctx, groupName, false); err != nil {
+		return errors.Trace(err)
+	}
+	if err := e.openPortsInGroup(ctx, groupName, rules); err != nil {
 		return errors.Trace(err)
 	}
 	logger.Infof("opened ports in global group: %v", rules)
@@ -2111,6 +2062,28 @@ func (e *environ) IngressRules(ctx context.ProviderCallContext) (firewall.Ingres
 		return nil, errors.Errorf("invalid firewall mode %q for retrieving ingress rules from model", e.Config().FirewallMode())
 	}
 	return e.ingressRulesInGroup(ctx, e.globalGroupName())
+}
+
+func (e *environ) OpenModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+	groupName := e.jujuGroupName()
+	if _, err := e.ensureGroup(ctx, groupName, true); err != nil {
+		return errors.Trace(err)
+	}
+	if err := e.openPortsInGroup(ctx, groupName, rules); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
+func (e *environ) CloseModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+	if err := e.closePortsInGroup(ctx, e.jujuGroupName(), rules); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
+func (e *environ) ModelIngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error) {
+	return e.ingressRulesInGroup(ctx, e.jujuGroupName())
 }
 
 func (*environ) Provider() environs.EnvironProvider {
@@ -2389,52 +2362,24 @@ func (e *environ) jujuGroupName() string {
 // other instances that might be running on the same EC2 account.  In
 // addition, a specific machine security group is created for each
 // machine, so that its firewall rules can be configured per machine.
-func (e *environ) setUpGroups(ctx context.ProviderCallContext, controllerUUID, machineId string, apiPorts []int) ([]string, error) {
-	openAccess := types.IpRange{CidrIp: aws.String("0.0.0.0/0")}
-	perms := []types.IpPermission{{
-		IpProtocol: aws.String("tcp"),
-		FromPort:   aws.Int32(22),
-		ToPort:     aws.Int32(22),
-		IpRanges:   []types.IpRange{openAccess},
-	}}
-	for _, apiPort := range apiPorts {
-		perms = append(perms, types.IpPermission{
-			IpProtocol: aws.String("tcp"),
-			FromPort:   aws.Int32(int32(apiPort)),
-			ToPort:     aws.Int32(int32(apiPort)),
-			IpRanges:   []types.IpRange{openAccess},
-		})
-	}
-	perms = append(perms, types.IpPermission{
-		IpProtocol: aws.String("tcp"),
-		FromPort:   aws.Int32(0),
-		ToPort:     aws.Int32(65535),
-	}, types.IpPermission{
-		IpProtocol: aws.String("udp"),
-		FromPort:   aws.Int32(0),
-		ToPort:     aws.Int32(65535),
-	}, types.IpPermission{
-		IpProtocol: aws.String("icmp"),
-		FromPort:   aws.Int32(-1),
-		ToPort:     aws.Int32(-1),
-	})
+func (e *environ) setUpGroups(ctx context.ProviderCallContext, controllerUUID, machineId string) ([]string, error) {
 	// Ensure there's a global group for Juju-related traffic.
-	jujuGroupID, err := e.ensureGroup(ctx, controllerUUID, e.jujuGroupName(), perms)
+	jujuGroup, err := e.ensureGroup(ctx, e.jujuGroupName(), true)
 	if err != nil {
 		return nil, err
 	}
 
-	var machineGroupID string
+	var machineGroup types.SecurityGroup
 	switch e.Config().FirewallMode() {
 	case config.FwInstance:
-		machineGroupID, err = e.ensureGroup(ctx, controllerUUID, e.machineGroupName(machineId), nil)
+		machineGroup, err = e.ensureGroup(ctx, e.machineGroupName(machineId), false)
 	case config.FwGlobal:
-		machineGroupID, err = e.ensureGroup(ctx, controllerUUID, e.globalGroupName(), nil)
+		machineGroup, err = e.ensureGroup(ctx, e.globalGroupName(), false)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return []string{jujuGroupID, machineGroupID}, nil
+	return []string{aws.ToString(jujuGroup.GroupId), aws.ToString(machineGroup.GroupId)}, nil
 }
 
 // securityGroupsByNameOrID calls ec2.SecurityGroups() either with the given
@@ -2492,7 +2437,7 @@ func (e *environ) securityGroupsByNameOrID(ctx stdcontext.Context, groupName str
 // If it exists, its permissions are set to perms.
 // Any entries in perms without SourceIPs will be granted for
 // the named group only.
-func (e *environ) ensureGroup(ctx context.ProviderCallContext, controllerUUID, name string, perms []types.IpPermission) (groupID string, err error) {
+func (e *environ) ensureGroup(ctx context.ProviderCallContext, name string, isModelGroup bool) (types.SecurityGroup, error) {
 	// Due to parallelization of the provisioner, it's possible that we try
 	// to create the model security group a second time before the first time
 	// is complete causing failures.
@@ -2508,138 +2453,76 @@ func (e *environ) ensureGroup(ctx context.ProviderCallContext, controllerUUID, n
 		vpcIDParam = aws.String(chosenVPCID)
 	}
 
-	groupResp, err := e.ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+	// Tag the created group with the model and controller UUIDs.
+	cfg := e.Config()
+	tags := tags.ResourceTags(
+		names.NewModelTag(cfg.UUID()),
+		names.NewControllerTag(e.controllerUUID),
+		cfg,
+	)
+	groupTagSpec := CreateTagSpecification(types.ResourceTypeSecurityGroup, tags)
+
+	_, err := e.ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
 		GroupName:   aws.String(name),
 		VpcId:       vpcIDParam,
 		Description: aws.String("juju group"),
+		TagSpecifications: []types.TagSpecification{
+			groupTagSpec,
+		},
 	})
 	if err != nil && ec2ErrCode(err) != "InvalidGroup.Duplicate" {
 		err = errors.Annotatef(maybeConvertCredentialError(err, ctx), "creating security group %q%s", name, inVPCLogSuffix)
-		return "", err
+		return types.SecurityGroup{}, err
 	}
 
-	var have permSet
-	if err == nil {
-		groupID = aws.ToString(groupResp.GroupId)
-		// Tag the created group with the model and controller UUIDs.
-		cfg := e.Config()
-		tags := tags.ResourceTags(
-			names.NewModelTag(cfg.UUID()),
-			names.NewControllerTag(controllerUUID),
-			cfg,
-		)
-		if err := tagResources(e.ec2Client, ctx, tags, aws.ToString(groupResp.GroupId)); err != nil {
-			return groupID, errors.Annotate(err, "tagging security group")
-		}
-		logger.Debugf("created security group %q with ID %q%s", name, aws.ToString(groupResp.GroupId), inVPCLogSuffix)
-	} else {
-		groups, err := e.securityGroupsByNameOrID(ctx, name)
-		if err != nil {
-			return "", errors.Annotatef(maybeConvertCredentialError(err, ctx), "fetching security group %q%s", name, inVPCLogSuffix)
-		}
-		if len(groups) == 0 {
-			return "", errors.NotFoundf("security group %q%s", name, inVPCLogSuffix)
-		}
-		info := groups[0]
-		// It's possible that the old group has the wrong
-		// description here, but if it does it's probably due
-		// to something deliberately playing games with juju,
-		// so we ignore it.
-		groupID = aws.ToString(info.GroupId)
-		have = newPermSetForGroup(info.IpPermissions, &groupID)
+	groups, err := e.securityGroupsByNameOrID(ctx, name)
+	if err != nil {
+		return types.SecurityGroup{}, errors.Annotatef(maybeConvertCredentialError(err, ctx), "fetching security group %q%s", name, inVPCLogSuffix)
 	}
+	if len(groups) == 0 {
+		return types.SecurityGroup{}, errors.NotFoundf("security group %q%s", name, inVPCLogSuffix)
+	}
+	if len(groups) > 1 {
+		logger.Debugf("more than one security group with name %q", name)
+	}
+	group := groups[0]
 
-	want := newPermSetForGroup(perms, &groupID)
-	revoke := make(permSet)
-	for p := range have {
-		if !want[p] {
-			revoke[p] = true
-		}
-	}
-	if len(revoke) > 0 {
-		_, err := e.ec2Client.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{
-			GroupId:       aws.String(groupID),
-			IpPermissions: revoke.ipPerms(),
-		})
-		if err != nil {
-			return "", errors.Annotatef(maybeConvertCredentialError(err, ctx), "revoking security group %q%s", groupID, inVPCLogSuffix)
+	if isModelGroup {
+		if err := e.ensureInternalRules(ctx, group); err != nil {
+			return types.SecurityGroup{}, errors.Annotate(err, "failed to enable internal model rules")
 		}
 	}
 
-	add := make(permSet)
-	for p := range want {
-		if !have[p] {
-			add[p] = true
-		}
-	}
-	if len(add) > 0 {
+	return group, nil
+}
+
+func (e *environ) ensureInternalRules(ctx context.ProviderCallContext, group types.SecurityGroup) error {
+	perms := []types.IpPermission{{
+		IpProtocol:       aws.String("tcp"),
+		FromPort:         aws.Int32(0),
+		ToPort:           aws.Int32(65535),
+		UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: group.GroupId}},
+	}, {
+		IpProtocol:       aws.String("udp"),
+		FromPort:         aws.Int32(0),
+		ToPort:           aws.Int32(65535),
+		UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: group.GroupId}},
+	}, {
+		IpProtocol:       aws.String("icmp"),
+		FromPort:         aws.Int32(-1),
+		ToPort:           aws.Int32(-1),
+		UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: group.GroupId}},
+	}}
+	for _, perm := range perms {
 		_, err := e.ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
-			GroupId:       aws.String(groupID),
-			IpPermissions: add.ipPerms(),
+			GroupId:       group.GroupId,
+			IpPermissions: []types.IpPermission{perm},
 		})
-		if err != nil {
-			return "", errors.Annotatef(maybeConvertCredentialError(err, ctx), "authorizing security group %q%s", groupID, inVPCLogSuffix)
+		if err != nil && ec2ErrCode(err) != "InvalidPermission.Duplicate" {
+			return errors.Trace(err)
 		}
 	}
-	return groupID, nil
-}
-
-// permKey represents a permission for a group or an ip address range to access
-// the given range of ports. Only one of groupId or ipAddr should be non-empty.
-type permKey struct {
-	protocol *string
-	fromPort *int32
-	toPort   *int32
-	groupId  *string
-	CidrIp   *string
-}
-
-type permSet map[permKey]bool
-
-// newPermSetForGroup returns a set of all the permissions in the
-// given slice of IPPerms. It ignores the name and owner
-// id in source groups, and any entry with no source ips will
-// be granted for the given group only.
-func newPermSetForGroup(ps []types.IpPermission, groupID *string) permSet {
-	m := make(permSet)
-	for _, p := range ps {
-		k := permKey{
-			protocol: p.IpProtocol,
-			fromPort: p.FromPort,
-			toPort:   p.ToPort,
-		}
-		if len(p.IpRanges) > 0 {
-			for _, ip := range p.IpRanges {
-				k.CidrIp = ip.CidrIp
-				m[k] = true
-			}
-		} else {
-			k.groupId = groupID
-			m[k] = true
-		}
-	}
-	return m
-}
-
-// ipPerms returns m as a slice of permissions usable
-// with the ec2 package.
-func (m permSet) ipPerms() (ps []types.IpPermission) {
-	// We could compact the permissions, but it
-	// hardly seems worth it.
-	for p := range m {
-		ipp := types.IpPermission{
-			IpProtocol: p.protocol,
-			FromPort:   p.fromPort,
-			ToPort:     p.toPort,
-		}
-		if p.CidrIp != nil {
-			ipp.IpRanges = []types.IpRange{{CidrIp: p.CidrIp}}
-		} else {
-			ipp.UserIdGroupPairs = []types.UserIdGroupPair{{GroupId: p.groupId}}
-		}
-		ps = append(ps, ipp)
-	}
-	return
+	return nil
 }
 
 func isZoneOrSubnetConstrainedError(err error) bool {
@@ -2814,4 +2697,22 @@ func (e *environ) SetCloudSpec(ctx stdcontext.Context, spec environscloudspec.Cl
 // This is part of the environs.FirewallFeatureQuerier interface.
 func (e *environ) SupportsRulesWithIPV6CIDRs(context.ProviderCallContext) (bool, error) {
 	return true, nil
+}
+
+// CreateTagSpecification creates an AWS tag specification for the given
+// resource type and tags.
+func CreateTagSpecification(resourceType types.ResourceType, tags map[string]string) types.TagSpecification {
+	spec := types.TagSpecification{
+		ResourceType: resourceType,
+		Tags:         make([]types.Tag, 0, len(tags)),
+	}
+
+	for k, v := range tags {
+		spec.Tags = append(spec.Tags, types.Tag{
+			Key:   aws.String(k),
+			Value: aws.String(v),
+		})
+	}
+
+	return spec
 }

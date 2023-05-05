@@ -7,9 +7,9 @@ import (
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/core/model"
@@ -171,9 +171,10 @@ func (st *State) SwitchBlockOff(t BlockType) error {
 
 // GetBlockForType returns the Block of the specified type for the current model
 // where
-//     not found -> nil, false, nil
-//     found -> block, true, nil
-//     error -> nil, false, err
+//
+//	not found -> nil, false, nil
+//	found -> block, true, nil
+//	error -> nil, false, err
 func (st *State) GetBlockForType(t BlockType) (Block, bool, error) {
 	return getBlockForType(st, t)
 }
@@ -292,8 +293,8 @@ func createModelBlockOps(mb modelBackend, t BlockType, msg string) ([]txn.Op, er
 	// need to change format.
 	newDoc := blockDoc{
 		DocID:     mb.docID(id),
-		ModelUUID: mb.modelUUID(),
-		Tag:       names.NewModelTag(mb.modelUUID()).String(),
+		ModelUUID: mb.ModelUUID(),
+		Tag:       names.NewModelTag(mb.ModelUUID()).String(),
 		Type:      t,
 		Message:   msg,
 	}

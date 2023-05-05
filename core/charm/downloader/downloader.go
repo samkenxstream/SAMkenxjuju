@@ -5,16 +5,13 @@ package downloader
 
 import (
 	"io"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
-	"github.com/juju/os/v2/series"
 	"github.com/juju/utils/v3"
-	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/core/arch"
 	corecharm "github.com/juju/juju/core/charm"
@@ -36,9 +33,9 @@ type CharmArchive interface {
 
 // CharmRepository provides an API for downloading charms/bundles.
 type CharmRepository interface {
-	GetDownloadURL(*charm.URL, corecharm.Origin, macaroon.Slice) (*url.URL, corecharm.Origin, error)
-	ResolveWithPreferredChannel(charmURL *charm.URL, requestedOrigin corecharm.Origin, macaroons macaroon.Slice) (*charm.URL, corecharm.Origin, []string, error)
-	DownloadCharm(charmURL *charm.URL, requestedOrigin corecharm.Origin, macaroons macaroon.Slice, archivePath string) (corecharm.CharmArchive, corecharm.Origin, error)
+	GetDownloadURL(*charm.URL, corecharm.Origin) (*url.URL, corecharm.Origin, error)
+	ResolveWithPreferredChannel(charmURL *charm.URL, requestedOrigin corecharm.Origin) (*charm.URL, corecharm.Origin, []string, error)
+	DownloadCharm(charmURL *charm.URL, requestedOrigin corecharm.Origin, archivePath string) (corecharm.CharmArchive, corecharm.Origin, error)
 }
 
 // RepositoryGetter returns a suitable CharmRepository for the specified Source.
@@ -71,9 +68,6 @@ type DownloadedCharm struct {
 
 	// The LXD profile or nil if no profile specified by the charm.
 	LXDProfile *charm.LXDProfile
-
-	// The (long-lived) macaroons that where used to fetch the charm.
-	Macaroons macaroon.Slice
 }
 
 // verify checks that the charm is compatible with the specified Juju version
@@ -117,12 +111,12 @@ func NewDownloader(logger Logger, storage Storage, repoGetter RepositoryGetter) 
 // API so it can be persisted.
 //
 // The method ensures that all temporary resources are cleaned up before returning.
-func (d *Downloader) DownloadAndStore(charmURL *charm.URL, requestedOrigin corecharm.Origin, macaroons macaroon.Slice, force bool) (corecharm.Origin, error) {
+func (d *Downloader) DownloadAndStore(charmURL *charm.URL, requestedOrigin corecharm.Origin, force bool) (corecharm.Origin, error) {
 	var (
-		err          error
-		seriesOrigin = requestedOrigin
+		err           error
+		channelOrigin = requestedOrigin
 	)
-	seriesOrigin.Platform, err = d.normalizePlatform(charmURL, requestedOrigin.Platform)
+	channelOrigin.Platform, err = d.normalizePlatform(charmURL, requestedOrigin.Platform)
 	if err != nil {
 		return corecharm.Origin{}, errors.Trace(err)
 	}
@@ -139,7 +133,7 @@ func (d *Downloader) DownloadAndStore(charmURL *charm.URL, requestedOrigin corec
 			if err != nil {
 				return corecharm.Origin{}, errors.Trace(err)
 			}
-			_, resolvedOrigin, err := repo.GetDownloadURL(charmURL, requestedOrigin, macaroons)
+			_, resolvedOrigin, err := repo.GetDownloadURL(charmURL, requestedOrigin)
 			return resolvedOrigin, errors.Trace(err)
 		}
 
@@ -147,7 +141,7 @@ func (d *Downloader) DownloadAndStore(charmURL *charm.URL, requestedOrigin corec
 	}
 
 	// Download charm blob to a temp file
-	tmpFile, err := ioutil.TempFile("", charmURL.Name)
+	tmpFile, err := os.CreateTemp("", charmURL.Name)
 	if err != nil {
 		return corecharm.Origin{}, errors.Trace(err)
 	}
@@ -163,7 +157,7 @@ func (d *Downloader) DownloadAndStore(charmURL *charm.URL, requestedOrigin corec
 		return corecharm.Origin{}, errors.Trace(err)
 	}
 
-	downloadedCharm, actualOrigin, err := d.downloadAndHash(charmURL, seriesOrigin, macaroons, repo, tmpFile.Name())
+	downloadedCharm, actualOrigin, err := d.downloadAndHash(charmURL, channelOrigin, repo, tmpFile.Name())
 	if err != nil {
 		return corecharm.Origin{}, errors.Annotatef(err, "downloading charm %q from origin %v", charmURL, requestedOrigin)
 	}
@@ -181,9 +175,9 @@ func (d *Downloader) DownloadAndStore(charmURL *charm.URL, requestedOrigin corec
 	return actualOrigin, nil
 }
 
-func (d *Downloader) downloadAndHash(charmURL *charm.URL, requestedOrigin corecharm.Origin, macaroons macaroon.Slice, repo CharmRepository, dstPath string) (DownloadedCharm, corecharm.Origin, error) {
+func (d *Downloader) downloadAndHash(charmURL *charm.URL, requestedOrigin corecharm.Origin, repo CharmRepository, dstPath string) (DownloadedCharm, corecharm.Origin, error) {
 	d.logger.Debugf("downloading charm %q from requested origin %v", charmURL, requestedOrigin)
-	chArchive, actualOrigin, err := repo.DownloadCharm(charmURL, requestedOrigin, macaroons, dstPath)
+	chArchive, actualOrigin, err := repo.DownloadCharm(charmURL, requestedOrigin, dstPath)
 	if err != nil {
 		return DownloadedCharm{}, corecharm.Origin{}, errors.Trace(err)
 	}
@@ -208,7 +202,6 @@ func (d *Downloader) downloadAndHash(charmURL *charm.URL, requestedOrigin corech
 		Size:         size,
 		LXDProfile:   chArchive.LXDProfile(),
 		SHA256:       sha,
-		Macaroons:    macaroons,
 	}, actualOrigin, nil
 }
 
@@ -227,26 +220,18 @@ func (d *Downloader) storeCharm(charmURL *charm.URL, dc DownloadedCharm, archive
 }
 
 func (d *Downloader) normalizePlatform(charmURL *charm.URL, platform corecharm.Platform) (corecharm.Platform, error) {
-	os := platform.OS
-	if platform.Series != "" {
-		sys, err := series.GetOSFromSeries(platform.Series)
-		if err != nil {
-			return corecharm.Platform{}, errors.Trace(err)
-		}
-		// Values passed to the api are case sensitive: ubuntu succeeds and
-		// Ubuntu returns `"code": "revision-not-found"`
-		os = strings.ToLower(sys.String())
-	}
 	arc := platform.Architecture
 	if platform.Architecture == "" || platform.Architecture == "all" {
 		d.logger.Warningf("received charm Architecture: %q, changing to %q, for charm %q", platform.Architecture, arch.DefaultArchitecture, charmURL)
 		arc = arch.DefaultArchitecture
 	}
 
+	// Values passed to the api are case sensitive: ubuntu succeeds and
+	// Ubuntu returns `"code": "revision-not-found"`
 	return corecharm.Platform{
 		Architecture: arc,
-		OS:           os,
-		Series:       platform.Series,
+		OS:           strings.ToLower(platform.OS),
+		Channel:      platform.Channel,
 	}, nil
 }
 

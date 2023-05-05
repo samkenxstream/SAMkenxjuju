@@ -6,7 +6,7 @@ package apiserver
 import (
 	"crypto/rand"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
@@ -15,9 +15,12 @@ import (
 	"golang.org/x/crypto/nacl/secretbox"
 	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/charmstore"
+	"github.com/juju/juju/apiserver/common"
+	coremacaroon "github.com/juju/juju/core/macaroon"
+	"github.com/juju/juju/environs"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
+	"github.com/juju/juju/state/stateenvirons"
 )
 
 const (
@@ -66,7 +69,7 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 		}
 		return
 	}
-	cookie, err := httpbakery.NewCookie(charmstore.MacaroonNamespace, macaroon.Slice{m})
+	cookie, err := httpbakery.NewCookie(coremacaroon.MacaroonNamespace, macaroon.Slice{m})
 	if err != nil {
 		if err := sendError(w, err); err != nil {
 			logger.Errorf("%v", err)
@@ -106,7 +109,7 @@ func (h *registerUserHandler) processPost(req *http.Request, st *state.State) (
 		return names.UserTag{}, nil, err
 	}
 
-	data, err := ioutil.ReadAll(req.Body)
+	data, err := io.ReadAll(req.Body)
 	if err != nil {
 		return failure(err)
 	}
@@ -174,6 +177,21 @@ func (h *registerUserHandler) processPost(req *http.Request, st *state.State) (
 	return userTag, response, nil
 }
 
+func getConnectorInfoer(model stateenvirons.Model) (environs.ConnectorInfo, error) {
+	configGetter := stateenvirons.EnvironConfigGetter{Model: model}
+	environ, err := common.EnvironFuncForModel(model, configGetter)()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if connInfo, ok := environ.(environs.ConnectorInfo); ok {
+		return connInfo, nil
+	}
+	return nil, errors.NotSupportedf("environ %q", environ.Config().Type())
+}
+
+// For testing.
+var GetConnectorInfoer = getConnectorInfoer
+
 // getSecretKeyLoginResponsePayload returns the information required by the
 // client to login to the controller securely.
 func (h *registerUserHandler) getSecretKeyLoginResponsePayload(
@@ -190,6 +208,28 @@ func (h *registerUserHandler) getSecretKeyLoginResponsePayload(
 	payload := params.SecretKeyLoginResponsePayload{
 		CACert:         caCert,
 		ControllerUUID: st.ControllerUUID(),
+	}
+
+	model, err := st.Model()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	connInfo, err := GetConnectorInfoer(model)
+	if errors.Is(err, errors.NotSupported) { // Not all providers support this.
+		return &payload, nil
+	}
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	proxier, err := connInfo.ConnectionProxyInfo()
+	if errors.Is(err, errors.NotFound) {
+		return &payload, nil
+	}
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if payload.ProxyConfig, err = params.NewProxy(proxier); err != nil {
+		return nil, errors.Trace(err)
 	}
 	return &payload, nil
 }

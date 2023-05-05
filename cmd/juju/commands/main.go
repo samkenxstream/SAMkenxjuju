@@ -5,7 +5,6 @@ package commands
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 
@@ -19,11 +18,12 @@ import (
 	cloudfile "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/action"
+	"github.com/juju/juju/cmd/juju/agree/agree"
+	"github.com/juju/juju/cmd/juju/agree/listagreements"
 	"github.com/juju/juju/cmd/juju/application"
 	"github.com/juju/juju/cmd/juju/backups"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/caas"
-	"github.com/juju/juju/cmd/juju/cachedimages"
 	"github.com/juju/juju/cmd/juju/charmhub"
 	"github.com/juju/juju/cmd/juju/cloud"
 	"github.com/juju/juju/cmd/juju/controller"
@@ -35,7 +35,7 @@ import (
 	"github.com/juju/juju/cmd/juju/model"
 	"github.com/juju/juju/cmd/juju/payload"
 	"github.com/juju/juju/cmd/juju/resource"
-	rcmd "github.com/juju/juju/cmd/juju/romulus/commands"
+	"github.com/juju/juju/cmd/juju/secretbackends"
 	"github.com/juju/juju/cmd/juju/secrets"
 	"github.com/juju/juju/cmd/juju/setmeterstatus"
 	"github.com/juju/juju/cmd/juju/space"
@@ -384,11 +384,11 @@ func registerCommands(r commandRegistry) {
 	// Configuration commands.
 	r.Register(model.NewModelGetConstraintsCommand())
 	r.Register(model.NewModelSetConstraintsCommand())
-	r.Register(newSyncToolsCommand())
+	r.Register(newSyncAgentBinaryCommand())
 	r.Register(newUpgradeJujuCommand())
 	r.Register(newUpgradeControllerCommand())
 	r.Register(application.NewRefreshCommand())
-	r.Register(application.NewSetSeriesCommand())
+	r.Register(application.NewSetApplicationBaseCommand())
 	r.Register(application.NewBindCommand())
 
 	// Charm tool commands.
@@ -416,16 +416,12 @@ func registerCommands(r commandRegistry) {
 	r.Register(user.NewRemoveCommand())
 	r.Register(user.NewWhoAmICommand())
 
-	// Manage cached images
-	r.Register(cachedimages.NewRemoveCommand())
-	r.Register(cachedimages.NewListCommand())
-
 	// Manage machines
 	r.Register(machine.NewAddCommand())
 	r.Register(machine.NewRemoveCommand())
 	r.Register(machine.NewListMachinesCommand())
 	r.Register(machine.NewShowMachineCommand())
-	r.Register(machine.NewUpgradeSeriesCommand())
+	r.Register(machine.NewUpgradeMachineCommand())
 
 	// Manage model
 	r.Register(model.NewConfigCommand())
@@ -507,7 +503,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(space.NewRenameCommand())
 
 	// Manage subnets
-	r.Register(subnet.NewAddCommand())
 	r.Register(subnet.NewListCommand())
 
 	// Manage controllers
@@ -569,21 +564,29 @@ func registerCommands(r commandRegistry) {
 	r.Register(charmhub.NewDownloadCommand())
 
 	// Secrets.
-	if featureflag.Enabled(feature.Secrets) {
-		r.Register(secrets.NewListSecretsCommand())
-	}
+	r.Register(secrets.NewListSecretsCommand())
+	r.Register(secrets.NewShowSecretsCommand())
+
+	// Secret backends.
+	r.Register(secretbackends.NewListSecretBackendsCommand())
+	r.Register(secretbackends.NewAddSecretBackendCommand())
+	r.Register(secretbackends.NewUpdateSecretBackendCommand())
+	r.Register(secretbackends.NewRemoveSecretBackendCommand())
+	r.Register(secretbackends.NewShowSecretBackendCommand())
 
 	// Payload commands.
 	r.Register(payload.NewListCommand())
 	r.Register(waitfor.NewWaitForCommand())
 
-	rcmd.RegisterAll(r)
+	// Agreement commands
+	r.Register(agree.NewAgreeCommand())
+	r.Register(listagreements.NewListAgreementsCommand())
 }
 
 type cloudToCommandAdapter struct{}
 
 func (cloudToCommandAdapter) ReadCloudData(path string) ([]byte, error) {
-	return ioutil.ReadFile(path)
+	return os.ReadFile(path)
 }
 func (cloudToCommandAdapter) ParseOneCloud(data []byte) (cloudfile.Cloud, error) {
 	return cloudfile.ParseOneCloud(data)

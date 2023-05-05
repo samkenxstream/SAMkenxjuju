@@ -5,7 +5,7 @@ package backups
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v3"
 	"github.com/juju/names/v4"
 
 	"github.com/juju/juju/apiserver/common"
@@ -13,6 +13,7 @@ import (
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
@@ -23,7 +24,7 @@ import (
 type Backend interface {
 	IsController() bool
 	Machine(id string) (Machine, error)
-	MachineSeries(id string) (string, error)
+	MachineBase(id string) (series.Base, error)
 	MongoSession() *mgo.Session
 	ModelTag() names.ModelTag
 	ModelType() state.ModelType
@@ -77,8 +78,7 @@ func NewAPI(backend Backend, resources facade.Resources, authorizer facade.Autho
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	backupDir := modelConfig.BackupDir()
-
+	backupDir := backups.BackupDirToUse(modelConfig.BackupDir())
 	paths := backups.Paths{
 		BackupDir: backupDir,
 		DataDir:   dataDir,
@@ -137,7 +137,7 @@ func CreateResult(meta *backups.Metadata, filename string) params.BackupsMetadat
 	result.Machine = meta.Origin.Machine
 	result.Hostname = meta.Origin.Hostname
 	result.Version = meta.Origin.Version
-	result.Series = meta.Origin.Series
+	result.Base = meta.Origin.Base
 
 	result.ControllerUUID = meta.Controller.UUID
 	result.FormatVersion = meta.FormatVersion

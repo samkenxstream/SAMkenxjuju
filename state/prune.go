@@ -10,8 +10,8 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2"
-	"github.com/juju/mgo/v2/bson"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/mgo/v3/bson"
 
 	"github.com/juju/juju/mongo"
 )
@@ -136,7 +136,7 @@ func (p *collectionPruner) pruneByAge(stop <-chan struct{}) error {
 	}
 
 	query := bson.D{
-		{"model-uuid", p.st.modelUUID()},
+		{"model-uuid", p.st.ModelUUID()},
 		{p.ageField, bson.M{"$gt": notSet, "$lt": age}},
 	}
 	query = append(query, p.filter...)
@@ -185,7 +185,7 @@ func (*collectionPruner) toDeleteCalculator(coll *mgo.Collection, maxSizeMB int,
 }
 
 func (p *collectionPruner) pruneBySize(stop <-chan struct{}) error {
-	if !p.st.isController() {
+	if !p.st.IsController() {
 		// Only prune by size in the controller. Otherwise we might
 		// find that multiple pruners are trying to delete the latest
 		// 1000 rows and end up with more deleted than we expect.

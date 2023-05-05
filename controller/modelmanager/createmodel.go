@@ -1,8 +1,6 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package modelmanager provides the business logic for
-// model management operations in the controller.
 package modelmanager
 
 import (
@@ -122,7 +120,7 @@ func (c *ModelConfigCreator) checkVersion(base *config.Config, attrs map[string]
 
 	// Look to see if we have tools available for that version.
 	list, err := c.FindTools(versionNumber)
-	if err != nil {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	if len(list) == 0 {

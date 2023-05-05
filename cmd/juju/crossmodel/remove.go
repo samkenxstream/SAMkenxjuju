@@ -47,25 +47,26 @@ offer will also be removed.
 Offers to remove are normally specified by their URL.
 It's also possible to specify just the offer name, in which case
 the offer is considered to reside in the current model.
+`
 
-Examples:
-
+const destroyOfferExamples = `
     juju remove-offer prod.model/hosted-mysql
     juju remove-offer prod.model/hosted-mysql --force
     juju remove-offer hosted-mysql
-
-See also:
-    find-offers
-    offer
 `
 
 // Info implements Command.Info.
 func (c *removeCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "remove-offer",
-		Args:    "<offer-url> ...",
-		Purpose: "Removes one or more offers specified by their URL.",
-		Doc:     destroyOfferDoc,
+		Name:     "remove-offer",
+		Args:     "<offer-url> ...",
+		Purpose:  "Removes one or more offers specified by their URL.",
+		Doc:      destroyOfferDoc,
+		Examples: destroyOfferExamples,
+		SeeAlso: []string{
+			"find-offers",
+			"offer",
+		},
 	})
 }
 
@@ -104,8 +105,7 @@ func (c *removeCommand) NewApplicationOffersAPI(controllerName string) (*applica
 var removeOfferMsg = `
 WARNING! This command will remove offers: %v
 This includes all relations to those offers.
-
-Continue [y/N]? `[1:]
+`[1:]
 
 // Run implements Command.Run.
 func (c *removeCommand) Run(ctx *cmd.Context) error {
@@ -150,7 +150,7 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if !c.assumeYes && c.force {
-		fmt.Fprintf(ctx.Stdout, removeOfferMsg, strings.Join(c.offers, ", "))
+		fmt.Fprintf(ctx.Stderr, removeOfferMsg, strings.Join(c.offers, ", "))
 
 		if err := jujucmd.UserConfirmYes(ctx); err != nil {
 			return errors.Annotate(err, "offer removal")

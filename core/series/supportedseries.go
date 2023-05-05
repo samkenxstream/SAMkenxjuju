@@ -52,13 +52,13 @@ func WorkloadSeries(now time.Time, requestedSeries, imageStream string) (set.Str
 	return set.NewStrings(supported.workloadSeries(false)...), nil
 }
 
-// AllWorkloadSeries returns all the workload series (supported or not).
-func AllWorkloadSeries(requestedSeries, imageStream string) (set.Strings, error) {
+// AllWorkloadVersions returns all the workload versions (supported or not).
+func AllWorkloadVersions(requestedSeries, imageStream string) (set.Strings, error) {
 	supported, err := seriesForTypes(UbuntuDistroInfo, time.Now(), requestedSeries, imageStream)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return set.NewStrings(supported.workloadSeries(true)...), nil
+	return set.NewStrings(supported.workloadVersions(true)...), nil
 }
 
 // AllWorkloadOSTypes returns all the workload os types (supported or not).
@@ -75,28 +75,32 @@ func AllWorkloadOSTypes(requestedSeries, imageStream string) (set.Strings, error
 }
 
 func seriesForTypes(path string, now time.Time, requestedSeries, imageStream string) (*supportedInfo, error) {
-	// We support all of the juju series AND all the ESM supported series.
-	// Juju is congruent with the Ubuntu release cycle for its own series (not
-	// including centos), so that should be reflected here.
-	//
 	// For non-LTS releases; they'll appear in juju/os as default available, but
 	// after reading the `/usr/share/distro-info/ubuntu.csv` on the Ubuntu distro
 	// the non-LTS should disappear if they're not in the release window for that
 	// series.
 	seriesVersionsMutex.Lock()
 	defer seriesVersionsMutex.Unlock()
-	composeSeriesVersions()
+	updateSeriesVersionsOnce()
+	all := getAllSeriesVersions()
 	if requestedSeries != "" && imageStream == Daily {
-		setSupported(allSeriesVersions, requestedSeries)
+		setSupported(all, requestedSeries)
 	}
-
 	source := series.NewDistroInfo(path)
-	supported := newSupportedInfo(source, allSeriesVersions)
+	supported := newSupportedInfo(source, all)
 	if err := supported.compile(now); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	return supported, nil
+}
+
+func getAllSeriesVersions() map[SeriesName]seriesVersion {
+	copy := make(map[SeriesName]seriesVersion, len(allSeriesVersions))
+	for name, v := range allSeriesVersions {
+		copy[name] = v
+	}
+	return copy
 }
 
 // GetOSFromSeries will return the operating system based
@@ -144,7 +148,12 @@ func updateSeriesVersions() error {
 	switch hostOS {
 	case jujuos.Ubuntu:
 		for seriesName, s := range sInfo {
-			ubuntuSeries[SeriesName(seriesName)] = seriesVersion{
+			key := SeriesName(seriesName)
+			if _, known := ubuntuSeries[key]; known {
+				// We only update unknown/new series.
+				continue
+			}
+			ubuntuSeries[key] = seriesVersion{
 				WorkloadType:             ControllerWorkloadType,
 				Version:                  s.Version,
 				LTS:                      s.LTS,
@@ -184,19 +193,6 @@ func composeSeriesVersions() {
 	}
 }
 
-// CentOSVersionSeries validates that the supplied series (eg: centos7)
-// is supported.
-func CentOSVersionSeries(version string) (string, error) {
-	if version == "" {
-		return "", errors.Trace(unknownVersionSeriesError(""))
-	}
-	if ser, ok := centosSeries[SeriesName(version)]; ok {
-		return ser.Version, nil
-	}
-	return "", errors.Trace(unknownVersionSeriesError(""))
-
-}
-
 // SeriesVersion returns the version for the specified series.
 func SeriesVersion(series string) (string, error) {
 	if series == "" {
@@ -215,23 +211,6 @@ func SeriesVersion(series string) (string, error) {
 	}
 
 	return "", errors.Trace(unknownSeriesVersionError(series))
-}
-
-// VersionSeries returns the series (e.g.trusty) for the specified version (e.g. 14.04).
-func VersionSeries(version string) (string, error) {
-	if version == "" {
-		return "", errors.Trace(unknownVersionSeriesError(""))
-	}
-	seriesVersionsMutex.Lock()
-	defer seriesVersionsMutex.Unlock()
-	if ser, ok := versionSeries[version]; ok {
-		return ser, nil
-	}
-	updateSeriesVersionsOnce()
-	if ser, ok := versionSeries[version]; ok {
-		return ser, nil
-	}
-	return "", errors.Trace(unknownVersionSeriesError(version))
 }
 
 // UbuntuSeriesVersion returns the ubuntu version for the specified series.
@@ -254,7 +233,7 @@ func UbuntuSeriesVersion(series string) (string, error) {
 	return "", errors.Trace(unknownSeriesVersionError(series))
 }
 
-// UbuntuVersions returns the ubuntu versions as a map..
+// UbuntuVersions returns the ubuntu versions as a map.
 func UbuntuVersions(supported, esmSupported *bool) map[string]string {
 	return ubuntuVersions(supported, esmSupported, ubuntuSeries)
 }
@@ -388,10 +367,4 @@ type unknownSeriesVersionError string
 
 func (e unknownSeriesVersionError) Error() string {
 	return `unknown version for series: "` + string(e) + `"`
-}
-
-type unknownVersionSeriesError string
-
-func (e unknownVersionSeriesError) Error() string {
-	return `unknown series for version: "` + string(e) + `"`
 }

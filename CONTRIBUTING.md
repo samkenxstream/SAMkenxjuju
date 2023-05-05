@@ -1,15 +1,27 @@
 Thanks for your interest in Juju! Contributions like yours make good projects
 great.
 
+# TL;DR
+- Bug reports should be filed on [Launchpad](https://bugs.launchpad.net/juju/+bugs),
+  not GitHub. Please check that your bug has not already been reported.
+- When opening a pull request:
+  - Check that your patch is [targeting the correct branch](#branches) -
+    if not, please rebase it.
+  - Please [sign the CLA](#contributor-licence-agreement) if you haven't already.
+  - Use the checklist on the [pull request template](./PULL_REQUEST_TEMPLATE.md#checklist)
+    to check you haven't forgotten anything.
+
 Contents
 ========
 
-1. [Building Juju](#building-juju)
-2. [Getting started](#getting-started)
-3. [Dependency management](#dependency-management)
-4. [Code formatting](#code-formatting)
-5. [Workflow](#workflow)
-6. [Community](#community)
+- [Quick links](#quick-links)
+- [Building Juju](#building-juju)
+- [Getting started](#getting-started)
+- [Dependency management](#dependency-management)
+- [Code formatting](#code-formatting)
+- [Workflow](#workflow)
+   - [Contributor licence agreement](#contributor-licence-agreement)
+- [Community](#community)
 
 Quick links
 ===========
@@ -29,17 +41,17 @@ Building Juju
 
 ## Installing Go
 
-`juju` is written in Go (http://golang.org), a modern, compiled, statically typed,
+`juju` is written in [Go](https://go.dev/), a modern, compiled, statically typed,
 concurrent language.
 
 Generally, Juju is built against the most recent version of Go, with the caveat that Go versions are not incremented during a release cycle. This means that `develop` will typically be using the latest version of Go, but any given release branch may lag by one version or so.  Check the `go.mod` file at the root of the project for the targeted version of Go, as this is authoritative.
 
-For example, the following indicates that Go 1.18 is targeted:
+For example, the following indicates that Go 1.20 is targeted:
 
 ```
 module github.com/juju/juju
 
-go 1.18
+go 1.20
 ```
 
 ### Official distribution
@@ -50,31 +62,24 @@ Go can be [installed](https://golang.org/doc/install#install) from the official 
 
 [Snap](https://snapcraft.io/go) may also be used to install Go on Linux.
 
-    snap install go --channel=1.18/stable --classic
+    snap install go --channel=1.19/stable --classic
 
 ## Build Juju and its dependencies
 
-### Download Juju source
+The easiest way to get the Juju source code is to clone the GitHub repository:
 
     git clone https://github.com/juju/juju.git
 
-Juju uses Go modules and does not depend on GOPATH, therefore you can check juju out anywhere.
-
-### Change to the Juju source code directory
-
-    cd juju
-
-### Install runtime dependencies
-
-    make install-dependencies
-
-### Compile
-
-    make build
-
-### Install
-
-    make install
+To build/install from source, `cd` into the root directory of the cloned repo,
+and use `make`.
+- `make go-build` will build the Juju binaries and put them in a
+  `_build` subdirectory.
+- `make go-install` will build the Juju binaries and install them in your
+  [$GOBIN directory](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies)
+  (which defaults to `$GOPATH/bin` or `~/go/bin`).
+- `make build` and `make install` are as above, but they will also regenerate
+  the facade schema. An up-to-date schema is always checked into the Juju repo,
+  so you shouldn't need to do this unless you make facade changes.
 
 Getting started
 ===============
@@ -150,31 +155,35 @@ running the check as a pre-commit hook also works.
 Staying in sync
 ---------------
 
-Make sure your local copy and github fork stay in sync with upstream:
+Make sure your local copy and GitHub fork stay in sync with upstream:
 
 ```bash
 cd juju
-git pull upstream develop
-git push
+git pull upstream
 ```
 
 Dependency management
 =====================
 
 In the top-level directory of the Juju repo, there is a file,
-[go.mod](go.mod), that holds the revision ids of all the external
-projects that Juju depends on. That file is used to freeze the code in
+[go.mod](go.mod), that holds the versions of all the external
+Go modules that Juju depends on. That file is used to freeze the code in
 external repositories so that Juju is insulated from changes to those repos.
 
 go mod
 ------
 
-Juju uses Go modules to manage dependencies. Therfore you don't need to do anything to ensure you are building with the correct versions.
+Juju uses Go modules to manage dependencies. Your Go installation will ensure
+you are building with the correct version - you don't need to do anything. 
 
 Updating dependencies
 ---------------------
 
-To update a dependency, use `go get -u github.com/the/dependency`.
+To update a dependency, use
+```
+go get -u github.com/the/dependency
+go mod tidy
+```
 
 Code formatting
 ===============
@@ -221,32 +230,31 @@ As a project, Juju follows a specific workflow:
 
 Naturally, it is not so linear in practice. Each of these is elaborated below.
 
-Sync with upstream
-------------------
+Branches
+--------
 
-First check that the branch is on `develop`:
+Generally there are multiple versions of Juju in development concurrently,
+and so we keep a separate Git branch for each version. When submitting a
+patch, please make sure your changes are targeted to the correct branch.
 
-```bash
-git branch
-* develop
-  old_feature
+The currently active branches are:
+- `2.9` - bug fixes for Juju 2.9.x
+- `3.0` - bug fixes for Juju 3.0.x
+- `develop` - bug fixes and new features for Juju 3.1.x
+
+If a bug affects multiple Juju versions, please target the **lowest version**
+of Juju which is affected. All patches in earlier versions are eventually
+"merged through" to later versions.
+
+Creating a new branch
+---------------------
+
+All development should be done on a new branch, based on the correct branch
+determined above. Pull the latest version of this branch, then create and
+checkout a new branch for your changes - e.g. for a patch targeting `develop`:
 ```
-
-Then pull in the latest changes from upstream, assuming you have done the setup
-as above:
-
-```bash
 git pull upstream develop
-```
-
-Feature branches
-----------------
-
-All development should be done on feature branches based on a current copy of
-`develop`. So after pulling up your local repo, make a new branch for your work:
-
-```bash
-git checkout -b new_feature
+git checkout -b new_feature develop
 ```
 
 Testing
@@ -309,7 +317,7 @@ Many tests use a standalone instance of `mongod` as part of their setup. The
 `mongod` binary found in `$PATH` is executed by these suites.  If you don't already have MongoDB installed, or have difficulty using your installed version to run Juju tests, you may want to install the [`juju-db` snap](https://snapcraft.io/juju-db), which is guaranteed to work with Juju.
 
 ```bash
-sudo snap install juju-db
+sudo snap install juju-db --channel 4.4/stable
 sudo snap alias juju-db.mongod mongod
 sudo snap alias juju-db.mongo mongo
 ```
@@ -353,6 +361,44 @@ Be sure to have a look at:
 
 https://help.github.com/articles/using-pull-requests
 
+
+Contributor licence agreement
+----------------------
+
+We welcome external contributions to Juju, but in order to incorporate these
+into the codebase, we will need you to sign the
+[Canonical contributor licence agreement (CLA)](https://ubuntu.com/legal/contributors).
+This just gives us permission to use your contributions - you still retain full
+copyright of your code.
+
+We have a GitHub Action which checks if you have signed the CLA. To ensure this
+passes, please follow these steps:
+
+1. Ensure your Git commits are signed by an email that you can access
+   (you can't use the `@users.noreply.github.com` email that GitHub provides).
+2. Create an account on [Launchpad](https://launchpad.net/), if you don't
+   already have one.
+3. Ensure the email you used for Git commits is a **verified** email on your
+   Launchpad account. To do this:
+   - Go to your Launchpad homepage (`launchpad.net/~[username]`).
+   - Check the addresses listed under the **Email** heading. If your Git email
+     is listed, you're good.
+   - If not, click "Change email settings".
+   - Add your Git email as a new address.
+   - Follow the instructions to verify your email.
+4. Visit the [CLA website](https://ubuntu.com/legal/contributors), scroll down
+   and press "Sign the contributor agreement".
+5. Read the agreement and fill in your contact details. Ensure that you provide
+   your Launchpad username in the "Launchpad id" box.
+6. Press "I agree" to sign the CLA.
+
+Eventually, your Launchpad account should be added to the
+["Canonical Contributor Agreement" team](https://launchpad.net/~contributor-agreement-canonical).
+You will see it listed under "Memberships" on your Launchpad homepage.
+Once this happens, the CLA check will pass, and we will happily review
+your contribution.
+
+
 Sanity checking PRs and unit tests
 ----------------------
 
@@ -360,7 +406,7 @@ All PRs run pre-merge check - unit tests and a small but representative sample
 of functional tests. This check is re-run anytime the PR changes, for example
 when a new commit is added.
 
-You can also initiate this check by commenting /build in the PR.
+You can also initiate this check by commenting `/build` in the PR.
 
 Code review
 -----------

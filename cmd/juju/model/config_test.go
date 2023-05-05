@@ -1,9 +1,10 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package model_test
 
 import (
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -100,7 +101,7 @@ func (s *ConfigCommandSuite) TestSingleValueOutputFile(c *gc.C) {
 	_, err := s.run(c, "--output", outpath, "special")
 	c.Assert(err, jc.ErrorIsNil)
 
-	output, err := ioutil.ReadFile(outpath)
+	output, err := os.ReadFile(outpath)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(output), gc.Equals, "multi\nline\n")
 }
@@ -176,8 +177,7 @@ func (s *ConfigCommandSuite) TestAllValuesTabular(c *gc.C) {
 	expected := "" +
 		"Attribute  From   Value\n" +
 		"running    model  true\n" +
-		"special    model  special value\n" +
-		"\n"
+		"special    model  special value\n"
 	c.Assert(output, gc.Equals, expected)
 }
 
@@ -210,7 +210,7 @@ func (s *ConfigCommandSuite) TestSetAndResetSameKey(c *gc.C) {
 func (s *ConfigCommandSuite) TestSetFromFile(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile := filepath.Join(tmpdir, "config.yaml")
-	err := ioutil.WriteFile(configFile, []byte("special: extra\n"), 0644)
+	err := os.WriteFile(configFile, []byte("special: extra\n"), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 
 	_, err = s.run(c, "--file", configFile)
@@ -246,7 +246,7 @@ func (s *ConfigCommandSuite) TestSetFromStdin(c *gc.C) {
 func (s *ConfigCommandSuite) TestSetFromFileUsingYAML(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile := filepath.Join(tmpdir, "config.yaml")
-	err := ioutil.WriteFile(configFile, []byte(`
+	err := os.WriteFile(configFile, []byte(`
 special:
   value: extra
   source: default
@@ -266,7 +266,7 @@ special:
 func (s *ConfigCommandSuite) TestSetFromFileCombined(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile := filepath.Join(tmpdir, "config.yaml")
-	err := ioutil.WriteFile(configFile, []byte("special: extra\nunknown: bar"), 0644)
+	err := os.WriteFile(configFile, []byte("special: extra\nunknown: bar"), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 
 	_, err = s.run(c, "--file", configFile, "unknown=foo")
@@ -281,7 +281,7 @@ func (s *ConfigCommandSuite) TestSetFromFileCombined(c *gc.C) {
 func (s *ConfigCommandSuite) TestSetFromFileCombinedReset(c *gc.C) {
 	tmpdir := c.MkDir()
 	configFile := filepath.Join(tmpdir, "config.yaml")
-	err := ioutil.WriteFile(configFile, []byte("special: extra\nunknown: bar"), 0644)
+	err := os.WriteFile(configFile, []byte("special: extra\nunknown: bar"), 0644)
 	c.Assert(err, jc.ErrorIsNil)
 
 	_, err = s.run(c, "--file", configFile, "--reset", "special,name")
@@ -326,8 +326,7 @@ func (s *ConfigCommandSuite) TestPassesCloudInitUserDataLong(c *gc.C) {
 		"Attribute           From   Value\n" +
 		"cloudinit-userdata  model  <value set, see juju model-config cloudinit-userdata>\n" +
 		"running             model  true\n" +
-		"special             model  special value\n" +
-		"\n"
+		"special             model  special value\n"
 	c.Assert(output2, gc.Equals, expected2)
 }
 
@@ -345,8 +344,7 @@ func (s *ConfigCommandSuite) TestPassesCloudInitUserDataShort(c *gc.C) {
 		"Attribute           From   Value\n" +
 		"cloudinit-userdata  model  \"\"\n" +
 		"running             model  true\n" +
-		"special             model  special value\n" +
-		"\n"
+		"special             model  special value\n"
 	c.Assert(output, gc.Equals, expected)
 }
 

@@ -13,7 +13,6 @@ import (
 	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing"
 	"github.com/juju/juju/testing/factory"
 )
 
@@ -28,7 +27,7 @@ var _ = gc.Suite(&MetricSuite{})
 
 func (s *MetricSuite) SetUpTest(c *gc.C) {
 	s.ConnSuite.SetUpTest(c)
-	s.meteredCharm = s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered-1"})
+	s.meteredCharm = s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:quantal/metered-1"})
 	s.application = s.Factory.MakeApplication(c, &factory.ApplicationParams{Charm: s.meteredCharm})
 	s.unit = s.Factory.MakeUnit(c, &factory.UnitParams{Application: s.application, SetCharmURL: true})
 }
@@ -76,7 +75,7 @@ func (s *MetricSuite) TestAddMetric(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(metricBatch.Unit(), gc.Equals, "metered/0")
 	c.Assert(metricBatch.ModelUUID(), gc.Equals, modelUUID)
-	c.Assert(metricBatch.CharmURL(), gc.Equals, "cs:quantal/metered-1")
+	c.Assert(metricBatch.CharmURL(), gc.Equals, "ch:quantal/metered-1")
 	c.Assert(metricBatch.Sent(), jc.IsFalse)
 	c.Assert(metricBatch.Created(), gc.Equals, now)
 	c.Assert(metricBatch.Metrics(), gc.HasLen, 2)
@@ -94,7 +93,7 @@ func (s *MetricSuite) TestAddMetric(c *gc.C) {
 	saved, err := s.State.MetricBatch(metricBatch.UUID())
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(saved.Unit(), gc.Equals, "metered/0")
-	c.Assert(metricBatch.CharmURL(), gc.Equals, "cs:quantal/metered-1")
+	c.Assert(metricBatch.CharmURL(), gc.Equals, "ch:quantal/metered-1")
 	c.Assert(saved.Sent(), jc.IsFalse)
 	c.Assert(saved.Metrics(), gc.HasLen, 2)
 	metric = saved.Metrics()[0]
@@ -132,7 +131,7 @@ func (s *MetricSuite) TestAddMetricOrderedLabels(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(metricBatch.Unit(), gc.Equals, "metered/0")
 	c.Assert(metricBatch.ModelUUID(), gc.Equals, modelUUID)
-	c.Assert(metricBatch.CharmURL(), gc.Equals, "cs:quantal/metered-1")
+	c.Assert(metricBatch.CharmURL(), gc.Equals, "ch:quantal/metered-1")
 	c.Assert(metricBatch.Sent(), jc.IsFalse)
 	c.Assert(metricBatch.Created(), gc.Equals, now)
 	uniqueMetrics := metricBatch.UniqueMetrics()
@@ -248,7 +247,7 @@ func (s *MetricSuite) TestSetMetricSent(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	saved, err := s.State.MetricBatch(added.UUID())
 	c.Assert(err, jc.ErrorIsNil)
-	err = saved.SetSent(testing.NonZeroTime())
+	err = saved.SetSent(s.Clock.Now())
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(saved.Sent(), jc.IsTrue)
 	saved, err = s.State.MetricBatch(added.UUID())
@@ -257,8 +256,8 @@ func (s *MetricSuite) TestSetMetricSent(c *gc.C) {
 }
 
 func (s *MetricSuite) TestCleanupMetrics(c *gc.C) {
-	oldTime := testing.NonZeroTime().Add(-(time.Hour * 25))
-	now := testing.NonZeroTime()
+	oldTime := s.Clock.Now().Add(-(time.Hour * 25))
+	now := s.Clock.Now()
 	m := state.Metric{Key: "pings", Value: "5", Time: oldTime}
 	oldMetric1, err := s.State.AddMetrics(
 		state.BatchParam{
@@ -270,7 +269,7 @@ func (s *MetricSuite) TestCleanupMetrics(c *gc.C) {
 		},
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	oldMetric1.SetSent(testing.NonZeroTime().Add(-25 * time.Hour))
+	oldMetric1.SetSent(s.Clock.Now().Add(-25 * time.Hour))
 
 	oldMetric2, err := s.State.AddMetrics(
 		state.BatchParam{
@@ -282,7 +281,7 @@ func (s *MetricSuite) TestCleanupMetrics(c *gc.C) {
 		},
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	oldMetric2.SetSent(testing.NonZeroTime().Add(-25 * time.Hour))
+	oldMetric2.SetSent(s.Clock.Now().Add(-25 * time.Hour))
 
 	m = state.Metric{Key: "pings", Value: "5", Time: now}
 	newMetric, err := s.State.AddMetrics(
@@ -295,7 +294,7 @@ func (s *MetricSuite) TestCleanupMetrics(c *gc.C) {
 		},
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	newMetric.SetSent(testing.NonZeroTime())
+	newMetric.SetSent(s.Clock.Now())
 	err = s.State.CleanupOldMetrics()
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -315,7 +314,7 @@ func (s *MetricSuite) TestCleanupNoMetrics(c *gc.C) {
 }
 
 func (s *MetricSuite) TestCleanupMetricsIgnoreNotSent(c *gc.C) {
-	oldTime := testing.NonZeroTime().Add(-(time.Hour * 25))
+	oldTime := s.Clock.Now().Add(-(time.Hour * 25))
 	m := state.Metric{Key: "pings", Value: "5", Time: oldTime}
 	oldMetric, err := s.State.AddMetrics(
 		state.BatchParam{
@@ -328,7 +327,7 @@ func (s *MetricSuite) TestCleanupMetricsIgnoreNotSent(c *gc.C) {
 	)
 	c.Assert(err, jc.ErrorIsNil)
 
-	now := testing.NonZeroTime()
+	now := s.Clock.Now()
 	m = state.Metric{Key: "pings", Value: "5", Time: now}
 	newMetric, err := s.State.AddMetrics(
 		state.BatchParam{
@@ -340,7 +339,7 @@ func (s *MetricSuite) TestCleanupMetricsIgnoreNotSent(c *gc.C) {
 		},
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	newMetric.SetSent(testing.NonZeroTime())
+	newMetric.SetSent(s.Clock.Now())
 	err = s.State.CleanupOldMetrics()
 	c.Assert(err, jc.ErrorIsNil)
 
@@ -368,7 +367,7 @@ func (s *MetricSuite) TestAllMetricBatches(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(metricBatches, gc.HasLen, 1)
 	c.Assert(metricBatches[0].Unit(), gc.Equals, "metered/0")
-	c.Assert(metricBatches[0].CharmURL(), gc.Equals, "cs:quantal/metered-1")
+	c.Assert(metricBatches[0].CharmURL(), gc.Equals, "ch:quantal/metered-1")
 	c.Assert(metricBatches[0].Sent(), jc.IsFalse)
 	c.Assert(metricBatches[0].Metrics(), gc.HasLen, 1)
 }
@@ -377,7 +376,7 @@ func (s *MetricSuite) TestAllMetricBatchesCustomCharmURLAndUUID(c *gc.C) {
 	now := state.NowToTheSecond(s.State)
 	m := state.Metric{Key: "pings", Value: "5", Time: now}
 	uuid := utils.MustNewUUID().String()
-	charmURL := "cs:quantal/metered-1"
+	charmURL := "ch:quantal/metered-1"
 	_, err := s.State.AddMetrics(
 		state.BatchParam{
 			UUID:     uuid,
@@ -422,7 +421,7 @@ func (s *MetricSuite) TestMetricCredentials(c *gc.C) {
 // TestCountMetrics asserts the correct values are returned
 // by CountOfUnsentMetrics and CountOfSentMetrics.
 func (s *MetricSuite) TestCountMetrics(c *gc.C) {
-	now := testing.NonZeroTime()
+	now := s.Clock.Now()
 	m := []state.Metric{{Key: "pings", Value: "123", Time: now}}
 	s.Factory.MakeMetric(c, &factory.MetricParams{Unit: s.unit, Sent: false, Time: &now, Metrics: m})
 	s.Factory.MakeMetric(c, &factory.MetricParams{Unit: s.unit, Sent: false, Time: &now, Metrics: m})
@@ -437,7 +436,7 @@ func (s *MetricSuite) TestCountMetrics(c *gc.C) {
 }
 
 func (s *MetricSuite) TestSetMetricBatchesSent(c *gc.C) {
-	now := testing.NonZeroTime()
+	now := s.Clock.Now()
 	metrics := make([]*state.MetricBatch, 3)
 	for i := range metrics {
 		m := []state.Metric{{Key: "pings", Value: "123", Time: now}}
@@ -502,7 +501,7 @@ func (s *MetricSuite) TestMetricValidation(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	err = dyingUnit.Destroy()
 	c.Assert(err, jc.ErrorIsNil)
-	now := testing.NonZeroTime()
+	now := s.Clock.Now()
 	tests := []struct {
 		about   string
 		metrics []state.Metric
@@ -636,7 +635,7 @@ func (s *MetricSuite) TestAddBuiltInMetric(c *gc.C) {
 			c.Assert(err, jc.ErrorIsNil)
 			c.Assert(metricBatch.Unit(), gc.Equals, "metered/0")
 			c.Assert(metricBatch.ModelUUID(), gc.Equals, modelUUID)
-			c.Assert(metricBatch.CharmURL(), gc.Equals, "cs:quantal/metered-1")
+			c.Assert(metricBatch.CharmURL(), gc.Equals, "ch:quantal/metered-1")
 			c.Assert(metricBatch.Sent(), jc.IsFalse)
 			c.Assert(metricBatch.Created(), gc.Equals, now)
 			c.Assert(metricBatch.Metrics(), gc.HasLen, 1)
@@ -649,7 +648,7 @@ func (s *MetricSuite) TestAddBuiltInMetric(c *gc.C) {
 			saved, err := s.State.MetricBatch(metricBatch.UUID())
 			c.Assert(err, jc.ErrorIsNil)
 			c.Assert(saved.Unit(), gc.Equals, "metered/0")
-			c.Assert(metricBatch.CharmURL(), gc.Equals, "cs:quantal/metered-1")
+			c.Assert(metricBatch.CharmURL(), gc.Equals, "ch:quantal/metered-1")
 			c.Assert(saved.Sent(), jc.IsFalse)
 			c.Assert(saved.Metrics(), gc.HasLen, 1)
 			metric = saved.Metrics()[0]
@@ -845,7 +844,7 @@ func (s *MetricLocalCharmSuite) TestModelMetricBatches(c *gc.C) {
 	st := s.Factory.MakeModel(c, nil)
 	defer st.Close()
 	f := factory.NewFactory(st, s.StatePool)
-	meteredCharm := f.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered-1"})
+	meteredCharm := f.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:quantal/metered-1"})
 	application := f.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 	unit := f.MakeUnit(c, &factory.UnitParams{Application: application, SetCharmURL: true})
 	_, err = st.AddMetrics(
@@ -978,7 +977,7 @@ func (s *MetricLocalCharmSuite) TestUnitMetricBatchesReturnsAllCharms(c *gc.C) {
 		},
 	)
 	c.Assert(err, jc.ErrorIsNil)
-	csMeteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered-1"})
+	csMeteredCharm := s.Factory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:quantal/metered-1"})
 	application := s.Factory.MakeApplication(c, &factory.ApplicationParams{Name: "csmetered", Charm: csMeteredCharm})
 	unit := s.Factory.MakeUnit(c, &factory.UnitParams{Application: application, SetCharmURL: true})
 	_, err = s.State.AddMetrics(
@@ -1069,7 +1068,7 @@ func (s *CrossModelMetricSuite) mustCreateMeteredModel(c *gc.C) modelData {
 	st := s.Factory.MakeModel(c, nil)
 	localFactory := factory.NewFactory(st, s.StatePool)
 
-	meteredCharm := localFactory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "cs:quantal/metered-1"})
+	meteredCharm := localFactory.MakeCharm(c, &factory.CharmParams{Name: "metered", URL: "ch:quantal/metered-1"})
 	application := localFactory.MakeApplication(c, &factory.ApplicationParams{Charm: meteredCharm})
 	unit := localFactory.MakeUnit(c, &factory.UnitParams{Application: application, SetCharmURL: true})
 	s.AddCleanup(func(*gc.C) { st.Close() })
@@ -1118,9 +1117,9 @@ func (s *CrossModelMetricSuite) TestMetricsAcrossmodels(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(toSend, gc.HasLen, 1)
 
-	err = m1.SetSent(testing.NonZeroTime().Add(-25 * time.Hour))
+	err = m1.SetSent(s.Clock.Now().Add(-25 * time.Hour))
 	c.Assert(err, jc.ErrorIsNil)
-	err = m2.SetSent(testing.NonZeroTime().Add(-25 * time.Hour))
+	err = m2.SetSent(s.Clock.Now().Add(-25 * time.Hour))
 	c.Assert(err, jc.ErrorIsNil)
 
 	sent, err := s.models[0].state.CountOfSentMetrics()

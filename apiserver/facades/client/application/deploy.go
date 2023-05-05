@@ -6,9 +6,8 @@ package application
 import (
 	"fmt"
 
-	"github.com/juju/charm/v9"
-	"github.com/juju/charm/v9/assumes"
-	csparams "github.com/juju/charmrepo/v7/csclient/params"
+	"github.com/juju/charm/v10"
+	"github.com/juju/charm/v10/assumes"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 
@@ -27,17 +26,15 @@ import (
 
 var (
 	// Overridden by tests.
-	supportedFeaturesGetter = stateenvirons.SupportedFeatures
+	SupportedFeaturesGetter = stateenvirons.SupportedFeatures
 )
 
 // DeployApplicationParams contains the arguments required to deploy the referenced
 // charm.
 type DeployApplicationParams struct {
 	ApplicationName   string
-	Series            string
 	Charm             *state.Charm
 	CharmOrigin       corecharm.Origin
-	Channel           csparams.Channel
 	ApplicationConfig *config.Config
 	CharmConfig       charm.Settings
 	Constraints       constraints.Value
@@ -84,7 +81,7 @@ func DeployApplication(st ApplicationDeployer, model Model, args DeployApplicati
 		}
 	}
 
-	// Enforce "assumes" requirements if the feature flag is enabled.
+	// Enforce "assumes" requirements.
 	if err := assertCharmAssumptions(args.Charm.Meta().Assumes, model, st.ControllerConfig); err != nil {
 		if !errors.IsNotSupported(err) || !args.Force {
 			return nil, errors.Trace(err)
@@ -100,12 +97,14 @@ func DeployApplication(st ApplicationDeployer, model Model, args DeployApplicati
 	// TODO(fwereade): transactional State.AddApplication including settings, constraints
 	// (minimumUnitCount, initialMachineIds?).
 
+	origin, err := StateCharmOrigin(args.CharmOrigin)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	asa := state.AddApplicationArgs{
 		Name:              args.ApplicationName,
-		Series:            args.Series,
 		Charm:             args.Charm,
-		CharmOrigin:       StateCharmOrigin(args.CharmOrigin),
-		Channel:           args.Channel,
+		CharmOrigin:       origin,
 		Storage:           stateStorageConstraints(args.Storage),
 		Devices:           stateDeviceConstraints(args.Devices),
 		AttachStorage:     args.AttachStorage,
@@ -188,7 +187,7 @@ func stateDeviceConstraints(cons map[string]devices.Constraints) map[string]stat
 }
 
 // StateCharmOrigin returns a state layer CharmOrigin given a core Origin.
-func StateCharmOrigin(origin corecharm.Origin) *state.CharmOrigin {
+func StateCharmOrigin(origin corecharm.Origin) (*state.CharmOrigin, error) {
 	var ch *state.Channel
 	if c := origin.Channel; c != nil {
 		normalizedC := c.Normalize()
@@ -198,7 +197,7 @@ func StateCharmOrigin(origin corecharm.Origin) *state.CharmOrigin {
 			Branch: normalizedC.Branch,
 		}
 	}
-	stateOrigin := &state.CharmOrigin{
+	return &state.CharmOrigin{
 		Type:     origin.Type,
 		Source:   string(origin.Source),
 		ID:       origin.ID,
@@ -208,10 +207,9 @@ func StateCharmOrigin(origin corecharm.Origin) *state.CharmOrigin {
 		Platform: &state.Platform{
 			Architecture: origin.Platform.Architecture,
 			OS:           origin.Platform.OS,
-			Series:       origin.Platform.Series,
+			Channel:      origin.Platform.Channel,
 		},
-	}
-	return stateOrigin
+	}, nil
 }
 
 func assertCharmAssumptions(assumesExprTree *assumes.ExpressionTree, model Model, ctrlCfgGetter func() (controller.Config, error)) error {
@@ -219,7 +217,7 @@ func assertCharmAssumptions(assumesExprTree *assumes.ExpressionTree, model Model
 		return nil
 	}
 
-	featureSet, err := supportedFeaturesGetter(model, environs.New)
+	featureSet, err := SupportedFeaturesGetter(model, environs.New)
 	if err != nil {
 		return errors.Annotate(err, "querying feature set supported by the model")
 	}

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	gitjujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
@@ -26,6 +26,7 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/bootstrap"
@@ -145,7 +146,7 @@ func (t *LiveTests) SetUpTest(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	t.UploadFakeTools(c, stor, "released", "released")
 	t.toolsStorage = stor
-	t.CleanupSuite.PatchValue(&envtools.BundleTools, envtoolstesting.GetMockBundleTools(c, nil))
+	t.CleanupSuite.PatchValue(&envtools.BundleTools, envtoolstesting.GetMockBundleTools(coretesting.FakeVersionNumber))
 }
 
 func (t *LiveTests) TearDownSuite(c *gc.C) {
@@ -216,12 +217,12 @@ func (t *LiveTests) bootstrapParams() bootstrap.BootstrapParams {
 			Regions:   regions,
 			Endpoint:  t.CloudEndpoint,
 		},
-		CloudRegion:              t.CloudRegion,
-		CloudCredential:          &credential,
-		CloudCredentialName:      "credential",
-		AdminSecret:              AdminSecret,
-		CAPrivateKey:             coretesting.CAKey,
-		SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
+		CloudRegion:             t.CloudRegion,
+		CloudCredential:         &credential,
+		CloudCredentialName:     "credential",
+		AdminSecret:             AdminSecret,
+		CAPrivateKey:            coretesting.CAKey,
+		SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
 	}
 }
 
@@ -267,7 +268,7 @@ func (t *LiveTests) TestPrechecker(c *gc.C) {
 	t.PrepareOnce(c)
 	err := t.Env.PrecheckInstance(t.ProviderCallContext,
 		environs.PrecheckInstanceParams{
-			Series: "precise",
+			Base: series.MakeDefaultBase("ubuntu", "22.04"),
 		})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -881,7 +882,10 @@ func waitAgentTools(c *gc.C, w *toolsWaiter, expect version.Binary) *coretools.T
 func (t *LiveTests) checkUpgrade(c *gc.C, st *state.State, newVersion version.Binary, waiters ...*toolsWaiter) {
 	c.Logf("putting testing version of juju tools")
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
-	upgradeTools, err := sync.Upload(ss, t.toolsStorage, "released", &newVersion.Number)
+	upgradeTools, err := sync.Upload(
+		ss, t.toolsStorage, "released",
+		func(version.Number) version.Number { return newVersion.Number },
+	)
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Check that the put version really is the version we expect.
@@ -923,7 +927,8 @@ func (t *LiveTests) TestStartInstanceWithEmptyNonceFails(c *gc.C) {
 	// a valid machine config.
 	machineId := "4"
 	apiInfo := jujutesting.FakeAPIInfo(machineId)
-	instanceConfig, err := instancecfg.NewInstanceConfig(coretesting.ControllerTag, machineId, "", "released", "jammy", apiInfo)
+	instanceConfig, err := instancecfg.NewInstanceConfig(coretesting.ControllerTag, machineId, "",
+		"released", series.MakeDefaultBase("ubuntu", "22.04"), apiInfo)
 	c.Assert(err, jc.ErrorIsNil)
 
 	t.PrepareOnce(c)
@@ -942,7 +947,7 @@ func (t *LiveTests) TestStartInstanceWithEmptyNonceFails(c *gc.C) {
 	err = jujutesting.SetImageMetadata(
 		t.Env,
 		simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory()),
-		[]string{"jammy"},
+		[]string{"22.04"},
 		[]string{"amd64"},
 		&params.ImageMetadata,
 	)
@@ -961,7 +966,7 @@ func (t *LiveTests) TestBootstrapWithDefaultSeries(c *gc.C) {
 		c.Skip("HasProvisioner is false; cannot test deployment")
 	}
 
-	current := coretesting.CurrentVersion(c)
+	current := coretesting.CurrentVersion()
 	other := current
 	other.Release = "quantal"
 

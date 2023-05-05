@@ -8,7 +8,7 @@ import (
 	stdcontext "context"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -572,14 +572,13 @@ func (s *localServerSuite) TestStartInstanceMultiNetworkFound(c *gc.C) {
 		"network": "",
 	})
 	c.Assert(err, jc.ErrorIsNil)
+
 	err = s.env.SetConfig(cfg)
 	c.Assert(err, jc.ErrorIsNil)
 
 	inst, _, _, err := testing.StartInstance(s.env, s.callCtx, s.ControllerUUID, "100")
-	c.Check(inst, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, `multiple networks with label .*
-	To resolve this error, set a value for "network" in model-config or model-defaults;
-	or supply it via --config when creating a new model`)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(inst, gc.NotNil)
 }
 
 func (s *localServerSuite) TestStartInstanceExternalNetwork(c *gc.C) {
@@ -608,7 +607,7 @@ func (s *localServerSuite) TestStartInstanceNetworkUnknownLabel(c *gc.C) {
 
 	inst, _, _, err := testing.StartInstance(s.env, s.callCtx, s.ControllerUUID, "100")
 	c.Check(inst, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "no networks exist with label .*")
+	c.Assert(err, gc.ErrorMatches, `unable to determine networks for configured list: \[no-network-with-this-label\]`)
 }
 
 func (s *localServerSuite) TestStartInstanceExternalNetworkUnknownLabel(c *gc.C) {
@@ -627,7 +626,7 @@ func (s *localServerSuite) TestStartInstanceExternalNetworkUnknownLabel(c *gc.C)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
-func (s *localServerSuite) TestStartInstanceNetworkUnknownId(c *gc.C) {
+func (s *localServerSuite) TestStartInstanceNetworkUnknownID(c *gc.C) {
 	cfg, err := s.env.Config().Apply(coretesting.Attrs{
 		// A valid UUID but no related network in the nova test service
 		"network": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
@@ -638,12 +637,8 @@ func (s *localServerSuite) TestStartInstanceNetworkUnknownId(c *gc.C) {
 
 	inst, _, _, err := testing.StartInstance(s.env, s.callCtx, s.ControllerUUID, "100")
 	c.Check(inst, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "failed to get network detail\n"+
-		"caused by: "+
-		"Resource at http://.*/networks/.* not found\n"+
-		"caused by: "+
-		"request \\(http://.*/networks/.*\\) returned unexpected status: "+
-		"404; error info: .*itemNotFound.*")
+	c.Assert(err, gc.ErrorMatches,
+		`unable to determine networks for configured list: \[f81d4fae-7dec-11d0-a765-00a0c91e6bf6\]`)
 }
 
 func (s *localServerSuite) TestStartInstanceNoNetworksNetworkNotSetNoError(c *gc.C) {
@@ -841,6 +836,41 @@ func (s *localServerSuite) TestStartInstanceWaitForActiveDetails(c *gc.C) {
 	insts, err := env.AllInstances(s.callCtx)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(insts, gc.HasLen, 0, gc.Commentf("expected launched instance to be terminated if stuck in BUILD state"))
+}
+
+func (s *localServerSuite) TestStartInstanceDeletesSecurityGroupsOnInstanceCreateFailure(c *gc.C) {
+	env := s.openEnviron(c, coretesting.Attrs{"firewall-mode": config.FwInstance})
+
+	// Force an error in waitForActiveServerDetails
+	cleanup := s.srv.Nova.RegisterControlPoint(
+		"server",
+		func(sc hook.ServiceControl, args ...interface{}) error {
+			return fmt.Errorf("GetServer failed on purpose")
+		},
+	)
+	defer cleanup()
+	inst, _, _, err := testing.StartInstance(env, s.callCtx, s.ControllerUUID, "100")
+	c.Check(inst, gc.IsNil)
+	c.Assert(err, gc.NotNil)
+
+	assertSecurityGroups(c, env, []string{"default"})
+}
+
+func (s *localServerSuite) TestStartInstanceDeletesSecurityGroupsOnFailure(c *gc.C) {
+	env := s.openEnviron(c, coretesting.Attrs{"firewall-mode": config.FwInstance})
+
+	s.srv.Nova.SetServerStatus(nova.StatusBuild)
+	defer s.srv.Nova.SetServerStatus("")
+
+	// Make time advance in zero time
+	clk := testclock.NewClock(time.Time{})
+	clock := testclock.AutoAdvancingClock{Clock: clk, Advance: clk.Advance}
+	env.(*openstack.Environ).SetClock(&clock)
+
+	_, _, _, err := testing.StartInstance(env, s.callCtx, s.ControllerUUID, "100")
+	c.Assert(err, gc.NotNil)
+
+	assertSecurityGroups(c, env, []string{"default"})
 }
 
 func assertSecurityGroups(c *gc.C, env environs.Environ, expected []string) {
@@ -1065,14 +1095,14 @@ func (s *localServerSuite) TestDestroyControllerSpaceConstraints(c *gc.C) {
 		Constraints:      constraints.MustParse("spaces=space-1 zones=zone-0"),
 		SubnetsToZones: []map[corenetwork.Id][]string{
 			{
-				"xxx-yyy-zzz": {"zone-0"},
+				"999-01": {"zone-0"},
 			},
 		},
 	}
 	_, err := testing.StartInstanceWithParams(env, s.callCtx, controllerInstanceName, params)
 	c.Assert(err, jc.ErrorIsNil)
 	assertPorts(c, env, []portAssertion{
-		{NamePrefix: fmt.Sprintf("juju-%s-", uuid), SubnetIDs: []string{"xxx-yyy-zzz"}},
+		{NamePrefix: fmt.Sprintf("juju-%s-", uuid), SubnetIDs: []string{"999-01"}},
 	})
 
 	// The openstack runtime would assign a device_id to a port when it's
@@ -1547,8 +1577,8 @@ func (s *localServerSuite) TestFindImageBadDefaultImage(c *gc.C) {
 	env := s.Open(c, stdcontext.TODO(), s.env.Config())
 
 	// An error occurs if no suitable image is found.
-	_, err := openstack.FindInstanceSpec(env, "saucy", "amd64", "mem=1G", nil)
-	c.Assert(err, gc.ErrorMatches, `no metadata for "saucy" images in some-region with arch amd64`)
+	_, err := openstack.FindInstanceSpec(env, series.MakeDefaultBase("ubuntu", "15.04"), "amd64", "mem=1G", nil)
+	c.Assert(err, gc.ErrorMatches, `no metadata for "ubuntu@15.04" images in some-region with arch amd64`)
 }
 
 func (s *localServerSuite) TestConstraintsValidator(c *gc.C) {
@@ -1595,7 +1625,7 @@ func (s *localServerSuite) TestFindImageInstanceConstraint(c *gc.C) {
 	}}
 
 	spec, err := openstack.FindInstanceSpec(
-		env, jujuversion.DefaultSupportedLTS(), "amd64", "instance-type=m1.tiny",
+		env, jujuversion.DefaultSupportedLTSBase(), "amd64", "instance-type=m1.tiny",
 		imageMetadata,
 	)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1612,7 +1642,7 @@ func (s *localServerSuite) TestFindInstanceImageConstraintHypervisor(c *gc.C) {
 	}}
 
 	spec, err := openstack.FindInstanceSpec(
-		env, jujuversion.DefaultSupportedLTS(), "amd64", "virt-type="+testVirtType,
+		env, jujuversion.DefaultSupportedLTSBase(), "amd64", "virt-type="+testVirtType,
 		imageMetadata,
 	)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1631,7 +1661,7 @@ func (s *localServerSuite) TestFindInstanceImageWithHypervisorNoConstraint(c *gc
 	}}
 
 	spec, err := openstack.FindInstanceSpec(
-		env, jujuversion.DefaultSupportedLTS(), "amd64", "",
+		env, jujuversion.DefaultSupportedLTSBase(), "amd64", "",
 		imageMetadata,
 	)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1648,7 +1678,7 @@ func (s *localServerSuite) TestFindInstanceNoConstraint(c *gc.C) {
 	}}
 
 	spec, err := openstack.FindInstanceSpec(
-		env, jujuversion.DefaultSupportedLTS(), "amd64", "",
+		env, jujuversion.DefaultSupportedLTSBase(), "amd64", "",
 		imageMetadata,
 	)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1663,7 +1693,7 @@ func (s *localServerSuite) TestFindImageInvalidInstanceConstraint(c *gc.C) {
 		Arch: "amd64",
 	}}
 	_, err := openstack.FindInstanceSpec(
-		env, jujuversion.DefaultSupportedLTS(), "amd64", "instance-type=m1.large",
+		env, jujuversion.DefaultSupportedLTSBase(), "amd64", "instance-type=m1.large",
 		imageMetadata,
 	)
 	c.Assert(err, gc.ErrorMatches, `no instance types in some-region matching constraints "arch=amd64 instance-type=m1.large"`)
@@ -1672,46 +1702,46 @@ func (s *localServerSuite) TestFindImageInvalidInstanceConstraint(c *gc.C) {
 func (s *localServerSuite) TestPrecheckInstanceValidInstanceType(c *gc.C) {
 	env := s.Open(c, stdcontext.TODO(), s.env.Config())
 	cons := constraints.MustParse("instance-type=m1.small")
-	err := env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Constraints: cons})
+	err := env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Constraints: cons})
 	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *localServerSuite) TestPrecheckInstanceInvalidInstanceType(c *gc.C) {
 	env := s.Open(c, stdcontext.TODO(), s.env.Config())
 	cons := constraints.MustParse("instance-type=m1.large")
-	err := env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Constraints: cons})
+	err := env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Constraints: cons})
 	c.Assert(err, gc.ErrorMatches, `invalid Openstack flavour "m1.large" specified`)
 }
 
 func (s *localServerSuite) TestPrecheckInstanceInvalidRootDiskConstraint(c *gc.C) {
 	env := s.Open(c, stdcontext.TODO(), s.env.Config())
 	cons := constraints.MustParse("instance-type=m1.small root-disk=10G")
-	err := env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Constraints: cons})
+	err := env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Constraints: cons})
 	c.Assert(err, gc.ErrorMatches, `constraint root-disk cannot be specified with instance-type unless constraint root-disk-source=volume`)
 }
 
 func (s *localServerSuite) TestPrecheckInstanceAvailZone(c *gc.C) {
 	placement := "zone=test-available"
-	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Placement: placement})
+	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Placement: placement})
 	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *localServerSuite) TestPrecheckInstanceAvailZoneUnavailable(c *gc.C) {
 	placement := "zone=test-unavailable"
-	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Placement: placement})
+	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Placement: placement})
 	c.Assert(err, gc.ErrorMatches, `zone "test-unavailable" is unavailable`)
 }
 
 func (s *localServerSuite) TestPrecheckInstanceAvailZoneUnknown(c *gc.C) {
 	placement := "zone=test-unknown"
-	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Placement: placement})
+	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Placement: placement})
 	c.Assert(err, gc.ErrorMatches, `availability zone "test-unknown" not valid`)
 }
 
 func (s *localServerSuite) TestPrecheckInstanceAvailZonesUnsupported(c *gc.C) {
 	s.srv.Nova.SetAvailabilityZones() // no availability zone support
 	placement := "zone=test-unknown"
-	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Series: jujuversion.DefaultSupportedLTS(), Placement: placement})
+	err := s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{Base: jujuversion.DefaultSupportedLTSBase(), Placement: placement})
 	c.Assert(err, jc.Satisfies, errors.IsNotImplemented)
 }
 
@@ -1745,7 +1775,7 @@ func (s *localServerSuite) testPrecheckInstanceVolumeAvailZones(c *gc.C, placeme
 	c.Assert(err, jc.ErrorIsNil)
 
 	err = s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{
-		Series:            jujuversion.DefaultSupportedLTS(),
+		Base:              jujuversion.DefaultSupportedLTSBase(),
 		Placement:         placement,
 		VolumeAttachments: []storage.VolumeAttachmentParams{{VolumeId: "foo"}},
 	})
@@ -1780,7 +1810,7 @@ func (s *localServerSuite) TestPrecheckInstanceAvailZonesConflictsVolume(c *gc.C
 	c.Assert(err, jc.ErrorIsNil)
 
 	err = s.env.PrecheckInstance(s.callCtx, environs.PrecheckInstanceParams{
-		Series:            jujuversion.DefaultSupportedLTS(),
+		Base:              jujuversion.DefaultSupportedLTSBase(),
 		Placement:         "zone=az2",
 		VolumeAttachments: []storage.VolumeAttachmentParams{{VolumeId: "foo"}},
 	})
@@ -1905,7 +1935,7 @@ func (s *localServerSuite) TestValidateImageMetadata(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	params.Sources, err = environs.ImageMetadataSources(env, ss)
 	c.Assert(err, jc.ErrorIsNil)
-	params.Release = "raring"
+	params.Release = "13.04"
 	imageIDs, _, err := imagemetadata.ValidateImageMetadata(ss, params)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(imageIDs, jc.SameContents, []string{"id-y"})
@@ -2232,7 +2262,7 @@ func (s *localHTTPSServerSuite) TestFetchFromImageMetadataSources(c *gc.C) {
 	contentReader, imageURL, err := mappedSources["image-metadata-url"].Fetch(custom)
 	c.Assert(err, jc.ErrorIsNil)
 	defer func() { _ = contentReader.Close() }()
-	content, err := ioutil.ReadAll(contentReader)
+	content, err := io.ReadAll(contentReader)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(content), gc.Equals, custom)
 	c.Check(imageURL[:8], gc.Equals, "https://")
@@ -2241,7 +2271,7 @@ func (s *localHTTPSServerSuite) TestFetchFromImageMetadataSources(c *gc.C) {
 	contentReader, imageURL, err = mappedSources["keystone catalog"].Fetch(metadata)
 	c.Assert(err, jc.ErrorIsNil)
 	defer func() { _ = contentReader.Close() }()
-	content, err = ioutil.ReadAll(contentReader)
+	content, err = io.ReadAll(contentReader)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(content), gc.Equals, metadata)
 	c.Check(imageURL[:8], gc.Equals, "https://")
@@ -2292,7 +2322,7 @@ func (s *localHTTPSServerSuite) TestFetchFromImageMetadataSourcesWithCertificate
 	contentReader, imageURL, err := mappedSources["keystone catalog"].Fetch(metadata)
 	c.Assert(err, jc.ErrorIsNil)
 	defer func() { _ = contentReader.Close() }()
-	content, err := ioutil.ReadAll(contentReader)
+	content, err := io.ReadAll(contentReader)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(content), gc.Equals, metadata)
 	c.Check(imageURL[:8], gc.Equals, "https://")
@@ -2340,7 +2370,7 @@ func (s *localHTTPSServerSuite) TestFetchFromToolsMetadataSources(c *gc.C) {
 	contentReader, metadataURL, err := sources[0].Fetch(custom)
 	c.Assert(err, jc.ErrorIsNil)
 	defer func() { _ = contentReader.Close() }()
-	content, err := ioutil.ReadAll(contentReader)
+	content, err := io.ReadAll(contentReader)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(content), gc.Equals, custom)
 	c.Check(metadataURL[:8], gc.Equals, "https://")
@@ -2350,7 +2380,7 @@ func (s *localHTTPSServerSuite) TestFetchFromToolsMetadataSources(c *gc.C) {
 	contentReader, metadataURL, err = sources[1].Fetch(keystoneContainer + "/" + keystone)
 	c.Assert(err, jc.ErrorIsNil)
 	defer func() { _ = contentReader.Close() }()
-	content, err = ioutil.ReadAll(contentReader)
+	content, err = io.ReadAll(contentReader)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(content), gc.Equals, keystone)
 	c.Check(metadataURL[:8], gc.Equals, "https://")
@@ -2408,31 +2438,50 @@ func (s *localServerSuite) TestAllRunningInstancesIgnoresOtherMachines(c *gc.C) 
 
 func (s *localServerSuite) TestResolveNetworkUUID(c *gc.C) {
 	var sampleUUID = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
-	networkId, err := openstack.ResolveNetwork(s.env, sampleUUID, false)
+
+	err := s.srv.Neutron.NeutronModel().AddNetwork(neutron.NetworkV2{Id: sampleUUID})
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(networkId, gc.Equals, sampleUUID)
+
+	networkIDs, err := openstack.ResolveNetworkIDs(s.env, sampleUUID, false)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(networkIDs, gc.DeepEquals, []string{sampleUUID})
 }
 
 func (s *localServerSuite) TestResolveNetworkLabel(c *gc.C) {
 	// For now this test has to cheat and use knowledge of goose internals
 	var networkLabel = "net"
-	var expectNetworkId = "1"
-	networkId, err := openstack.ResolveNetwork(s.env, networkLabel, false)
+	var expectNetworkIDs = []string{"1"}
+	networkIDs, err := openstack.ResolveNetworkIDs(s.env, networkLabel, false)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(networkId, gc.Equals, expectNetworkId)
+	c.Assert(networkIDs, gc.DeepEquals, expectNetworkIDs)
+}
+
+func (s *localServerSuite) TestResolveNetworkLabelMultiple(c *gc.C) {
+	var networkLabel = "multi"
+
+	err := s.srv.Neutron.NeutronModel().AddNetwork(neutron.NetworkV2{
+		Id:   "multi-666",
+		Name: networkLabel,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+
+	err = s.srv.Neutron.NeutronModel().AddNetwork(neutron.NetworkV2{
+		Id:   "multi-999",
+		Name: networkLabel,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+
+	var expectNetworkIDs = []string{"multi-666", "multi-999"}
+	networkIDs, err := openstack.ResolveNetworkIDs(s.env, networkLabel, false)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(networkIDs, jc.SameContents, expectNetworkIDs)
 }
 
 func (s *localServerSuite) TestResolveNetworkNotPresent(c *gc.C) {
-	var notPresentNetwork = "no-network-with-this-label"
-	networkId, err := openstack.ResolveNetwork(s.env, notPresentNetwork, false)
-	c.Check(networkId, gc.Equals, "")
-	c.Assert(err, gc.ErrorMatches, `no networks exist with label "no-network-with-this-label"`)
-	networkId, err = openstack.ResolveNetwork(s.env, notPresentNetwork, true)
-	c.Check(networkId, gc.Equals, "")
-	c.Assert(err, gc.ErrorMatches, `no networks exist with label "no-network-with-this-label"`)
+	networkIDs, err := openstack.ResolveNetworkIDs(s.env, "no-network-with-this-label", false)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(networkIDs, gc.HasLen, 0)
 }
-
-// TODO(gz): TestResolveNetworkMultipleMatching when can inject new networks
 
 func (s *localServerSuite) TestStartInstanceAvailZone(c *gc.C) {
 	inst, err := s.testStartInstanceAvailZone(c, "test-available")
@@ -2741,6 +2790,43 @@ func (s *localServerSuite) TestStartInstanceVolumeRootBlockDeviceSized(c *gc.C) 
 		DestinationType:     "volume",
 		DeleteOnTermination: true,
 		VolumeSize:          diskSizeGiB,
+	})
+}
+
+func (s *localServerSuite) TestStartInstanceLocalRootBlockDeviceConstraint(c *gc.C) {
+	env := s.ensureAMDImages(c)
+
+	err := bootstrapEnv(c, env)
+	c.Assert(err, jc.ErrorIsNil)
+
+	cons, err := constraints.Parse("root-disk-source=local root-disk=1G arch=amd64")
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(cons.HasRootDisk(), jc.IsTrue)
+	c.Assert(*cons.RootDisk, gc.Equals, uint64(1024))
+
+	res, err := testing.StartInstanceWithParams(env, s.callCtx, "1", environs.StartInstanceParams{
+		ControllerUUID: s.ControllerUUID,
+		Constraints:    cons,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(res, gc.NotNil)
+
+	c.Assert(res.Hardware.RootDisk, gc.NotNil)
+	// Check local disk requirements are met.
+	c.Assert(*res.Hardware.RootDisk, jc.GreaterThan, uint64(1024-1))
+
+	runOpts := res.Instance.(novaInstaceStartedWithOpts).NovaInstanceStartedWithOpts()
+	c.Assert(runOpts, gc.NotNil)
+	c.Assert(runOpts.BlockDeviceMappings, gc.NotNil)
+	deviceMapping := runOpts.BlockDeviceMappings[0]
+	c.Assert(deviceMapping, jc.DeepEquals, nova.BlockDeviceMapping{
+		BootIndex:           0,
+		UUID:                "1",
+		SourceType:          "image",
+		DestinationType:     "local",
+		DeleteOnTermination: true,
+		// VolumeSize is 0 when a local disk is used.
+		VolumeSize: 0,
 	})
 }
 
@@ -3280,7 +3366,9 @@ func (s *noSwiftSuite) TestBootstrap(c *gc.C) {
 	c.Assert(bootstrapEnv(c, s.env), jc.ErrorIsNil)
 }
 
-func newFullOpenstackService(cred *identity.Credentials, auth identity.AuthMode, useTSL bool) (*openstackservice.Openstack, []string) {
+func newFullOpenstackService(cred *identity.Credentials, auth identity.AuthMode, useTSL bool) (
+	*openstackservice.Openstack, []string,
+) {
 	service, logMsg := openstackservice.New(cred, auth, useTSL)
 	service.UseNeutronNetworking()
 	service.SetupHTTP(nil)
@@ -3307,10 +3395,10 @@ func bootstrapEnvWithConstraints(c *gc.C, env environs.Environ, cons constraints
 	return bootstrap.Bootstrap(envtesting.BootstrapTODOContext(c), env,
 		context.NewEmptyCloudCallContext(),
 		bootstrap.BootstrapParams{
-			ControllerConfig:         coretesting.FakeControllerConfig(),
-			AdminSecret:              testing.AdminSecret,
-			CAPrivateKey:             coretesting.CAKey,
-			SupportedBootstrapSeries: coretesting.FakeSupportedJujuSeries,
-			BootstrapConstraints:     cons,
+			ControllerConfig:        coretesting.FakeControllerConfig(),
+			AdminSecret:             testing.AdminSecret,
+			CAPrivateKey:            coretesting.CAKey,
+			SupportedBootstrapBases: coretesting.FakeSupportedJujuBases,
+			BootstrapConstraints:    cons,
 		})
 }

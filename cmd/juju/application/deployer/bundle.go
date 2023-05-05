@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
@@ -15,10 +15,10 @@ import (
 	"github.com/juju/juju/api/client/application"
 	commoncharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/juju/cmd/juju/application/bundle"
-	"github.com/juju/juju/cmd/juju/application/store"
 	"github.com/juju/juju/cmd/juju/application/utils"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/storage"
 )
 
@@ -43,7 +43,6 @@ type deployBundle struct {
 	defaultCharmSchema charm.Schema
 
 	resolver             Resolver
-	authorizer           store.MacaroonGetter
 	newConsumeDetailsAPI func(url *charm.OfferURL) (ConsumeDetails, error)
 	deployResources      DeployResourcesFunc
 	charmReader          CharmReader
@@ -65,10 +64,8 @@ func (d *deployBundle) deploy(
 	ctx *cmd.Context,
 	deployAPI DeployerAPI,
 	resolver Resolver,
-	macaroonGetter store.MacaroonGetter,
 ) (rErr error) {
 	d.resolver = resolver
-	d.authorizer = macaroonGetter
 	bakeryClient, err := d.model.BakeryClient()
 	if err != nil {
 		return errors.Trace(err)
@@ -96,10 +93,17 @@ func (d *deployBundle) deploy(
 
 	// Compose bundle to be deployed and check its validity before running
 	// any pre/post checks.
-	var bundleData *charm.BundleData
-	if bundleData, err = bundle.ComposeAndVerifyBundle(d.bundleDataSource, d.bundleOverlayFile); err != nil {
+	bundleData, unmarshalErrors, err := bundle.ComposeAndVerifyBundle(d.bundleDataSource, d.bundleOverlayFile)
+	if err != nil {
 		return errors.Annotatef(err, "cannot deploy bundle")
 	}
+	d.printDryRunUnmarshalErrors(ctx, unmarshalErrors)
+
+	err = d.checkExplicitSeries(bundleData)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
 	d.bundleDir = d.bundleDataSource.BasePath()
 
 	// Short-circuit trust checks if the operator specifies '--force'
@@ -125,11 +129,12 @@ Please repeat the deploy command with the --trust argument if you consent to tru
 					return errors.Trace(err)
 				}
 
-				platform, err := utils.DeducePlatform(cons, applicationSpec.Series, d.modelConstraints)
+				base, err := series.GetBaseFromSeries(applicationSpec.Series)
 				if err != nil {
 					return errors.Trace(err)
 				}
 
+				platform := utils.MakePlatform(cons, base, d.modelConstraints)
 				origin, err := utils.DeduceOrigin(charmURL, d.origin.CharmChannel(), platform)
 				if err != nil {
 					return errors.Trace(err)
@@ -165,13 +170,81 @@ Please repeat the deploy command with the --trust argument if you consent to tru
 		return errors.Trace(err)
 	}
 
-	// TODO(ericsnow) Do something with the CS macaroons that were returned?
 	// Deploying bundles does not allow the use force, it's expected that the
 	// bundle is correct and therefore the charms are also.
-	if _, err := bundleDeploy(d.defaultCharmSchema, bundleData, spec); err != nil {
+	if err := bundleDeploy(d.defaultCharmSchema, bundleData, spec); err != nil {
 		return errors.Annotate(err, "cannot deploy bundle")
 	}
 	return nil
+}
+
+// checkExplicitSeries returns an error if the image-id constraint is used and
+// there is no series explicitly defined by the user.
+func (d *deployBundle) checkExplicitSeries(bundleData *charm.BundleData) error {
+	for _, applicationSpec := range bundleData.Applications {
+		// First we check if the app is deployed "to" a machine that
+		// has the image-id constraint
+		machineHasImageID := false
+		for _, to := range applicationSpec.To {
+
+			// This error can be ignored since the bundle has
+			// already been validated at this point, and it's not
+			// this method's responsibility to validate it.
+			placement, _ := charm.ParsePlacement(to)
+			// Only check for explicit series when image-id
+			// constraint *if* the placement machine is defined
+			// in the bundle. In the case of 'new' it does pass
+			// bundle validation but it won't be defined since it's
+			// a new machine, so don't perform any check in that
+			// case.
+			if machine, ok := bundleData.Machines[placement.Machine]; ok {
+				machineCons, err := constraints.Parse(machine.Constraints)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				if machineCons.HasImageID() {
+					machineHasImageID = true
+					break
+				}
+			}
+		}
+		// Then we check if the constraints declared on the app have
+		// image-id
+		appCons, err := constraints.Parse(applicationSpec.Constraints)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		appHasImageID := appCons.HasImageID()
+		// Lastly we check if the model constraints have image-id
+		modelHasImageID := d.modelConstraints.HasImageID()
+		// We check if series are defined when any of the constraints
+		// above have image-id
+		if (appHasImageID || modelHasImageID || machineHasImageID) &&
+			applicationSpec.Series == "" &&
+			bundleData.Series == "" {
+			return errors.Forbiddenf("base must be explicitly provided for %q when image-id constraint is used", applicationSpec.Charm)
+		}
+	}
+	return nil
+}
+
+func (d *deployBundle) printDryRunUnmarshalErrors(ctx *cmd.Context, unmarshalErrors []error) {
+	if !d.dryRun {
+		return
+	}
+	// During a dry run, print any unmarshalling errors from the
+	// bundles and overlays
+	var msg string
+	for _, err := range unmarshalErrors {
+		if err == nil {
+			continue
+		}
+		msg = fmt.Sprintf("%s\n %s\n", msg, err)
+	}
+	if msg == "" {
+		return
+	}
+	ctx.Warningf("These fields%swill be ignored during deployment\n", msg)
 }
 
 func (d *deployBundle) makeBundleDeploySpec(ctx *cmd.Context, apiRoot DeployerAPI) (bundleDeploySpec, error) {
@@ -212,7 +285,6 @@ func (d *deployBundle) makeBundleDeploySpec(ctx *cmd.Context, apiRoot DeployerAP
 		modelConstraints:     d.modelConstraints,
 		deployAPI:            apiRoot,
 		bundleResolver:       d.resolver,
-		authorizer:           d.authorizer,
 		getConsumeDetailsAPI: getConsumeDetails,
 		deployResources:      d.deployResources,
 		useExistingMachines:  d.useExistingMachines,
@@ -245,8 +317,8 @@ func (d *localBundle) String() string {
 }
 
 // PrepareAndDeploy deploys a local bundle, no further preparation is needed.
-func (d *localBundle) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerAPI, resolver Resolver, macaroonGetter store.MacaroonGetter) error {
-	return d.deploy(ctx, deployAPI, resolver, macaroonGetter)
+func (d *localBundle) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerAPI, resolver Resolver) error {
+	return d.deploy(ctx, deployAPI, resolver)
 }
 
 type repositoryBundle struct {
@@ -256,7 +328,7 @@ type repositoryBundle struct {
 // String returns a string description of the deployer.
 func (d *repositoryBundle) String() string {
 	str := fmt.Sprintf("deploy bundle: %s", d.bundleURL.String())
-	if isEmptyOrigin(d.origin, commoncharm.OriginCharmStore) {
+	if isEmptyOrigin(d.origin, commoncharm.OriginCharmHub) {
 		return str
 	}
 	var revision string
@@ -271,11 +343,11 @@ func (d *repositoryBundle) String() string {
 }
 
 // PrepareAndDeploy deploys a local bundle, no further preparation is needed.
-func (d *repositoryBundle) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerAPI, resolver Resolver, macaroonGetter store.MacaroonGetter) error {
+func (d *repositoryBundle) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerAPI, resolver Resolver) error {
 	var revision string
 	if d.bundleURL.Revision != -1 {
 		revision = fmt.Sprintf(", revision %d", d.bundleURL.Revision)
 	}
 	ctx.Infof("Located bundle %q in %s%s", d.bundleURL.Name, d.origin.Source, revision)
-	return d.deploy(ctx, deployAPI, resolver, macaroonGetter)
+	return d.deploy(ctx, deployAPI, resolver)
 }

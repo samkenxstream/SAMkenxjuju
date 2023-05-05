@@ -7,8 +7,8 @@ import (
 	"bufio"
 	"bytes"
 	stdcontext "context"
+	"database/sql"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,15 +17,13 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/hashicorp/raft"
-	"github.com/juju/clock"
 	"github.com/juju/cmd/v3"
 	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/lumberjack/v2"
-	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v3"
 	"github.com/juju/names/v4"
 	"github.com/juju/pubsub/v2"
 	"github.com/juju/testing"
@@ -56,16 +54,14 @@ import (
 	agenterrors "github.com/juju/juju/cmd/jujud/agent/errors"
 	"github.com/juju/juju/cmd/jujud/agent/mocks"
 	"github.com/juju/juju/cmd/jujud/agent/model"
+	"github.com/juju/juju/container/kvm"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/auditlog"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/lease"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/migration"
 	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/raft/queue"
-	"github.com/juju/juju/core/raftlease"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/context"
 	envtesting "github.com/juju/juju/environs/testing"
@@ -73,6 +69,7 @@ import (
 	"github.com/juju/juju/provider/dummy"
 	"github.com/juju/juju/pubsub/apiserver"
 	"github.com/juju/juju/rpc/params"
+	_ "github.com/juju/juju/secrets/provider/all"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/storage"
 	coretesting "github.com/juju/juju/testing"
@@ -86,7 +83,6 @@ import (
 	"github.com/juju/juju/worker/instancepoller"
 	"github.com/juju/juju/worker/machiner"
 	"github.com/juju/juju/worker/migrationmaster"
-	raftworker "github.com/juju/juju/worker/raft"
 	"github.com/juju/juju/worker/storageprovisioner"
 )
 
@@ -119,7 +115,6 @@ func (s *MachineSuite) SetUpTest(c *gc.C) {
 		controller.AuditingEnabled: true,
 	}
 	s.commonMachineSuite.SetUpTest(c)
-	bootstrapRaft(c, s.DataDir())
 
 	// Restart failed workers much faster for the tests.
 	s.PatchValue(&engine.EngineErrorDelay, 100*time.Millisecond)
@@ -128,17 +123,6 @@ func (s *MachineSuite) SetUpTest(c *gc.C) {
 	// If any given test hits a minute, we have almost certainly become
 	// wedged, so dump the logs.
 	coretesting.DumpTestLogsAfter(time.Minute, c, s)
-}
-
-func bootstrapRaft(c *gc.C, dataDir string) {
-	err := raftworker.Bootstrap(raftworker.Config{
-		Clock:      clock.WallClock,
-		StorageDir: filepath.Join(dataDir, "raft"),
-		LocalID:    "0",
-		Logger:     loggo.GetLogger("machine_test.raft"),
-		Queue:      queue.NewOpQueue(clock.WallClock),
-	})
-	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *MachineSuite) TestParseNonsense(c *gc.C) {
@@ -290,6 +274,7 @@ func (s *MachineSuite) TestDyingMachine(c *gc.C) {
 }
 
 func (s *MachineSuite) TestManageModelRunsInstancePoller(c *gc.C) {
+	testing.PatchExecutableAsEchoArgs(c, s, "ovs-vsctl", 0)
 	s.AgentSuite.PatchValue(&instancepoller.ShortPoll, 500*time.Millisecond)
 	s.AgentSuite.PatchValue(&instancepoller.ShortPollCap, 500*time.Millisecond)
 
@@ -316,7 +301,7 @@ func (s *MachineSuite) TestManageModelRunsInstancePoller(c *gc.C) {
 
 	// Wait for the workers to start. This ensures that the central
 	// hub referred to in startAddressPublisher has been assigned,
-	// and we will will not fail race tests with concurrent access.
+	// and we will not fail race tests with concurrent access.
 	select {
 	case <-a.WorkersStarted():
 	case <-time.After(testing.LongWait):
@@ -337,24 +322,6 @@ func (s *MachineSuite) TestManageModelRunsInstancePoller(c *gc.C) {
 	insts, err := s.Environ.Instances(context.NewEmptyCloudCallContext(), []instance.Id{instId})
 	c.Assert(err, jc.ErrorIsNil)
 
-	netEnv, ok := s.Environ.(environs.Networking)
-	c.Assert(ok, jc.IsTrue, gc.Commentf("expected an environ instance that supports the Networking interface"))
-
-	// Since the dummy environ implements the environ.NetworkingEnviron,
-	// the instancepoller will pull the provider addresses directly from
-	// the environ and resolve their space ID.
-	ifLists, err := netEnv.NetworkInterfaces(context.NewEmptyCloudCallContext(), []instance.Id{instId})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ifLists, gc.HasLen, 1)
-
-	var expAddrs network.SpaceAddresses
-	for _, iface := range ifLists[0] {
-		for _, addr := range append(iface.Addresses, iface.ShadowAddresses...) {
-			sAddr := network.NewSpaceAddress(addr.Value)
-			sAddr.SpaceID = network.AlphaSpaceId
-			expAddrs = append(expAddrs, sAddr)
-		}
-	}
 	dummy.SetInstanceStatus(insts[0], "running")
 
 	for attempt := coretesting.LongAttempt.Start(); attempt.Next(); {
@@ -367,8 +334,11 @@ func (s *MachineSuite) TestManageModelRunsInstancePoller(c *gc.C) {
 		instStatus, err := m.InstanceStatus()
 		c.Assert(err, jc.ErrorIsNil)
 		c.Logf("found status is %q %q", instStatus.Status, instStatus.Message)
-		if reflect.DeepEqual(m.Addresses(), expAddrs) && instStatus.Message == "running" {
-			c.Logf("machine %q addresses updated: %+v", m.Id(), expAddrs)
+
+		// The dummy provider always returns 3 devices with one address each.
+		// We don't care what they are, just that the instance-poller retrieved
+		// them and set them against the machine in state.
+		if len(m.Addresses()) == 3 && instStatus.Message == "running" {
 			break
 		}
 		c.Logf("waiting for machine %q address to be updated", m.Id())
@@ -405,8 +375,6 @@ func (s *MachineSuite) waitProvisioned(c *gc.C, unit *state.Unit) (*state.Machin
 		select {
 		case <-timeout:
 			c.Fatalf("timed out waiting for provisioning")
-		case <-time.After(coretesting.ShortWait):
-			s.State.StartSync()
 		case _, ok := <-w.Changes():
 			c.Assert(ok, jc.IsTrue)
 			err := m.Refresh()
@@ -422,7 +390,7 @@ func (s *MachineSuite) waitProvisioned(c *gc.C, unit *state.Unit) (*state.Machin
 }
 
 func (s *MachineSuite) testUpgradeRequest(c *gc.C, agent runner, tag string, currentTools *tools.Tools) {
-	newVers := coretesting.CurrentVersion(c)
+	newVers := coretesting.CurrentVersion()
 	newVers.Patch++
 	newTools := envtesting.AssertUploadFakeToolsVersions(
 		c, s.DefaultToolsStorage, s.Environ.Config().AgentStream(), s.Environ.Config().AgentStream(), newVers)[0]
@@ -569,6 +537,13 @@ func (s *MachineSuite) TestManageModelServesAPI(c *gc.C) {
 	})
 }
 
+type noOpLogger struct{}
+
+func (noOpLogger) Warningf(string, ...interface{})  {}
+func (noOpLogger) Criticalf(string, ...interface{}) {}
+func (noOpLogger) Debugf(string, ...interface{})    {}
+func (noOpLogger) Tracef(string, ...interface{})    {}
+
 func (s *MachineSuite) TestIAASControllerPatchUpdateManagerFile(c *gc.C) {
 	s.assertJobWithState(c, state.JobManageModel,
 		func() {
@@ -581,8 +556,8 @@ func (s *MachineSuite) TestIAASControllerPatchUpdateManagerFile(c *gc.C) {
 			c.Assert(ok, jc.IsTrue)
 			st, err := api.Open(apiInfo, fastDialOpts)
 			c.Assert(err, jc.ErrorIsNil)
-			defer st.Close()
-			_, err = a.startAPIWorkers(st)
+			defer func() { _ = st.Close() }()
+			err = a.machineStartup(st, noOpLogger{})
 			c.Assert(err, jc.ErrorIsNil)
 		},
 	)
@@ -600,8 +575,8 @@ func (s *MachineSuite) TestIAASControllerPatchUpdateManagerFileErrored(c *gc.C) 
 			c.Assert(ok, jc.IsTrue)
 			st, err := api.Open(apiInfo, fastDialOpts)
 			c.Assert(err, jc.ErrorIsNil)
-			defer st.Close()
-			_, err = a.startAPIWorkers(st)
+			defer func() { _ = st.Close() }()
+			err = a.machineStartup(st, noOpLogger{})
 			c.Assert(err, gc.ErrorMatches, `unknown error`)
 		},
 	)
@@ -619,8 +594,8 @@ func (s *MachineSuite) TestIAASControllerPatchUpdateManagerFileNonZeroExitCode(c
 			c.Assert(ok, jc.IsTrue)
 			st, err := api.Open(apiInfo, fastDialOpts)
 			c.Assert(err, jc.ErrorIsNil)
-			defer st.Close()
-			_, err = a.startAPIWorkers(st)
+			defer func() { _ = st.Close() }()
+			err = a.machineStartup(st, noOpLogger{})
 			c.Assert(err, gc.ErrorMatches, `cannot patch /etc/update-manager/release-upgrades: unknown error`)
 		},
 	)
@@ -736,7 +711,7 @@ func (s *MachineSuite) assertAgentSetsToolsVersion(c *gc.C, job state.MachineJob
 		}
 		return false, nil
 	})
-	vers := coretesting.CurrentVersion(c)
+	vers := coretesting.CurrentVersion()
 	vers.Minor--
 	m, _, _ := s.primeAgentVersion(c, vers, job)
 	ctrl, a := s.newAgent(c, m)
@@ -794,16 +769,12 @@ func (s *MachineSuite) TestManageModelRunsCleaner(c *gc.C) {
 		w := unit.Watch()
 		defer worker.Stop(w)
 
-		// Trigger a sync on the state used by the agent, and wait
-		// for the unit to be removed.
-		agentState.StartSync()
+		// Wait for the unit to be removed.
 		timeout := time.After(coretesting.LongWait)
 		for done := false; !done; {
 			select {
 			case <-timeout:
 				c.Fatalf("unit not cleaned up")
-			case <-time.After(coretesting.ShortWait):
-				s.State.StartSync()
 			case <-w.Changes():
 				err := unit.Refresh()
 				if errors.IsNotFound(err) {
@@ -827,16 +798,12 @@ func (s *MachineSuite) TestJobManageModelRunsMinUnitsWorker(c *gc.C) {
 		w := app.Watch()
 		defer worker.Stop(w)
 
-		// Trigger a sync on the state used by the agent, and wait for the unit
-		// to be created.
-		agentState.StartSync()
+		// Wait for the unit to be created.
 		timeout := time.After(longerWait)
 		for {
 			select {
 			case <-timeout:
 				c.Fatalf("unit not created")
-			case <-time.After(coretesting.ShortWait):
-				s.State.StartSync()
 			case <-w.Changes():
 				units, err := app.AllUnits()
 				c.Assert(err, jc.ErrorIsNil)
@@ -862,7 +829,6 @@ func (s *MachineSuite) TestMachineAgentRunsAuthorisedKeysWorker(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Wait for ssh keys file to be updated.
-	s.State.StartSync()
 	timeout := time.After(coretesting.LongWait)
 	sshKeyWithCommentPrefix := sshtesting.ValidKeyOne.Key + " Juju:user@host"
 	for {
@@ -870,7 +836,6 @@ func (s *MachineSuite) TestMachineAgentRunsAuthorisedKeysWorker(c *gc.C) {
 		case <-timeout:
 			c.Fatalf("timeout while waiting for authorised ssh keys to change")
 		case <-time.After(coretesting.ShortWait):
-			s.State.StartSync()
 			keys, err := ssh.ListKeys(authenticationworker.SSHUser, ssh.FullKeys)
 			c.Assert(err, jc.ErrorIsNil)
 			keysStr := strings.Join(keys, "\n")
@@ -943,7 +908,6 @@ func (s *MachineSuite) TestMachineAgentRunsAPIAddressUpdaterWorker(c *gc.C) {
 
 	// Wait for config to be updated.
 	for attempt := coretesting.LongAttempt.Start(); attempt.Next(); {
-		s.BackingState.StartSync()
 		if !attempt.HasNext() {
 			break
 		}
@@ -991,7 +955,6 @@ func (s *MachineSuite) TestDiskManagerWorkerUpdatesState(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	// Wait for state to be updated.
-	s.BackingState.StartSync()
 	for attempt := coretesting.LongAttempt.Start(); attempt.Next(); {
 		devices, err := sb.BlockDevices(m.MachineTag())
 		c.Assert(err, jc.ErrorIsNil)
@@ -1072,7 +1035,7 @@ func (s *MachineSuite) testCertificateDNSUpdated(c *gc.C, a *MachineAgent) {
 	c.Check(expectedDnsNames.Difference(certDnsNames).IsEmpty(), jc.IsTrue)
 
 	// Check the mongo certificate file too.
-	pemContent, err := ioutil.ReadFile(filepath.Join(s.DataDir(), "server.pem"))
+	pemContent, err := os.ReadFile(filepath.Join(s.DataDir(), "server.pem"))
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(string(pemContent), gc.Equals, stateInfo.Cert+"\n"+stateInfo.PrivateKey)
 }
@@ -1124,19 +1087,19 @@ func (s *MachineSuite) TestMachineAgentIgnoreAddresses(c *gc.C) {
 func (s *MachineSuite) TestMachineAgentIgnoreAddressesContainer(c *gc.C) {
 	ignoreAddressCh := s.setupIgnoreAddresses(c, true)
 
-	parent, err := s.State.AddMachine("focal", state.JobHostUnits)
+	parent, err := s.State.AddMachine(state.UbuntuBase("20.04"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	m, err := s.State.AddMachineInsideMachine(
 		state.MachineTemplate{
-			Series: "jammy",
-			Jobs:   []state.MachineJob{state.JobHostUnits},
+			Base: state.UbuntuBase("22.04"),
+			Jobs: []state.MachineJob{state.JobHostUnits},
 		},
 		parent.Id(),
 		instance.LXD,
 	)
 	c.Assert(err, jc.ErrorIsNil)
 
-	vers := coretesting.CurrentVersion(c)
+	vers := coretesting.CurrentVersion()
 	s.primeAgentWithMachine(c, m, vers)
 	ctrl, a := s.newAgent(c, m)
 	defer ctrl.Finish()
@@ -1173,7 +1136,12 @@ func (s *MachineSuite) TestMachineWorkers(c *gc.C) {
 	// Wait for it to stabilise, running as normal.
 	matcher := agenttest.NewWorkerMatcher(c, tracker, a.Tag().String(),
 		append(alwaysMachineWorkers, notMigratingMachineWorkers...))
-	agenttest.WaitMatch(c, matcher.Check, coretesting.LongWait, s.BackingState.StartSync)
+
+	// Indicate that this machine supports KVM containers rather than doing
+	// detection that may return true/false based on the machine running tests.
+	s.PatchValue(&kvm.IsKVMSupported, func() (bool, error) { return true, nil })
+
+	agenttest.WaitMatch(c, matcher.Check, coretesting.LongWait)
 }
 
 func (s *MachineSuite) TestControllerModelWorkers(c *gc.C) {
@@ -1192,7 +1160,7 @@ func (s *MachineSuite) TestControllerModelWorkers(c *gc.C) {
 	matcher := agenttest.NewWorkerMatcher(c, tracker, uuid, expectedWorkers)
 	s.assertJobWithState(c, state.JobManageModel, nil,
 		func(agent.Config, *state.State, *MachineAgent) {
-			agenttest.WaitMatch(c, matcher.Check, longerWait, s.BackingState.StartSync)
+			agenttest.WaitMatch(c, matcher.Check, longerWait)
 		},
 	)
 }
@@ -1221,7 +1189,7 @@ func (s *MachineSuite) TestHostedModelWorkers(c *gc.C) {
 	matcher := agenttest.NewWorkerMatcher(c, tracker, uuid,
 		append(alwaysModelWorkers, aliveModelWorkers...))
 	s.assertJobWithState(c, state.JobManageModel, nil, func(agent.Config, *state.State, *MachineAgent) {
-		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait, st.StartSync)
+		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait)
 	})
 }
 
@@ -1266,7 +1234,7 @@ func (s *MachineSuite) TestWorkersForHostedModelWithInvalidCredential(c *gc.C) {
 
 	matcher := agenttest.NewWorkerMatcher(c, tracker, uuid, remainingWorkers.SortedValues())
 	s.assertJobWithState(c, state.JobManageModel, nil, func(agent.Config, *state.State, *MachineAgent) {
-		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait, st.StartSync)
+		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait)
 	})
 }
 
@@ -1316,7 +1284,7 @@ func (s *MachineSuite) TestWorkersForHostedModelWithDeletedCredential(c *gc.C) {
 	matcher := agenttest.NewWorkerMatcher(c, tracker, uuid, remainingWorkers.SortedValues())
 
 	s.assertJobWithState(c, state.JobManageModel, nil, func(agent.Config, *state.State, *MachineAgent) {
-		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait, st.StartSync)
+		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait)
 	})
 }
 
@@ -1361,7 +1329,7 @@ func (s *MachineSuite) TestMigratingModelWorkers(c *gc.C) {
 	matcher := agenttest.NewWorkerMatcher(c, tracker, uuid,
 		append(alwaysModelWorkers, migratingModelWorkers...))
 	s.assertJobWithState(c, state.JobManageModel, nil, func(agent.Config, *state.State, *MachineAgent) {
-		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait, st.StartSync)
+		agenttest.WaitMatch(c, matcher.Check, ReallyLongWait)
 	})
 }
 
@@ -1390,8 +1358,6 @@ func (s *MachineSuite) TestDyingModelCleanedUp(c *gc.C) {
 						return // successfully removed
 					}
 					c.Assert(err, jc.ErrorIsNil) // guaranteed fail
-				case <-time.After(coretesting.ShortWait):
-					st.StartSync()
 				case <-timeout:
 					c.Fatalf("timed out waiting for workers")
 				}
@@ -1400,10 +1366,9 @@ func (s *MachineSuite) TestDyingModelCleanedUp(c *gc.C) {
 }
 
 func (s *MachineSuite) TestModelWorkersRespectSingularResponsibilityFlag(c *gc.C) {
-
 	// Grab responsibility for the model on behalf of another machine.
 	uuid := s.BackingState.ModelUUID()
-	claimSingularRaftLease(c, s.DataDir(), uuid)
+	s.claimSingularLease(uuid)
 
 	// Then run a normal model-tracking test, just checking for
 	// a different set of workers.
@@ -1413,57 +1378,19 @@ func (s *MachineSuite) TestModelWorkersRespectSingularResponsibilityFlag(c *gc.C
 
 	matcher := agenttest.NewWorkerMatcher(c, tracker, uuid, alwaysModelWorkers)
 	s.assertJobWithState(c, state.JobManageModel, nil, func(agent.Config, *state.State, *MachineAgent) {
-		agenttest.WaitMatch(c, matcher.Check, longerWait, s.BackingState.StartSync)
+		agenttest.WaitMatch(c, matcher.Check, longerWait)
 	})
 }
 
-func claimSingularRaftLease(c *gc.C, dataDir string, modelUUID string) {
-	// This is cribbed from upgrades/raft.go, but simplified because
-	// we don't need to handle
-	raftDir := filepath.Join(dataDir, "raft")
-	snapshotStore, err := raftworker.NewSnapshotStore(raftDir, 2, loggo.GetLogger("machine_test.raft"))
-	c.Assert(err, jc.ErrorIsNil)
+func (s *MachineSuite) claimSingularLease(modelUUID string) {
+	s.InitialDBOps = append(s.InitialDBOps, func(db *sql.DB) error {
+		q := `
+INSERT INTO lease (uuid, lease_type_id, model_uuid, name, holder, start, expiry)
+VALUES (?, 0, ?, ?, 'machine-999-lxd-99', datetime('now'), datetime('now', '+100 seconds'))`[1:]
 
-	var zero time.Time
-	newSnapshot := raftlease.Snapshot{
-		Version: raftlease.SnapshotVersion,
-		Entries: map[raftlease.SnapshotKey]raftlease.SnapshotEntry{
-			{
-				Namespace: lease.SingularControllerNamespace,
-				ModelUUID: modelUUID,
-				Lease:     modelUUID,
-			}: {
-				Holder:   "machine-999-lxd-99",
-				Start:    zero,
-				Duration: time.Hour,
-			},
-		},
-		GlobalTime: zero,
-	}
-	// Store the snapshot.
-	_, transport := raft.NewInmemTransport(raft.ServerAddress("notused"))
-	defer transport.Close()
-	sink, err := snapshotStore.Create(
-		raft.SnapshotVersionMax,
-		1, // lastIndex
-		1, // lastTerm
-		raft.Configuration{
-			Servers: []raft.Server{{
-				ID:       raft.ServerID("0"),
-				Address:  raft.ServerAddress(serverAddress),
-				Suffrage: raft.Voter,
-			}},
-		},
-		1, // configIndex
-		transport,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	defer sink.Close()
-	err = newSnapshot.Persist(sink)
-	if err != nil {
-		sink.Cancel()
-	}
-	c.Assert(err, jc.ErrorIsNil)
+		_, err := db.Exec(q, utils.MustNewUUID().String(), modelUUID, modelUUID)
+		return err
+	})
 }
 
 func (s *MachineSuite) setUpNewModel(c *gc.C) (newSt *state.State, closer func()) {
@@ -1515,7 +1442,7 @@ type cleanupSuite interface {
 
 func startAddressPublisher(suite cleanupSuite, c *gc.C, agent *MachineAgent) {
 	// Start publishing a test API address on the central hub so that
-	// the raft workers can start. The other way of unblocking them
+	// dependent workers can start. The other way of unblocking them
 	// would be to get the peergrouper healthy, but that has proved
 	// difficult - trouble getting the replicaset correctly
 	// configured.

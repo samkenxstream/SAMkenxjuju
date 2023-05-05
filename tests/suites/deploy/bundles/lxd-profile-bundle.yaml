@@ -1,4 +1,4 @@
-series: bionic
+series: jammy
 machines:
   '0': {}
   '1': {}
@@ -7,7 +7,6 @@ machines:
 applications:
   lxd-profile:
     charm: juju-qa-lxd-profile-without-devices
-    channel: beta
     num_units: 8
     to:
       - lxd:0
@@ -19,7 +18,7 @@ applications:
       - lxd:2
       - lxd:3
   ubuntu:
-    charm: jameinel-ubuntu-lite
+    charm: ubuntu
     num_units: 4
     to:
       - "0"

@@ -1,21 +1,6 @@
 // Copyright 2012, 2013 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package dummy implements an environment provider for testing
-// purposes, registered with environs under the name "dummy".
-//
-// The configuration YAML for the testing environment
-// must specify a "controller" property with a boolean
-// value. If this is true, a controller will be started
-// when the environment is bootstrapped.
-//
-// The configuration data also accepts a "broken" property
-// of type boolean. If this is non-empty, any operation
-// after the environment has been opened will return
-// the error "broken environment", and will also log that.
-//
-// The DNS name of instances is the same as the Id,
-// with ".dns" appended.
 package dummy
 
 import (
@@ -35,6 +20,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/jsonschema"
 	"github.com/juju/loggo"
+	mgotesting "github.com/juju/mgo/v3/testing"
 	"github.com/juju/names/v4"
 	"github.com/juju/pubsub/v2"
 	"github.com/juju/retry"
@@ -61,6 +47,7 @@ import (
 	"github.com/juju/juju/core/cache"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/container"
+	coredatabase "github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/instance"
 	corelease "github.com/juju/juju/core/lease"
 	corelogger "github.com/juju/juju/core/logger"
@@ -69,7 +56,7 @@ import (
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/core/raft/queue"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
@@ -84,7 +71,6 @@ import (
 	"github.com/juju/juju/storage"
 	"github.com/juju/juju/testing"
 	coretools "github.com/juju/juju/tools"
-	jujuversion "github.com/juju/juju/version"
 	"github.com/juju/juju/worker/gate"
 	"github.com/juju/juju/worker/lease"
 	"github.com/juju/juju/worker/modelcache"
@@ -123,9 +109,9 @@ func SampleConfig() testing.Attrs {
 		"uuid":                      testing.ModelTag.Id(),
 		"authorized-keys":           testing.FakeAuthKeys,
 		"firewall-mode":             config.FwInstance,
+		"secret-backend":            "auto",
 		"ssl-hostname-verification": true,
 		"development":               false,
-		"default-series":            jujuversion.DefaultSupportedLTS(),
 		"default-space":             "",
 		"secret":                    "pork",
 		"controller":                true,
@@ -145,16 +131,16 @@ func PatchTransientErrorInjectionChannel(c chan error) func() {
 // mongoInfo returns a mongo.MongoInfo which allows clients to connect to the
 // shared dummy state, if it exists.
 func mongoInfo() mongo.MongoInfo {
-	if gitjujutesting.MgoServer.Addr() == "" {
+	if mgotesting.MgoServer.Addr() == "" {
 		panic("dummy environ state tests must be run with MgoTestPackage")
 	}
-	mongoPort := strconv.Itoa(gitjujutesting.MgoServer.Port())
+	mongoPort := strconv.Itoa(mgotesting.MgoServer.Port())
 	addrs := []string{net.JoinHostPort("localhost", mongoPort)}
 	return mongo.MongoInfo{
 		Info: mongo.Info{
 			Addrs:      addrs,
 			CACert:     testing.CACert,
-			DisableTLS: !gitjujutesting.MgoServer.SSLEnabled(),
+			DisableTLS: !mgotesting.MgoServer.SSLEnabled(),
 		},
 	}
 }
@@ -267,6 +253,7 @@ type environState struct {
 	maxAddr        int // maximum allocated address last byte
 	insts          map[instance.Id]*dummyInstance
 	globalRules    firewall.IngressRules
+	modelRules     firewall.IngressRules
 	bootstrapped   bool
 	mux            *apiserverhttp.Mux
 	httpServer     *httptest.Server
@@ -293,7 +280,6 @@ type environ struct {
 	cloud        environscloudspec.CloudSpec
 	ecfgMutex    sync.Mutex
 	ecfgUnlocked *environConfig
-	spacesMutex  sync.RWMutex
 }
 
 var _ environs.Environ = (*environ)(nil)
@@ -353,7 +339,7 @@ func Reset(c *gc.C) {
 	}
 	if mongoAlive() {
 		err := retry.Call(retry.CallArgs{
-			Func: gitjujutesting.MgoServer.Reset,
+			Func: mgotesting.MgoServer.Reset,
 			// Only interested in retrying the intermittent
 			// 'unexpected message'.
 			IsFatalError: func(err error) bool {
@@ -439,7 +425,7 @@ func (s *environState) destroyLocked() {
 
 	if mongoAlive() {
 		logger.Debugf("resetting MgoServer")
-		_ = gitjujutesting.MgoServer.Reset()
+		_ = mgotesting.MgoServer.Reset()
 	}
 }
 
@@ -448,7 +434,7 @@ func (s *environState) destroyLocked() {
 // If it has been deliberately destroyed, we will
 // expect some errors when closing things down.
 func mongoAlive() bool {
-	return gitjujutesting.MgoServer.Addr() != ""
+	return mgotesting.MgoServer.Addr() != ""
 }
 
 // GetStateInAPIServer returns the state connection used by the API server
@@ -839,12 +825,10 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.Provi
 
 	// Create an instance for the bootstrap node.
 	logger.Infof("creating bootstrap instance")
-	series := config.PreferredSeries(e.Config())
 	i := &dummyInstance{
 		id:           BootstrapInstanceId,
 		addresses:    network.NewMachineAddresses([]string{"localhost"}).AsProviderAddresses(),
 		machineId:    agent.BootstrapControllerId,
-		series:       series,
 		firewallMode: e.Config().FirewallMode(),
 		state:        estate,
 		controller:   true,
@@ -1007,8 +991,6 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.Provi
 				return errors.Trace(err)
 			}
 
-			queue := queue.NewOpQueue(clock.WallClock)
-
 			estate.apiServer, err = apiserver.NewServer(apiserver.ServerConfig{
 				StatePool:           statePool,
 				Controller:          estate.controller,
@@ -1037,8 +1019,8 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.Provi
 					return true
 				},
 				MetricsCollector: apiserver.NewMetricsCollector(),
-				RaftOpQueue:      queue,
 				SysLogger:        noopSysLogger{},
+				DBGetter:         stubDBGetter{},
 			})
 			if err != nil {
 				panic(err)
@@ -1052,11 +1034,6 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.Provi
 			go func(apiServer *apiserver.Server) {
 				defer func() {
 					close(abort)
-
-					// Ensure we correctly kill the raft op queue when the api
-					// server goes down.
-					queue.Kill(nil)
-					_ = queue.Wait()
 				}()
 				_ = apiServer.Wait()
 			}(estate.apiServer)
@@ -1067,7 +1044,7 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.Provi
 
 	bsResult := &environs.BootstrapResult{
 		Arch:                    arch,
-		Series:                  series,
+		Base:                    series.MakeDefaultBase("ubuntu", "22.04"),
 		CloudBootstrapFinalizer: finalize,
 	}
 	return bsResult, nil
@@ -1077,11 +1054,17 @@ type noopSysLogger struct{}
 
 func (noopSysLogger) Log([]corelogger.LogRecord) error { return nil }
 
+type stubDBGetter struct{}
+
+func (s stubDBGetter) GetDB(namespace string) (coredatabase.TrackedDB, error) {
+	if namespace != "controller" {
+		return nil, errors.Errorf(`expected a request for "controller" DB; got %q`, namespace)
+	}
+	return nil, nil
+}
+
 func leaseManager(controllerUUID string, st *state.State) (*lease.Manager, error) {
-	target := st.LeaseNotifyTarget(
-		loggo.GetLogger("juju.state.raftlease"),
-	)
-	dummyStore := newLeaseStore(clock.WallClock, target, st.LeaseTrapdoorFunc())
+	dummyStore := newLeaseStore(clock.WallClock)
 	return lease.NewManager(lease.ManagerConfig{
 		Secretary:            lease.SecretaryFinder(controllerUUID),
 		Store:                dummyStore,
@@ -1185,10 +1168,16 @@ func (e *environ) DestroyController(ctx context.ProviderCallContext, controllerU
 	return nil
 }
 
+var unsupportedConstraints = []string{
+	constraints.CpuPower,
+	constraints.VirtType,
+	constraints.ImageID,
+}
+
 // ConstraintsValidator is defined on the Environs interface.
 func (e *environ) ConstraintsValidator(ctx context.ProviderCallContext) (constraints.Validator, error) {
 	validator := constraints.NewValidator()
-	validator.RegisterUnsupported([]string{constraints.CpuPower, constraints.VirtType})
+	validator.RegisterUnsupported(unsupportedConstraints)
 	validator.RegisterConflicts([]string{constraints.InstanceType}, []string{constraints.Mem})
 	validator.RegisterVocabulary(constraints.Arch, []string{arch.AMD64, arch.ARM64, arch.I386, arch.PPC64EL, arch.S390X})
 	return validator, nil
@@ -1238,7 +1227,6 @@ func (e *environ) StartInstance(ctx context.ProviderCallContext, args environs.S
 		id:           instance.Id(idString),
 		addresses:    addrs,
 		machineId:    machineId,
-		series:       args.InstanceConfig.Series,
 		firewallMode: e.Config().FirewallMode(),
 		state:        estate,
 	}
@@ -1767,6 +1755,67 @@ func (e *environ) IngressRules(ctx context.ProviderCallContext) (rules firewall.
 	return
 }
 
+func (e *environ) OpenModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+	estate, err := e.state()
+	if err != nil {
+		return err
+	}
+	estate.mu.Lock()
+	defer estate.mu.Unlock()
+	for _, r := range rules {
+		if len(r.SourceCIDRs) == 0 {
+			r.SourceCIDRs.Add(firewall.AllNetworksIPV4CIDR)
+			r.SourceCIDRs.Add(firewall.AllNetworksIPV6CIDR)
+		}
+		found := false
+		for _, rule := range estate.modelRules {
+			if r.String() == rule.String() {
+				found = true
+			}
+		}
+		if !found {
+			estate.modelRules = append(estate.modelRules, r)
+		}
+	}
+
+	return nil
+}
+
+func (e *environ) CloseModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+	estate, err := e.state()
+	if err != nil {
+		return err
+	}
+	estate.mu.Lock()
+	defer estate.mu.Unlock()
+	for _, r := range rules {
+		for i, rule := range estate.modelRules {
+			if len(r.SourceCIDRs) == 0 {
+				r.SourceCIDRs.Add(firewall.AllNetworksIPV4CIDR)
+				r.SourceCIDRs.Add(firewall.AllNetworksIPV6CIDR)
+			}
+			if r.String() == rule.String() {
+				estate.modelRules = estate.modelRules[:i+copy(estate.modelRules[i:], estate.modelRules[i+1:])]
+			}
+		}
+	}
+	return nil
+}
+
+func (e *environ) ModelIngressRules(ctx context.ProviderCallContext) (rules firewall.IngressRules, err error) {
+	estate, err := e.state()
+	if err != nil {
+		return nil, err
+	}
+	estate.mu.Lock()
+	defer estate.mu.Unlock()
+	for _, r := range estate.modelRules {
+		rules = append(rules, r)
+	}
+	rules.Sort()
+	return
+}
+
 // SupportsRulesWithIPV6CIDRs returns true if the environment supports ingress
 // rules containing IPV6 CIDRs. It is part of the FirewallFeatureQuerier
 // interface.
@@ -1790,7 +1839,6 @@ type dummyInstance struct {
 	id           instance.Id
 	status       string
 	machineId    string
-	series       string
 	firewallMode string
 	controller   bool
 

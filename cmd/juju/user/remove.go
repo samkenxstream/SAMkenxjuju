@@ -1,5 +1,6 @@
 // Copyright 2012-2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
+
 package user
 
 import (
@@ -27,19 +28,12 @@ This removes a user permanently.
 
 By default, the controller is the current controller.
 
-Examples:
+`[1:]
+
+const removeUsageExamples = `
     juju remove-user bob
     juju remove-user bob --yes
-
-See also: 
-    unregister
-    revoke
-    show-user
-    list-users
-    switch-user
-    disable-user
-    enable-user
-    change-user-password`[1:]
+`
 
 var removeUserMsg = `
 WARNING! This command will permanently archive the user %q on the %q
@@ -81,10 +75,20 @@ func (c *removeCommand) SetFlags(f *gnuflag.FlagSet) {
 // Info implements Command.Info.
 func (c *removeCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "remove-user",
-		Args:    "<user name>",
-		Purpose: removeUsageSummary,
-		Doc:     removeUsageDetails,
+		Name:     "remove-user",
+		Args:     "<user name>",
+		Purpose:  removeUsageSummary,
+		Doc:      removeUsageDetails,
+		Examples: removeUsageExamples,
+		SeeAlso: []string{
+			"unregister",
+			"revoke",
+			"show-user",
+			"users",
+			"disable-user",
+			"enable-user",
+			"change-user-password",
+		},
 	})
 }
 

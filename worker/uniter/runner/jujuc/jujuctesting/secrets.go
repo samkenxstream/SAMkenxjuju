@@ -4,6 +4,8 @@
 package jujuctesting
 
 import (
+	"github.com/juju/names/v4"
+
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/worker/uniter/runner/jujuc"
 )
@@ -16,31 +18,52 @@ type ContextSecrets struct {
 }
 
 // GetSecret implements jujuc.ContextSecrets.
-func (c *ContextSecrets) GetSecret(ID string) (secrets.SecretValue, error) {
-	c.stub.AddCall("GetSecret", ID)
+func (c *ContextSecrets) GetSecret(uri *secrets.URI, label string, refresh, peek bool) (secrets.SecretValue, error) {
+	c.stub.AddCall("GetSecret", uri.String(), label, refresh, peek)
 	return c.SecretValue, nil
 }
 
 // CreateSecret implements jujuc.ContextSecrets.
-func (c *ContextSecrets) CreateSecret(name string, args *jujuc.SecretUpsertArgs) (string, error) {
-	c.stub.AddCall("CreateSecret", name, args)
-	return "secret://app." + name, nil
+func (c *ContextSecrets) CreateSecret(args *jujuc.SecretCreateArgs) (*secrets.URI, error) {
+	c.stub.AddCall("CreateSecret", args)
+	uri, _ := secrets.ParseURI("secret:9m4e2mr0ui3e8a215n4g")
+	return uri, nil
 }
 
 // UpdateSecret implements jujuc.ContextSecrets.
-func (c *ContextSecrets) UpdateSecret(name string, args *jujuc.SecretUpsertArgs) (string, error) {
-	c.stub.AddCall("UpdateSecret", name, args)
-	return "secret://app." + name, nil
+func (c *ContextSecrets) UpdateSecret(uri *secrets.URI, args *jujuc.SecretUpdateArgs) error {
+	c.stub.AddCall("UpdateSecret", uri.String(), args)
+	return nil
+}
+
+// RemoveSecret implements jujuc.ContextSecrets.
+func (c *ContextSecrets) RemoveSecret(uri *secrets.URI, revision *int) error {
+	c.stub.AddCall("RemoveSecret", uri.String(), revision)
+	return nil
+}
+
+// SecretMetadata gets the metadata for secrets created by the charm.
+func (c *ContextSecrets) SecretMetadata() (map[string]jujuc.SecretMetadata, error) {
+	c.stub.AddCall("SecretMetadata")
+	return map[string]jujuc.SecretMetadata{
+		"9m4e2mr0ui3e8a215n4g": {
+			LatestRevision: 666,
+			Label:          "label",
+			Owner:          names.NewApplicationTag("mariadb"),
+			Description:    "description",
+			RotatePolicy:   secrets.RotateHourly,
+		},
+	}, nil
 }
 
 // GrantSecret implements jujuc.ContextSecrets.
-func (c *ContextSecrets) GrantSecret(name string, args *jujuc.SecretGrantRevokeArgs) error {
-	c.stub.AddCall("GrantSecret", name, args)
+func (c *ContextSecrets) GrantSecret(uri *secrets.URI, args *jujuc.SecretGrantRevokeArgs) error {
+	c.stub.AddCall("GrantSecret", uri.String(), args)
 	return nil
 }
 
 // RevokeSecret implements jujuc.ContextSecrets.
-func (c *ContextSecrets) RevokeSecret(name string, args *jujuc.SecretGrantRevokeArgs) error {
-	c.stub.AddCall("RevokeSecret", name, args)
+func (c *ContextSecrets) RevokeSecret(uri *secrets.URI, args *jujuc.SecretGrantRevokeArgs) error {
+	c.stub.AddCall("RevokeSecret", uri.String(), args)
 	return nil
 }

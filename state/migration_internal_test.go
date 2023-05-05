@@ -4,7 +4,7 @@
 package state
 
 import (
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	gc "gopkg.in/check.v1"
 
@@ -43,7 +43,7 @@ func (s *MigrationSuite) TestKnownCollections(c *gc.C) {
 		unitsC,
 		meterStatusC, // red / green status for metrics of units
 		payloadsC,
-		"resources",
+		resourcesC,
 
 		// relation
 		relationsC,
@@ -82,13 +82,20 @@ func (s *MigrationSuite) TestKnownCollections(c *gc.C) {
 		deviceConstraintsC,
 
 		// crossmodelrelations
-		firewallRulesC,
 		remoteApplicationsC,
 		applicationOffersC,
 		offerConnectionsC,
 		relationNetworksC,
 		remoteEntitiesC,
 		externalControllersC,
+
+		// secrets
+		secretMetadataC,
+		secretRevisionsC,
+		secretRotateC,
+		secretConsumersC,
+		secretRemoteConsumersC,
+		secretPermissionsC,
 	)
 
 	ignoredCollections := set.NewStrings(
@@ -135,6 +142,7 @@ func (s *MigrationSuite) TestKnownCollections(c *gc.C) {
 		// Transaction stuff.
 		"txns",
 		"txns.log",
+		"sstxns.log",
 
 		// We don't import any of the migration collections.
 		migrationsC,
@@ -202,22 +210,15 @@ func (s *MigrationSuite) TestKnownCollections(c *gc.C) {
 		// running within a unit. This is a new feature that is not
 		// backwards compatible with older controllers.
 		unitStatesC,
+
+		// Secret backends are per controller.
+		secretBackendsC,
+		secretBackendsRotateC,
 	)
 
 	// THIS SET WILL BE REMOVED WHEN MIGRATIONS ARE COMPLETE
 	todoCollections := set.NewStrings(
-		// uncategorised
 		dockerResourcesC,
-		// TODO(raftlease)
-		// This collection shouldn't be migrated, but we need to make
-		// sure the leader units' leases are claimed in the target
-		// controller when leases are managed in raft.
-		leaseHoldersC,
-
-		// secrets
-		secretMetadataC,
-		secretValuesC,
-		secretRotateC,
 	)
 
 	modelCollections := set.NewStrings()
@@ -329,6 +330,7 @@ func (s *MigrationSuite) TestMachineDocFields(c *gc.C) {
 	)
 	migrated := set.NewStrings(
 		"Addresses",
+		"Base",
 		"ContainerType",
 		"Jobs",
 		"MachineAddresses",
@@ -341,7 +343,6 @@ func (s *MigrationSuite) TestMachineDocFields(c *gc.C) {
 		"PreferredPrivateAddress",
 		"PreferredPublicAddress",
 		"Principals",
-		"Series",
 		"SupportedContainers",
 		"SupportedContainersKnown",
 		"Tools",
@@ -373,6 +374,7 @@ func (s *MigrationSuite) TestInstanceDataFields(c *gc.C) {
 		"CpuPower",
 		"Tags",
 		"AvailZone",
+		"VirtType",
 		"CharmProfiles",
 	)
 	s.AssertExportedFields(c, instanceData{}, migrated.Union(ignored))
@@ -397,10 +399,8 @@ func (s *MigrationSuite) TestApplicationDocFields(c *gc.C) {
 	)
 	migrated := set.NewStrings(
 		"Name",
-		"Series",
 		"Subordinate",
 		"CharmURL",
-		"Channel",
 		"CharmModifiedVersion",
 		"CharmOrigin",
 		"ForceCharm",
@@ -426,8 +426,8 @@ func (s *MigrationSuite) TestUnitDocFields(c *gc.C) {
 		"Application",
 		// Resolved is not migrated as we check that all is good before we start.
 		"Resolved",
-		// Series and CharmURL also come from the application.
-		"Series",
+		// Base and CharmURL also come from the application.
+		"Base",
 		"CharmURL",
 	)
 	migrated := set.NewStrings(
@@ -582,6 +582,7 @@ func (s *MigrationSuite) TestConstraintsDocFields(c *gc.C) {
 		"VirtType",
 		"Zones",
 		"AllocatePublicIP",
+		"ImageID",
 	)
 	s.AssertExportedFields(c, constraintsDoc{}, fields)
 }
@@ -931,4 +932,69 @@ func (s *MigrationSuite) AssertExportedFields(c *gc.C, doc interface{}, fields s
 	// doc without thinking about the migration implications.
 	c.Check(unknown, gc.HasLen, 0)
 	c.Assert(removed, gc.HasLen, 0)
+}
+
+func (s *MigrationSuite) TestSecretMetadataDocFields(c *gc.C) {
+	ignored := set.NewStrings(
+		"DocID",
+
+		// These are not exported but instead
+		// calculated from the revisions.
+		"LatestRevision",
+		"LatestExpireTime",
+	)
+	migrated := set.NewStrings(
+		"Version",
+		"OwnerTag",
+		"Description",
+		"Label",
+		"RotatePolicy",
+		"CreateTime",
+		"UpdateTime",
+	)
+	s.AssertExportedFields(c, secretMetadataDoc{}, migrated.Union(ignored))
+}
+
+func (s *MigrationSuite) TestSecretRevisionDocFields(c *gc.C) {
+	ignored := set.NewStrings(
+		"DocID",
+		"TxnRevno",
+	)
+	migrated := set.NewStrings(
+		"Revision",
+		"CreateTime",
+		"UpdateTime",
+		"ExpireTime",
+		"Obsolete",
+		"ValueRef",
+		"Data",
+		"OwnerTag",
+		"PendingDelete",
+	)
+	s.AssertExportedFields(c, secretRevisionDoc{}, migrated.Union(ignored))
+}
+
+func (s *MigrationSuite) TestSecretRotationDocFields(c *gc.C) {
+	ignored := set.NewStrings(
+		"DocID",
+		"TxnRevno",
+	)
+	migrated := set.NewStrings(
+		"NextRotateTime",
+		"OwnerTag",
+	)
+	s.AssertExportedFields(c, secretRotationDoc{}, migrated.Union(ignored))
+}
+
+func (s *MigrationSuite) TestSecretConsumerDocFields(c *gc.C) {
+	ignored := set.NewStrings(
+		"DocID",
+	)
+	migrated := set.NewStrings(
+		"ConsumerTag",
+		"Label",
+		"CurrentRevision",
+		"LatestRevision",
+	)
+	s.AssertExportedFields(c, secretConsumerDoc{}, migrated.Union(ignored))
 }

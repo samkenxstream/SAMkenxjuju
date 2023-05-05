@@ -4,7 +4,7 @@
 package crossmodel
 
 import (
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/rpc/params"
@@ -65,6 +65,9 @@ type ConsumeApplicationArgs struct {
 
 	// Macaroon is used for authentication.
 	Macaroon *macaroon.Macaroon
+
+	// AuthToken is the JWT used for auth.
+	AuthToken string
 
 	// ControllerInfo contains connection details to the controller
 	// hosting the offer.

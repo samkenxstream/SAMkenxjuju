@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 
@@ -16,8 +15,8 @@ import (
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 
+	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/httpcontext"
-	"github.com/juju/juju/rpc/params"
 )
 
 type BasicAuthHandlerSuite struct {
@@ -52,7 +51,7 @@ func (s *BasicAuthHandlerSuite) SetUpTest(c *gc.C) {
 	}
 }
 
-func (s *BasicAuthHandlerSuite) Authenticate(req *http.Request) (httpcontext.AuthInfo, error) {
+func (s *BasicAuthHandlerSuite) Authenticate(req *http.Request, tokenParser authentication.TokenParser) (httpcontext.AuthInfo, error) {
 	s.stub.MethodCall(s, "Authenticate", req)
 	if err := s.stub.NextErr(); err != nil {
 		return httpcontext.AuthInfo{}, err
@@ -61,7 +60,7 @@ func (s *BasicAuthHandlerSuite) Authenticate(req *http.Request) (httpcontext.Aut
 }
 
 func (s *BasicAuthHandlerSuite) AuthenticateLoginRequest(
-	ctx context.Context, serverHost, modelUUID string, req params.LoginRequest,
+	ctx context.Context, serverHost, modelUUID string, authParams authentication.AuthParams,
 ) (httpcontext.AuthInfo, error) {
 	panic("should not be called")
 }
@@ -81,7 +80,7 @@ func (s *BasicAuthHandlerSuite) TestSuccess(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(resp.StatusCode, gc.Equals, http.StatusOK)
 	defer resp.Body.Close()
-	out, err := ioutil.ReadAll(resp.Body)
+	out, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(out), gc.Equals, "hullo!")
 	s.stub.CheckCallNames(c, "Authenticate", "Authorize")
@@ -95,7 +94,7 @@ func (s *BasicAuthHandlerSuite) TestAuthenticationFailure(c *gc.C) {
 	c.Assert(resp.StatusCode, gc.Equals, http.StatusUnauthorized)
 	defer resp.Body.Close()
 
-	out, err := ioutil.ReadAll(resp.Body)
+	out, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(out), gc.Equals, "authentication failed: username/password invalid\n")
 	c.Assert(resp.Header.Get("WWW-Authenticate"), gc.Equals, `Basic realm="juju"`)
@@ -109,7 +108,7 @@ func (s *BasicAuthHandlerSuite) TestAuthorizationFailure(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(resp.StatusCode, gc.Equals, http.StatusForbidden)
 	defer resp.Body.Close()
-	out, err := ioutil.ReadAll(resp.Body)
+	out, err := io.ReadAll(resp.Body)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(string(out), gc.Equals, "authorization failed: unauthorized access for resource\n")
 	s.stub.CheckCallNames(c, "Authenticate", "Authorize")

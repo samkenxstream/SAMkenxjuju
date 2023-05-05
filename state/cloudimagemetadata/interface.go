@@ -4,7 +4,7 @@
 package cloudimagemetadata
 
 import (
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 
 	"github.com/juju/juju/mongo"
 )
@@ -20,9 +20,6 @@ type MetadataAttributes struct {
 
 	// Version is OS version, for e.g. "22.04".
 	Version string
-
-	// Series is OS series, for e.g. "jammy".
-	Series string
 
 	// Arch is the architecture for this cloud image, for e.g. "amd64"
 	Arch string

@@ -9,13 +9,11 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
 	"github.com/juju/pubsub/v2"
-	jujutesting "github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
 	"github.com/juju/version/v2"
@@ -448,8 +446,6 @@ func (s *controllerSuite) TestWatchAllModels(c *gc.C) {
 		s.State.ModelUUID(): "2.6.666",
 		st.ModelUUID():      "2.6.667",
 	}
-
-	s.State.StartSync()
 
 	for resultCount := 0; resultCount != 2; {
 		select {
@@ -1176,15 +1172,4 @@ func (noopRegisterer) Register(prometheus.Collector) error {
 
 func (noopRegisterer) Unregister(prometheus.Collector) bool {
 	return true
-}
-
-type controllerUnitSuite struct {
-	jujutesting.IsolationSuite
-}
-
-var _ = gc.Suite(&controllerUnitSuite{})
-
-func (s *controllerUnitSuite) setup(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-	return ctrl
 }

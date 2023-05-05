@@ -1,32 +1,11 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package storageprovisioner provides a worker that manages the provisioning
-// and deprovisioning of storage volumes and filesystems, and attaching them
-// to and detaching them from machines.
-//
-// A storage provisioner worker is run at each model manager, which
-// manages model-scoped storage such as virtual disk services of the
-// cloud provider. In addition to this, each machine agent runs a machine-
-// storage provisioner worker that manages storage scoped to that machine,
-// such as loop devices, temporary filesystems (tmpfs), and rootfs.
-//
-// The storage provisioner worker is comprised of the following major
-// components:
-//  - a set of watchers for provisioning and attachment events
-//  - a schedule of pending operations
-//  - event-handling code fed by the watcher, that identifies
-//    interesting changes (unprovisioned -> provisioned, etc.),
-//    ensures prerequisites are met (e.g. volume and machine are both
-//    provisioned before attachment is attempted), and populates
-//    operations into the schedule
-//  - operation execution code fed by the schedule, that groups
-//    operations to make bulk calls to storage providers; updates
-//    status; and reschedules operations upon failure
-//
 package storageprovisioner
 
 import (
+	"time"
+
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	"github.com/juju/worker/v3"
@@ -37,6 +16,13 @@ import (
 	"github.com/juju/juju/storage"
 	"github.com/juju/juju/storage/provider"
 	"github.com/juju/juju/worker/storageprovisioner/internal/schedule"
+)
+
+var (
+	// defaultDependentChangesTimeout is the default timeout for waiting for any
+	// dependent changes to occur before proceeding with a storage provisioner.
+	// This is a variable so it can be overridden in tests (sigh).
+	defaultDependentChangesTimeout = time.Second
 )
 
 // logger is here to stop the desire of creating a package level logger.
@@ -338,6 +324,14 @@ func (w *storageProvisioner) loop() error {
 			if !ok {
 				return errors.New("volume attachments watcher closed")
 			}
+			// Process volume changes before volume attachments changes.
+			// This is because volume attachments are dependent on
+			// volumes, and reveals itself during a reboot of a machine. All
+			// the watcher changes come at once, but the order of the select
+			// case statements is not guaranteed.
+			if err := w.processDependentChanges(&ctx, volumesChanges, volumesChanged); err != nil {
+				return errors.Trace(err)
+			}
 			if err := volumeAttachmentsChanged(&ctx, changes); err != nil {
 				return errors.Trace(err)
 			}
@@ -359,6 +353,14 @@ func (w *storageProvisioner) loop() error {
 			if !ok {
 				return errors.New("filesystem attachments watcher closed")
 			}
+			// Process filesystem changes before filesystem attachments changes.
+			// This is because filesystem attachments are dependent on
+			// filesystems, and reveals itself during a reboot of a machine. All
+			// the watcher changes come at once, but the order of the select
+			// case statements is not guaranteed.
+			if err := w.processDependentChanges(&ctx, filesystemsChanges, filesystemsChanged); err != nil {
+				return errors.Trace(err)
+			}
 			if err := filesystemAttachmentsChanged(&ctx, changes); err != nil {
 				return errors.Trace(err)
 			}
@@ -378,6 +380,29 @@ func (w *storageProvisioner) loop() error {
 			if err := processSchedule(&ctx); err != nil {
 				return errors.Trace(err)
 			}
+		}
+	}
+}
+
+// processDependentChanges processes changes from a watcher strings channel. If
+// there are any changes, it calls the given function, repeating until there are
+// no more changes.
+// If there are no changes, it returns with no error.
+func (w *storageProvisioner) processDependentChanges(ctx *context, source watcher.StringsChannel, fn func(*context, []string) error) error {
+	for {
+		select {
+		case <-w.catacomb.Dying():
+			return w.catacomb.ErrDying()
+		case changes, ok := <-source:
+			if !ok {
+				return errors.New("watcher closed")
+			}
+			if err := fn(ctx, changes); err != nil {
+				return errors.Trace(err)
+			}
+		case <-time.After(defaultDependentChangesTimeout):
+			// Nothing to do, we've waited long enough.
+			return nil
 		}
 	}
 }

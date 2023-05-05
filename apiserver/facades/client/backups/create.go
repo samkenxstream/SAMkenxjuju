@@ -5,18 +5,21 @@ package backups
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/replicaset/v2"
+	"github.com/juju/mgo/v3"
+	"github.com/juju/replicaset/v3"
 
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state/backups"
 )
 
-var waitUntilReady = replicaset.WaitUntilReady
+var waitUntilReady = func(s *mgo.Session, timeout int) error {
+	return replicaset.WaitUntilReady(s, timeout)
+}
 
 // Create is the API method that requests juju to create a new backup
 // of its state.
 func (a *API) Create(args params.BackupsCreateArgs) (params.BackupsMetadataResult, error) {
-	backupsMethods := newBackups()
+	backupsMethods := newBackups(a.paths)
 
 	session := a.backend.MongoSession().Copy()
 	defer session.Close()
@@ -36,12 +39,12 @@ func (a *API) Create(args params.BackupsCreateArgs) (params.BackupsMetadataResul
 	if err != nil {
 		return result, errors.Trace(err)
 	}
-	mSeries, err := a.backend.MachineSeries(a.machineID)
+	mBase, err := a.backend.MachineBase(a.machineID)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	meta, err := backups.NewMetadataState(a.backend, a.machineID, mSeries)
+	meta, err := backups.NewMetadataState(a.backend, a.machineID, mBase.DisplayString())
 	if err != nil {
 		return result, errors.Trace(err)
 	}
@@ -63,7 +66,7 @@ func (a *API) Create(args params.BackupsCreateArgs) (params.BackupsMetadataResul
 	}
 	meta.Controller.HANodes = int64(len(nodes))
 
-	fileName, err := backupsMethods.Create(meta, a.paths, dbInfo)
+	fileName, err := backupsMethods.Create(meta, dbInfo)
 	if err != nil {
 		return result, errors.Trace(err)
 	}

@@ -1,7 +1,6 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package bundle defines an API endpoint for functions dealing with bundles.
 package bundle
 
 import (
@@ -11,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/charm/v9"
-	"github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	"github.com/juju/charm/v10/resource"
 	"github.com/juju/collections/set"
-	"github.com/juju/description/v3"
+	"github.com/juju/description/v4"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
@@ -25,11 +24,13 @@ import (
 	"github.com/juju/juju/apiserver/facade"
 	appFacade "github.com/juju/juju/apiserver/facades/client/application"
 	bundlechanges "github.com/juju/juju/core/bundle/changes"
+	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/storage"
@@ -369,7 +370,10 @@ func (b *BundleAPI) fillBundleData(model description.Model, includeCharmDefaults
 
 	// Machine bundle data.
 	var machineSeries set.Strings
-	data.Machines, machineSeries = b.bundleDataMachines(model.Machines(), machineIds, defaultSeries)
+	data.Machines, machineSeries, err = b.bundleDataMachines(model.Machines(), machineIds, defaultSeries)
+	if err != nil {
+		return nil, err
+	}
 	usedSeries = usedSeries.Union(machineSeries)
 
 	// Remote Application bundle data.
@@ -427,8 +431,20 @@ func (b *BundleAPI) bundleDataApplications(
 	printEndpointBindingSpaceNames := b.printSpaceNamesInEndpointBindings(apps)
 
 	for _, application := range apps {
+		if application.CharmOrigin() == nil || application.CharmOrigin().Platform() == "" {
+			return nil, nil, nil, errors.Errorf("missing charm origin data for %q", application)
+		}
 		var newApplication *charm.ApplicationSpec
-		appSeries := application.Series()
+		p, err := corecharm.ParsePlatformNormalize(application.CharmOrigin().Platform())
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("extracting charm origin from application description %w", err)
+		}
+
+		appSeries, err := series.GetSeriesFromChannel(p.OS, p.Channel)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("extracting series from application description %w", err)
+		}
+
 		usedSeries.Add(appSeries)
 
 		endpointsWithSpaceNames, err := b.endpointBindings(application.EndpointBindings(), allSpacesInfoLookup, printEndpointBindingSpaceNames)
@@ -451,8 +467,8 @@ func (b *BundleAPI) bundleDataApplications(
 		// We need to correctly handle charmhub urls. The internal
 		// representation of a charm url is not the same as a external
 		// representation, in that only the application name should be rendered.
-		// For charmstore and charmhub charms, ensure that the revision is
-		// listed separately, not in the charm url.
+		// For charmhub charms, ensure that the revision is listed separately,
+		// not in the charm url.
 		curl, err := charm.ParseURL(application.CharmURL())
 		if err != nil {
 			return nil, nil, nil, errors.Trace(err)
@@ -466,18 +482,13 @@ func (b *BundleAPI) bundleDataApplications(
 				cRev := curl.Revision
 				revision = &cRev
 			}
-		case charm.CharmStore.Matches(curl.Schema):
-			if curl.Revision >= 0 {
-				cRev := curl.Revision
-				revision = &cRev
-			}
-			curl.Revision = -1
-			charmURL = curl.String()
 		case charm.Local.Matches(curl.Schema):
 			charmURL = fmt.Sprintf("local:%s", curl.Name)
 			if curl.Revision >= 0 {
 				charmURL = fmt.Sprintf("%s-%d", charmURL, curl.Revision)
 			}
+		default:
+			return nil, nil, nil, errors.NotValidf("charm schema %q", curl.Schema)
 		}
 
 		var channel string
@@ -625,14 +636,21 @@ func applicationDataResources(resources []description.Resource) map[string]inter
 	return resourceData
 }
 
-func (b *BundleAPI) bundleDataMachines(machines []description.Machine, machineIds set.Strings, defaultSeries string) (map[string]*charm.MachineSpec, set.Strings) {
+func (b *BundleAPI) bundleDataMachines(machines []description.Machine, machineIds set.Strings, defaultSeries string) (map[string]*charm.MachineSpec, set.Strings, error) {
 	usedSeries := set.NewStrings()
 	machineData := make(map[string]*charm.MachineSpec)
 	for _, machine := range machines {
 		if !machineIds.Contains(machine.Tag().Id()) {
 			continue
 		}
-		macSeries := machine.Series()
+		macBase, err := series.ParseBaseFromString(machine.Base())
+		if err != nil {
+			return nil, nil, errors.Trace(err)
+		}
+		macSeries, err := series.GetSeriesFromBase(macBase)
+		if err != nil {
+			return nil, nil, errors.Trace(err)
+		}
 		usedSeries.Add(macSeries)
 		newMachine := &charm.MachineSpec{
 			Annotations: machine.Annotations(),
@@ -647,7 +665,7 @@ func (b *BundleAPI) bundleDataMachines(machines []description.Machine, machineId
 
 		machineData[machine.Id()] = newMachine
 	}
-	return machineData, usedSeries
+	return machineData, usedSeries, nil
 }
 
 func bundleDataRemoteApplications(remoteApps []description.RemoteApplication) map[string]*charm.SaasSpec {
@@ -798,6 +816,9 @@ func (b *BundleAPI) constraints(cons description.Constraints) []string {
 	}
 	if instType := cons.InstanceType(); instType != "" {
 		result = append(result, "instance-type="+instType)
+	}
+	if imageID := cons.ImageID(); imageID != "" {
+		result = append(result, "image-id="+imageID)
 	}
 	if container := cons.Container(); container != "" {
 		result = append(result, "container="+container)

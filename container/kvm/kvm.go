@@ -5,6 +5,7 @@ package kvm
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/juju/juju/container"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
@@ -148,7 +150,7 @@ func (manager *containerManager) Namespace() instance.Namespace {
 func (manager *containerManager) CreateContainer(
 	instanceConfig *instancecfg.InstanceConfig,
 	cons constraints.Value,
-	series string,
+	base series.Base,
 	networkConfig *container.NetworkConfig,
 	storageConfig *container.StorageConfig,
 	callback environs.StatusCallbackFunc,
@@ -176,22 +178,36 @@ func (manager *containerManager) CreateContainer(
 	hc = &instance.HardwareCharacteristics{AvailabilityZone: &manager.availabilityZone}
 
 	// Create the cloud-init.
+	cloudConfig, err := cloudinit.New(instanceConfig.Base.OS)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+
+	logger.Tracef("write cloud-init")
+	userData, err := containerinit.CloudInitUserData(cloudConfig, instanceConfig, networkConfig)
+	if err != nil {
+		logger.Infof("machine config api %#v", *instanceConfig.APIInfo)
+		err = errors.Annotate(err, "failed to write generate data")
+		logger.Errorf(err.Error())
+		return nil, nil, errors.Trace(err)
+	}
+
 	directory, err := container.NewDirectory(name)
 	if err != nil {
 		return nil, nil, errors.Annotate(err, "failed to create container directory")
 	}
-	logger.Tracef("write cloud-init")
-	userDataFilename, err := containerinit.WriteUserData(instanceConfig, networkConfig, directory)
-	if err != nil {
-		logger.Infof("machine config api %#v", *instanceConfig.APIInfo)
-		err = errors.Annotate(err, "failed to write user data")
-		logger.Infof(err.Error())
-		return nil, nil, err
+
+	userDataFilename := filepath.Join(directory, "cloud-init")
+	if err := os.WriteFile(userDataFilename, userData, 0644); err != nil {
+		err = errors.Annotate(err, "failed to write generate data")
+		logger.Errorf(err.Error())
+		return nil, nil, errors.Trace(err)
 	}
+
 	// Create the container.
 	startParams := ParseConstraintsToStartParams(cons)
 	startParams.Arch = arch.HostArch()
-	startParams.Series = series
+	startParams.Version = base.Channel.Track
 	startParams.Network = networkConfig
 	startParams.UserDataFile = userDataFilename
 	startParams.NetworkConfigData = cloudinit.CloudInitNetworkConfigDisabled

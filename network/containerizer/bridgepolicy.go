@@ -24,7 +24,6 @@ import (
 var logger = loggo.GetLogger("juju.network.containerizer")
 
 var skippedDeviceNames = set.NewStrings(
-	network.DefaultLXCBridge,
 	network.DefaultLXDBridge,
 	network.DefaultKVMBridge,
 )
@@ -246,24 +245,29 @@ func linkLayerDevicesForSpaces(host Machine, spaces corenetwork.SpaceInfos) (map
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	processedDeviceNames := set.NewStrings()
-	spaceToDevices := make(namedNICsBySpace, 0)
 
-	// First pass, iterate the addresses, lookup the associated spaces, and
-	// gather the devices.
 	addresses, err := host.AllDeviceAddresses()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	for _, addr := range addresses {
-		device, ok := deviceByName[addr.DeviceName()]
-		if !ok {
-			return nil, errors.Errorf("address %v for machine %q refers to a missing device %q",
-				addr, host.Id(), addr.DeviceName())
-		}
-		processedDeviceNames.Add(device.Name())
 
-		// We do not care about loopback devices.
+	// Iterate all addresses and key them by the address device name.
+	addressByDeviceName := make(map[string]Address)
+	for _, addr := range addresses {
+		addressByDeviceName[addr.DeviceName()] = addr
+	}
+
+	// Iterate the devices by name, lookup the associated spaces, and
+	// gather the devices.
+	spaceToDevices := make(namedNICsBySpace, 0)
+	for _, device := range deviceByName {
+		addr, ok := addressByDeviceName[device.Name()]
+		if !ok {
+			logger.Infof("device %q has no addresses, ignoring", device.Name())
+			continue
+		}
+
+		// Loopback devices are not considered part of the empty space.
 		if device.Type() == corenetwork.LoopbackDevice {
 			continue
 		}
@@ -280,21 +284,6 @@ func linkLayerDevicesForSpaces(host Machine, spaces corenetwork.SpaceInfos) (map
 			spaceID = subnet.SpaceID()
 		}
 		spaceToDevices = includeDevice(spaceToDevices, spaceID, device)
-	}
-
-	// Second pass, grab any devices we may have missed. For now, any device without an
-	// address must be in the default space.
-	for devName, device := range deviceByName {
-		if processedDeviceNames.Contains(devName) {
-			continue
-		}
-		// Loopback devices are not considered part of the empty space.
-		// Also, devices that are attached to another device also aren't
-		// considered to be in the unknown space.
-		if device.Type() == corenetwork.LoopbackDevice || device.ParentName() != "" {
-			continue
-		}
-		spaceToDevices = includeDevice(spaceToDevices, corenetwork.AlphaSpaceId, device)
 	}
 
 	result := make(map[string][]LinkLayerDevice, len(spaceToDevices))
@@ -472,14 +461,16 @@ func possibleBridgeTarget(dev LinkLayerDevice) (bool, error) {
 
 // BridgeNameForDevice returns a name to use for a new device that bridges the
 // device with the input name. The policy is to:
-// 1.  Add br- to device name (to keep current behaviour),
+//  1. Add br- to device name (to keep current behaviour),
 //     if it does not fit in 15 characters then:
-// 2.  Add b- to device name, if it doesn't fit in 15 characters then:
+//  2. Add b- to device name, if it doesn't fit in 15 characters then:
+//
 // 3a. For devices starting in 'en' remove 'en' and add 'b-'
 // 3b. For all other devices
-//     'b-' + 6-char hash of name + '-' + last 6 chars of name
-// 4.  If using the device name directly always replace '.' with '-'
-//     to make sure that bridges from VLANs won't break
+//
+//		'b-' + 6-char hash of name + '-' + last 6 chars of name
+//	 4. If using the device name directly always replace '.' with '-'
+//	    to make sure that bridges from VLANs won't break
 func BridgeNameForDevice(device string) string {
 	device = strings.Replace(device, ".", "-", -1)
 	switch {

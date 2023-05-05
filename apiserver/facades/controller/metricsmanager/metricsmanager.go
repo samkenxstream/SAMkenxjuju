@@ -1,13 +1,10 @@
 // Copyright 2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package metricsmanager contains the implementation of an api endpoint
-// for calling metrics functions in state.
 package metricsmanager
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
@@ -20,8 +17,6 @@ import (
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/apiserver/facades/agent/metricsender"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/os"
-	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
 )
@@ -157,17 +152,12 @@ func (api *MetricsManagerAPI) AddJujuMachineMetrics() error {
 		return errors.Trace(err)
 	}
 	machineCount := 0
-	osMachineCount := map[os.OSType]int{}
+	osMachineCount := map[string]int{}
 	for _, machine := range allMachines {
 		ct := machine.ContainerType()
 		if ct == instance.NONE || ct == "" {
 			machineCount++
-			osType, err := series.GetOSFromSeries(machine.Series())
-			if err != nil {
-				logger.Warningf("failed to resolve OS name for series %q: %v", machine.Series(), err)
-				osType = os.Unknown
-			}
-			osMachineCount[osType] = osMachineCount[osType] + 1
+			osMachineCount[machine.Base().OS] = osMachineCount[machine.Base().OS] + 1
 		}
 	}
 	t := clock.WallClock.Now()
@@ -176,8 +166,7 @@ func (api *MetricsManagerAPI) AddJujuMachineMetrics() error {
 		Value: fmt.Sprintf("%d", machineCount),
 		Time:  t,
 	}}
-	for osType, osMachineCount := range osMachineCount {
-		osName := strings.ToLower(osType.String())
+	for osName, osMachineCount := range osMachineCount {
 		metrics = append(metrics, state.Metric{
 			Key:   "juju-" + osName + "-machines",
 			Value: fmt.Sprintf("%d", osMachineCount),

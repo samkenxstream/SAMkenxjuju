@@ -10,13 +10,16 @@ import (
 	"time"
 
 	"github.com/juju/ansiterm"
+	"github.com/juju/clock"
 	"github.com/juju/cmd/v3"
+	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/juju/jujuclient"
 	"github.com/juju/loggo"
 	"github.com/juju/loggo/loggocolor"
 	"github.com/juju/names/v4"
+	"github.com/juju/retry"
 	"github.com/mattn/go-isatty"
 
 	"github.com/juju/juju/api/common"
@@ -46,7 +49,8 @@ machines and units can be seen in the output of `[1:] + "`juju status`" + `.
 
 The '--include' and '--exclude' options filter by entity. The entity can be
 a machine, unit, or application for vm models, but can be application only
-for k8s models.
+for k8s models. These filters support wildcards ` + "`*`" + ` if filtering on the
+entity full name (prefixed by ` + "`<entity type>-`" + `)
 
 The '--include-module' and '--exclude-module' options filter by (dotted)
 logging module name. The module name can be truncated such that all loggers
@@ -65,8 +69,9 @@ The filtering options combine as follows:
   --include-label and --exclude-label selections are logically ANDed to form
   the complete filter.
 
-Examples:
+`
 
+const usageDebugLogExamples = `
 Exclude all machine 0 messages; show a maximum of 100 lines; and continue to
 append filtered messages:
 
@@ -105,16 +110,18 @@ To see all WARNING and ERROR messages and then continue showing any
 new WARNING and ERROR messages as they are logged:
 
     juju debug-log --replay --level WARNING
-
-See also:
-    status
-    ssh`
+`
 
 func (c *debugLogCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "debug-log",
-		Purpose: usageDebugLogSummary,
-		Doc:     usageDebugLogDetails,
+		Name:     "debug-log",
+		Purpose:  usageDebugLogSummary,
+		Doc:      usageDebugLogDetails,
+		Examples: usageDebugLogExamples,
+		SeeAlso: []string{
+			"status",
+			"ssh",
+		},
 	})
 }
 
@@ -140,8 +147,11 @@ type debugLogCommand struct {
 	ms       bool
 
 	tail   bool
-	notail bool
+	noTail bool
 	color  bool
+
+	retry      bool
+	retryDelay time.Duration
 
 	format string
 	tz     *time.Location
@@ -166,7 +176,7 @@ func (c *debugLogCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.UintVar(&c.params.Limit, "limit", 0, "Exit once this many of the most recent (possibly filtered) lines are shown")
 	f.BoolVar(&c.params.Replay, "replay", false, "Show the entire (possibly filtered) log and continue to append")
 
-	f.BoolVar(&c.notail, "no-tail", false, "Stop after returning existing log messages")
+	f.BoolVar(&c.noTail, "no-tail", false, "Stop after returning existing log messages")
 	f.BoolVar(&c.tail, "tail", false, "Wait for new logs")
 	f.BoolVar(&c.color, "color", false, "Force use of ANSI color codes")
 
@@ -174,6 +184,9 @@ func (c *debugLogCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.BoolVar(&c.location, "location", false, "Show filename and line numbers")
 	f.BoolVar(&c.date, "date", false, "Show dates as well as times")
 	f.BoolVar(&c.ms, "ms", false, "Show times to millisecond precision")
+
+	f.BoolVar(&c.retry, "retry", false, "Retry connection on failure")
+	f.DurationVar(&c.retryDelay, "retry-delay", 1*time.Second, "Retry delay between connection failure retries")
 }
 
 func (c *debugLogCommand) Init(args []string) error {
@@ -185,8 +198,14 @@ func (c *debugLogCommand) Init(args []string) error {
 		}
 		c.params.Level = level
 	}
-	if c.tail && c.notail {
+	if c.tail && c.noTail {
 		return errors.NotValidf("setting --tail and --no-tail")
+	}
+	if c.noTail && c.retry {
+		return errors.NotValidf("setting --no-tail and --retry")
+	}
+	if c.retryDelay < 0 {
+		return errors.NotValidf("negative retry delay")
 	}
 	if c.utc {
 		c.tz = time.UTC
@@ -204,45 +223,50 @@ func (c *debugLogCommand) Init(args []string) error {
 		return errors.Trace(err)
 	}
 	isCaas := modelType == model.CAAS
-	c.params.IncludeEntity = c.processEntities(isCaas, c.params.IncludeEntity)
-	c.params.ExcludeEntity = c.processEntities(isCaas, c.params.ExcludeEntity)
+	if isCaas {
+		c.params.IncludeEntity = transform.Slice(c.params.IncludeEntity, c.parseCAASEntity)
+		c.params.ExcludeEntity = transform.Slice(c.params.ExcludeEntity, c.parseCAASEntity)
+	} else {
+		c.params.IncludeEntity = transform.Slice(c.params.IncludeEntity, c.parseEntity)
+		c.params.ExcludeEntity = transform.Slice(c.params.ExcludeEntity, c.parseEntity)
+	}
 	return cmd.CheckEmpty(args)
 }
 
-func (c *debugLogCommand) processEntities(isCAAS bool, entities []string) []string {
-	if entities == nil {
-		return nil
+func (c *debugLogCommand) parseEntity(entity string) string {
+	tag, err := names.ParseTag(entity)
+	switch {
+	case strings.Contains(entity, "*"):
+		return entity
+	case err == nil && (tag.Kind() == names.ApplicationTagKind || tag.Kind() == names.MachineTagKind || tag.Kind() == names.UnitTagKind):
+		return tag.String()
+	case names.IsValidMachine(entity):
+		return names.NewMachineTag(entity).String()
+	case names.IsValidUnit(entity):
+		return names.NewUnitTag(entity).String()
+	case names.IsValidApplication(entity):
+		// If the user asks for --include nova-compute, we should give all
+		// nova-compute units for IAAS models.
+		return names.UnitTagKind + "-" + entity + "-*"
+	default:
+		logger.Warningf("%q was not recognised as a valid application, machine or unit name", entity)
+		return entity
 	}
-	result := make([]string, len(entities))
-	for i, entity := range entities {
-		// A stringified unit or machine tag never match their "IsValid"
-		// function from names, so if the string value passed in is a valid
-		// machine or unit, then convert here.
-		if names.IsValidMachine(entity) {
-			entity = names.NewMachineTag(entity).String()
-		} else if names.IsValidUnit(entity) {
-			entity = names.NewUnitTag(entity).String()
-		} else {
-			// Now we want to deal with a special case. Both stringified
-			// machine tags and stringified units are valid application names.
-			// So here we use special knowledge about how tags are serialized to
-			// be able to give a better user experience.  If the user asks for
-			// --include nova-compute, we should give all nova-compute units.
-			if strings.HasPrefix(entity, names.UnitTagKind+"-") ||
-				strings.HasPrefix(entity, names.MachineTagKind+"-") {
-				// no-op pass through
-			} else if names.IsValidApplication(entity) {
-				// Assume that the entity refers to an application.
-				if isCAAS {
-					entity = names.NewApplicationTag(entity).String()
-				} else {
-					entity = names.UnitTagKind + "-" + entity + "-*"
-				}
-			}
-		}
-		result[i] = entity
+}
+
+func (c *debugLogCommand) parseCAASEntity(entity string) string {
+	tag, err := names.ParseTag(entity)
+	switch {
+	case strings.Contains(entity, "*"):
+		return entity
+	case err == nil && tag.Kind() == names.ApplicationTagKind:
+		return tag.String()
+	case names.IsValidApplication(entity):
+		return names.NewApplicationTag(entity).String()
+	default:
+		logger.Warningf("%q was not recognised as a valid application name. Only applications produce logs for CAAS models application", entity)
+		return entity
 	}
-	return result
 }
 
 type DebugLogAPI interface {
@@ -263,10 +287,10 @@ func isTerminal(f interface{}) bool {
 }
 
 // Run retrieves the debug log via the API.
-func (c *debugLogCommand) Run(ctx *cmd.Context) (err error) {
+func (c *debugLogCommand) Run(ctx *cmd.Context) error {
 	if c.tail {
 		c.params.NoTail = false
-	} else if c.notail {
+	} else if c.noTail {
 		c.params.NoTail = true
 	} else {
 		// Set the default tail option to true if the caller is
@@ -274,29 +298,65 @@ func (c *debugLogCommand) Run(ctx *cmd.Context) (err error) {
 		c.params.NoTail = !isTerminal(ctx.Stdout)
 	}
 
-	client, err := getDebugLogAPI(c)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	messages, err := client.WatchDebugLog(c.params)
-	if err != nil {
-		return err
-	}
 	writer := ansiterm.NewWriter(ctx.Stdout)
 	if c.color {
 		writer.SetColorCapable(true)
 	}
-	for {
-		msg, ok := <-messages
-		if !ok {
-			break
-		}
-		c.writeLogRecord(writer, msg)
+
+	err := retry.Call(retry.CallArgs{
+		Func: func() error {
+			client, err := getDebugLogAPI(c)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+
+			messages, err := client.WatchDebugLog(c.params)
+			if err != nil {
+				return err
+			}
+
+			for {
+				msg, ok := <-messages
+				if !ok {
+					return ErrConnectionClosed
+				}
+				c.writeLogRecord(writer, msg)
+			}
+		},
+		IsFatalError: func(err error) bool {
+			if !c.retry {
+				return true
+			}
+			if errors.Is(err, ErrConnectionClosed) {
+				return false
+			}
+			return true
+		},
+		NotifyFunc: func(err error, attempt int) {
+			logger.Debugf("retrying to connect to debug log")
+		},
+		Attempts: -1,
+		Clock:    clock.WallClock,
+		Delay:    c.retryDelay,
+		Stop:     ctx.Done(),
+	})
+
+	// Ensure that any sentinel ErrConnectionClosed errors are not shown to the
+	// user. As this is a synthetic error that is used to signal that the
+	// connection is retried, we don't want to show this to the user.
+	if errors.Is(err, ErrConnectionClosed) {
+		return nil
 	}
 
-	return nil
+	// Unwrap the retry call error trace for all errors. We don't want to show
+	// that to the user as part of the error message.
+	return errors.Cause(err)
 }
+
+// ErrConnectionClosed is a sentinel error used to signal that the connection
+// is closed.
+var ErrConnectionClosed = errors.ConstError("connection closed")
 
 var SeverityColor = map[string]*ansiterm.Context{
 	"TRACE":   ansiterm.Foreground(ansiterm.Default),

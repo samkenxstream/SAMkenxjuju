@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
@@ -32,6 +33,7 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/tags"
@@ -132,8 +134,8 @@ type InstanceConfig struct {
 	// that it shouldn't verify SSL certificates
 	DisableSSLHostnameVerification bool
 
-	// Series represents the instance series.
-	Series string
+	// Base represents the instance base.
+	Base series.Base
 
 	// MachineAgentServiceName is the init service name for the Juju machine agent.
 	MachineAgentServiceName string
@@ -295,8 +297,11 @@ type StateInitializationParams struct {
 	// to a controller.
 	ControllerConfig controller.Config
 
-	// ControllerCharmRisk is used when deploying the controller charm.
-	ControllerCharmRisk string
+	// ControllerCharmPath points to a controller charm on Charmhub.
+	ControllerCharmPath string
+
+	// ControllerCharmChannel is used when deploying the controller charm.
+	ControllerCharmChannel charm.Channel
 
 	// ControllerInheritedConfig is a set of config attributes to be shared by all
 	// models managed by this controller.
@@ -359,7 +364,8 @@ type stateInitializationParamsInternal struct {
 	ControllerCloudRegion                   string                            `yaml:"controller-cloud-region"`
 	ControllerCloudCredentialName           string                            `yaml:"controller-cloud-credential-name,omitempty"`
 	ControllerCloudCredential               *cloud.Credential                 `yaml:"controller-cloud-credential,omitempty"`
-	ControllerCharmRisk                     string                            `yaml:"controller-charm-risk,omitempty"`
+	ControllerCharmPath                     string                            `yaml:"controller-charm-path,omitempty"`
+	ControllerCharmChannel                  charm.Channel                     `yaml:"controller-charm-channel,omitempty"`
 }
 
 // Marshal marshals StateInitializationParams to an opaque byte array.
@@ -390,7 +396,8 @@ func (p *StateInitializationParams) Marshal() ([]byte, error) {
 		ControllerCloudRegion:                   p.ControllerCloudRegion,
 		ControllerCloudCredentialName:           p.ControllerCloudCredentialName,
 		ControllerCloudCredential:               p.ControllerCloudCredential,
-		ControllerCharmRisk:                     p.ControllerCharmRisk,
+		ControllerCharmPath:                     p.ControllerCharmPath,
+		ControllerCharmChannel:                  p.ControllerCharmChannel,
 	}
 	return yaml.Marshal(&internal)
 }
@@ -432,7 +439,8 @@ func (p *StateInitializationParams) Unmarshal(data []byte) error {
 		ControllerCloudRegion:                   internal.ControllerCloudRegion,
 		ControllerCloudCredentialName:           internal.ControllerCloudCredentialName,
 		ControllerCloudCredential:               internal.ControllerCloudCredential,
-		ControllerCharmRisk:                     internal.ControllerCharmRisk,
+		ControllerCharmPath:                     internal.ControllerCharmPath,
+		ControllerCharmChannel:                  internal.ControllerCharmChannel,
 	}
 	return nil
 }
@@ -490,6 +498,8 @@ func (cfg *InstanceConfig) AgentConfig(
 	if cfg.ControllerConfig != nil {
 		configParams.AgentLogfileMaxBackups = cfg.ControllerConfig.AgentLogfileMaxBackups()
 		configParams.AgentLogfileMaxSizeMB = cfg.ControllerConfig.AgentLogfileMaxSizeMB()
+		configParams.QueryTracingEnabled = cfg.ControllerConfig.QueryTracingEnabled()
+		configParams.QueryTracingThreshold = cfg.ControllerConfig.QueryTracingThreshold()
 	}
 	if cfg.Bootstrap == nil {
 		return agent.NewAgentConfig(configParams)
@@ -751,11 +761,11 @@ func NewInstanceConfig(
 	controllerTag names.ControllerTag,
 	machineID,
 	machineNonce,
-	imageStream,
-	series string,
+	imageStream string,
+	base series.Base,
 	apiInfo *api.Info,
 ) (*InstanceConfig, error) {
-	osType := paths.SeriesToOS(series)
+	osType := paths.OSType(base.OS)
 	logDir := paths.LogDir(osType)
 	icfg := &InstanceConfig{
 		// Fixed entries.
@@ -766,7 +776,7 @@ func NewInstanceConfig(
 		CloudInitOutputLog:      path.Join(logDir, "cloud-init-output.log"),
 		TransientDataDir:        paths.TransientDataDir(osType),
 		MachineAgentServiceName: "jujud-" + names.NewMachineTag(machineID).String(),
-		Series:                  series,
+		Base:                    base,
 		Tags:                    map[string]string{},
 
 		// Parameter entries.
@@ -785,12 +795,12 @@ func NewInstanceConfig(
 func NewBootstrapInstanceConfig(
 	config controller.Config,
 	cons, modelCons constraints.Value,
-	series, publicImageSigningKey string,
+	base series.Base, publicImageSigningKey string,
 	agentEnvironment map[string]string,
 ) (*InstanceConfig, error) {
 	// For a bootstrap instance, the caller must provide the state.Info
 	// and the api.Info. The machine id must *always* be "0".
-	icfg, err := NewInstanceConfig(names.NewControllerTag(config.ControllerUUID()), agent.BootstrapControllerId, agent.BootstrapNonce, "", series, nil)
+	icfg, err := NewInstanceConfig(names.NewControllerTag(config.ControllerUUID()), agent.BootstrapControllerId, agent.BootstrapNonce, "", base, nil)
 	if err != nil {
 		return nil, err
 	}

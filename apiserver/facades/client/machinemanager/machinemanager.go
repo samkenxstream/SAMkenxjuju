@@ -22,7 +22,7 @@ import (
 	"github.com/juju/juju/charmhub/transport"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/core/series"
+	coreseries "github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
 	environscontext "github.com/juju/juju/environs/context"
@@ -81,9 +81,25 @@ type MachineManagerAPI struct {
 	callContext environscontext.ProviderCallContext
 }
 
-// NewFacadeV7 create a new server-side MachineManager API facade. This
+type MachineManagerV9 struct {
+	*MachineManagerAPI
+}
+
+// NewFacadeV9 create a new server-side MachineManager API facade. This
 // is used for facade registration.
-func NewFacadeV7(ctx facade.Context) (*MachineManagerAPI, error) {
+func NewFacadeV9(ctx facade.Context) (*MachineManagerV9, error) {
+	api, err := NewFacadeV10(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &MachineManagerV9{
+		MachineManagerAPI: api,
+	}, nil
+}
+
+// NewFacadeV10 create a new server-side MachineManager API facade. This
+// is used for facade registration.
+func NewFacadeV10(ctx facade.Context) (*MachineManagerAPI, error) {
 	st := ctx.State()
 	model, err := st.Model()
 	if err != nil {
@@ -166,6 +182,7 @@ func NewMachineManagerAPI(
 }
 
 // AddMachines adds new machines with the supplied parameters.
+// The args will contain Base info.
 func (mm *MachineManagerAPI) AddMachines(args params.AddMachines) (params.AddMachinesResults, error) {
 	results := params.AddMachinesResults{
 		Machines: make([]params.AddMachinesResult, len(args.MachineParams)),
@@ -213,7 +230,8 @@ func (mm *MachineManagerAPI) addOneMachine(p params.AddMachineParams) (*state.Ma
 		p.Addrs = nil
 	}
 
-	if p.Series == "" {
+	var base coreseries.Base
+	if p.Base == nil {
 		model, err := mm.st.Model()
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -222,7 +240,13 @@ func (mm *MachineManagerAPI) addOneMachine(p params.AddMachineParams) (*state.Ma
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		p.Series = config.PreferredSeries(conf)
+		base = config.PreferredBase(conf)
+	} else {
+		var err error
+		base, err = coreseries.ParseBase(p.Base.Name, p.Base.Channel)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
 	}
 
 	var placementDirective string
@@ -269,7 +293,7 @@ func (mm *MachineManagerAPI) addOneMachine(p params.AddMachineParams) (*state.Ma
 		return nil, errors.Trace(err)
 	}
 	template := state.MachineTemplate{
-		Series:                  p.Series,
+		Base:                    state.Base{OS: base.OS, Channel: base.Channel.String()},
 		Constraints:             p.Constraints,
 		Volumes:                 volumes,
 		InstanceId:              p.InstanceId,
@@ -413,10 +437,19 @@ func (mm *MachineManagerAPI) DestroyMachineWithParams(args params.DestroyMachine
 	for i, tag := range args.MachineTags {
 		entities.Entities[i].Tag = tag
 	}
-	return mm.destroyMachine(entities, args.Force, args.Keep, common.MaxWait(args.MaxWait))
+	return mm.destroyMachine(entities, args.Force, args.Keep, args.DryRun, common.MaxWait(args.MaxWait))
 }
 
-func (mm *MachineManagerAPI) destroyMachine(args params.Entities, force, keep bool, maxWait time.Duration) (params.DestroyMachineResults, error) {
+// DestroyMachineWithParams removes a set of machines from the model.
+func (mm *MachineManagerV9) DestroyMachineWithParams(args params.DestroyMachinesParamsV9) (params.DestroyMachineResults, error) {
+	entities := params.Entities{Entities: make([]params.Entity, len(args.MachineTags))}
+	for i, tag := range args.MachineTags {
+		entities.Entities[i].Tag = tag
+	}
+	return mm.destroyMachine(entities, args.Force, args.Keep, false, common.MaxWait(args.MaxWait))
+}
+
+func (mm *MachineManagerAPI) destroyMachine(args params.Entities, force, keep, dryRun bool, maxWait time.Duration) (params.DestroyMachineResults, error) {
 	if err := mm.authorizer.CanWrite(); err != nil {
 		return params.DestroyMachineResults{}, err
 	}
@@ -460,8 +493,8 @@ func (mm *MachineManagerAPI) destroyMachine(args params.Entities, force, keep bo
 			fail(err)
 			continue
 		}
-		if force {
-			info.DestroyedContainers, err = mm.destoryContainer(containers, force, keep, maxWait)
+		if force || dryRun {
+			info.DestroyedContainers, err = mm.destoryContainer(containers, force, keep, dryRun, maxWait)
 			if err != nil {
 				fail(err)
 				continue
@@ -484,6 +517,12 @@ func (mm *MachineManagerAPI) destroyMachine(args params.Entities, force, keep bo
 				continue
 			}
 			logger.Warningf("could not deal with units' storage on machine %v: %v", machineTag.Id(), err)
+		}
+
+		if dryRun {
+			result.Info = &info
+			results[i] = result
+			continue
 		}
 
 		applicationNames, err := mm.leadership.GetMachineApplicationNames(machineTag.Id())
@@ -526,14 +565,13 @@ func (mm *MachineManagerAPI) destroyMachine(args params.Entities, force, keep bo
 					"could not unpin application leaders for machine %s with error %v", machineTag.Id(), result.Error)
 			}
 		}
-
 		result.Info = &info
 		results[i] = result
 	}
 	return params.DestroyMachineResults{Results: results}, nil
 }
 
-func (mm *MachineManagerAPI) destoryContainer(containers []string, force, keep bool, maxWait time.Duration) ([]params.DestroyMachineResult, error) {
+func (mm *MachineManagerAPI) destoryContainer(containers []string, force, keep, dryRun bool, maxWait time.Duration) ([]params.DestroyMachineResult, error) {
 	if containers == nil || len(containers) == 0 {
 		return nil, nil
 	}
@@ -541,7 +579,7 @@ func (mm *MachineManagerAPI) destoryContainer(containers []string, force, keep b
 	for i, container := range containers {
 		entities.Entities[i] = params.Entity{Tag: names.NewMachineTag(container).String()}
 	}
-	results, err := mm.destroyMachine(entities, force, keep, maxWait)
+	results, err := mm.destroyMachine(entities, force, keep, dryRun, maxWait)
 	return results.Results, err
 }
 
@@ -591,14 +629,14 @@ func (mm *MachineManagerAPI) classifyDetachedStorage(units []Unit) (destroyed, d
 // If they do, a list of the machine's current units is returned for use in
 // soliciting user confirmation of the command.
 func (mm *MachineManagerAPI) UpgradeSeriesValidate(
-	args params.UpdateSeriesArgs,
+	args params.UpdateChannelArgs,
 ) (params.UpgradeSeriesUnitsResults, error) {
 	entities := make([]ValidationEntity, len(args.Args))
 	for i, arg := range args.Args {
 		entities[i] = ValidationEntity{
-			Tag:    arg.Entity.Tag,
-			Series: arg.Series,
-			Force:  arg.Force,
+			Tag:     arg.Entity.Tag,
+			Channel: arg.Channel,
+			Force:   arg.Force,
 		}
 	}
 
@@ -621,15 +659,14 @@ func (mm *MachineManagerAPI) UpgradeSeriesValidate(
 }
 
 // UpgradeSeriesPrepare prepares a machine for a OS series upgrade.
-func (mm *MachineManagerAPI) UpgradeSeriesPrepare(arg params.UpdateSeriesArg) (params.ErrorResult, error) {
+func (mm *MachineManagerAPI) UpgradeSeriesPrepare(arg params.UpdateChannelArg) (params.ErrorResult, error) {
 	if err := mm.authorizer.CanWrite(); err != nil {
 		return params.ErrorResult{}, err
 	}
 	if err := mm.check.ChangeAllowed(); err != nil {
 		return params.ErrorResult{}, err
 	}
-	err := mm.upgradeSeriesAPI.Prepare(arg.Entity.Tag, arg.Series, arg.Force)
-	if err != nil {
+	if err := mm.upgradeSeriesAPI.Prepare(arg.Entity.Tag, arg.Channel, arg.Force); err != nil {
 		return params.ErrorResult{Error: apiservererrors.ServerError(err)}, nil
 	}
 	return params.ErrorResult{}, nil
@@ -637,11 +674,8 @@ func (mm *MachineManagerAPI) UpgradeSeriesPrepare(arg params.UpdateSeriesArg) (p
 
 // UpgradeSeriesComplete marks a machine as having completed a managed series
 // upgrade.
-func (mm *MachineManagerAPI) UpgradeSeriesComplete(arg params.UpdateSeriesArg) (params.ErrorResult, error) {
+func (mm *MachineManagerAPI) UpgradeSeriesComplete(arg params.UpdateChannelArg) (params.ErrorResult, error) {
 	if err := mm.authorizer.CanWrite(); err != nil {
-		return params.ErrorResult{}, err
-	}
-	if err := mm.check.ChangeAllowed(); err != nil {
 		return params.ErrorResult{}, err
 	}
 	if err := mm.check.ChangeAllowed(); err != nil {
@@ -737,26 +771,18 @@ func (mm *MachineManagerAPI) machineFromTag(tag string) (Machine, error) {
 	return machine, nil
 }
 
-// isSeriesLessThan returns a bool indicating whether the first argument's
+// isBaseLessThan returns a bool indicating whether the first argument's
 // version is lexicographically less than the second argument's, thus indicating
 // that the series represents an older version of the operating system. The
 // output is only valid for Ubuntu series.
-func isSeriesLessThan(series1, series2 string) (bool, error) {
-	version1, err := series.SeriesVersion(series1)
-	if err != nil {
-		return false, err
-	}
-	version2, err := series.SeriesVersion(series2)
-	if err != nil {
-		return false, err
-	}
+func isBaseLessThan(base1, base2 coreseries.Base) (bool, error) {
 	// Versions may be numeric.
-	vers1Int, err1 := strconv.Atoi(version1)
-	vers2Int, err2 := strconv.Atoi(version2)
+	vers1Int, err1 := strconv.Atoi(base1.Channel.Track)
+	vers2Int, err2 := strconv.Atoi(base2.Channel.Track)
 	if err1 == nil && err2 == nil {
 		return vers2Int > vers1Int, nil
 	}
-	return version2 > version1, nil
+	return base2.Channel.Track > base1.Channel.Track, nil
 }
 
 // ModelAuthorizer defines if a given operation can be performed based on a

@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2/bson"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3/bson"
+	"github.com/juju/mgo/v3/txn"
 	jc "github.com/juju/testing/checkers"
-	jujutxn "github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 	"github.com/juju/utils/v3/arch"
 	"github.com/juju/version/v2"
 	gc "gopkg.in/check.v1"
@@ -29,7 +29,8 @@ import (
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
 	resourcetesting "github.com/juju/juju/core/resources/testing"
-	coreseries "github.com/juju/juju/core/series"
+	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/state"
 	stateerrors "github.com/juju/juju/state/errors"
@@ -108,8 +109,12 @@ func (s *ApplicationSuite) TestSetCharmCharmOrigin(c *gc.C) {
 	sch := s.AddMetaCharm(c, "mysql", metaBase, 2)
 	rev := sch.Revision()
 	origin := &state.CharmOrigin{
-		Source:   "charm-store",
+		Source:   "charm-hub",
 		Revision: &rev,
+		Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "22.04/stable",
+		},
 	}
 	cfg := state.SetCharmConfig{
 		Charm:       sch,
@@ -123,20 +128,24 @@ func (s *ApplicationSuite) TestSetCharmCharmOrigin(c *gc.C) {
 	c.Assert(obtainedOrigin, gc.DeepEquals, origin)
 }
 
-func (s *ApplicationSuite) TestSetCharmSeries(c *gc.C) {
+func (s *ApplicationSuite) TestSetCharmUpdateChannelURLNoChange(c *gc.C) {
 	sch := s.AddMetaCharm(c, "mysql", metaBase, 2)
 
+	origin := s.mysql.CharmOrigin()
+	origin.Channel = &state.Channel{Risk: "stable"}
+
 	cfg := state.SetCharmConfig{
-		Charm:  sch,
-		Series: "new-series",
+		Charm:       sch,
+		CharmOrigin: origin,
 	}
 	err := s.mysql.SetCharm(cfg)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.mysql.Series(), gc.DeepEquals, "new-series")
+	c.Assert(s.mysql.CharmOrigin().Channel.Risk, gc.DeepEquals, "stable")
 
-	err = s.mysql.Refresh()
+	cfg.CharmOrigin.Channel.Risk = "candidate"
+	err = s.mysql.SetCharm(cfg)
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.mysql.Series(), gc.DeepEquals, "new-series")
+	c.Assert(s.mysql.CharmOrigin().Channel.Risk, gc.DeepEquals, "candidate")
 }
 
 func (s *ApplicationSuite) TestSetCharmCharmOriginNoChange(c *gc.C) {
@@ -144,13 +153,14 @@ func (s *ApplicationSuite) TestSetCharmCharmOriginNoChange(c *gc.C) {
 	sch := s.AddMetaCharm(c, "mysql", metaBase, 2)
 	rev := sch.Revision()
 	origin := &state.CharmOrigin{
-		Source:   "charm-store",
+		Source:   "charm-hub",
 		Revision: &rev,
 	}
 	cfg := state.SetCharmConfig{
 		Charm:       sch,
 		CharmOrigin: origin,
 	}
+	origOrigin := s.mysql.CharmOrigin()
 	err := s.mysql.SetCharm(cfg)
 	c.Assert(err, jc.ErrorIsNil)
 	cfg = state.SetCharmConfig{
@@ -162,6 +172,7 @@ func (s *ApplicationSuite) TestSetCharmCharmOriginNoChange(c *gc.C) {
 	err = s.mysql.Refresh()
 	c.Assert(err, jc.ErrorIsNil)
 	obtainedOrigin := s.mysql.CharmOrigin()
+	origin.Platform = origOrigin.Platform
 	c.Assert(obtainedOrigin, gc.DeepEquals, origin)
 }
 
@@ -533,7 +544,7 @@ func (s *ApplicationSuite) assignUnitOnMachineWithSpaceToApplication(c *gc.C, a 
 	c.Assert(err, gc.IsNil)
 
 	m1, err := s.State.AddOneMachine(state.MachineTemplate{
-		Series:      "quantal",
+		Base:        state.UbuntuBase("12.10"),
 		Jobs:        []state.MachineJob{state.JobHostUnits},
 		Constraints: constraints.MustParse("spaces=isolated"),
 	})
@@ -638,8 +649,8 @@ func (s *ApplicationSuite) TestSetCharmLegacy(c *gc.C) {
 	chDifferentSeries := state.AddTestingCharmForSeries(c, s.State, "precise", "mysql")
 
 	cfg := state.SetCharmConfig{
-		Charm:       chDifferentSeries,
-		ForceSeries: true,
+		Charm:     chDifferentSeries,
+		ForceBase: true,
 	}
 	err := s.mysql.SetCharm(cfg)
 	c.Assert(err, gc.ErrorMatches, `cannot upgrade application "mysql" to charm "local:precise/precise-mysql-1": cannot change an application's series`)
@@ -647,24 +658,24 @@ func (s *ApplicationSuite) TestSetCharmLegacy(c *gc.C) {
 
 func (s *ApplicationSuite) TestClientApplicationSetCharmUnsupportedSeries(c *gc.C) {
 	ch := state.AddTestingCharmMultiSeries(c, s.State, "multi-series")
-	app := state.AddTestingApplicationForSeries(c, s.State, "precise", "application", ch)
+	app := state.AddTestingApplicationForBase(c, s.State, state.UbuntuBase("12.04"), "application", ch)
 
 	chDifferentSeries := state.AddTestingCharmMultiSeries(c, s.State, "multi-series2")
 	cfg := state.SetCharmConfig{
 		Charm: chDifferentSeries,
 	}
 	err := app.SetCharm(cfg)
-	c.Assert(err, gc.ErrorMatches, `cannot upgrade application "application" to charm "cs:multi-series2-8": only these series are supported: trusty, wily`)
+	c.Assert(err, gc.ErrorMatches, `cannot upgrade application "application" to charm "ch:multi-series2-8": only these series are supported: trusty, wily`)
 }
 
 func (s *ApplicationSuite) TestClientApplicationSetCharmUnsupportedSeriesForce(c *gc.C) {
 	ch := state.AddTestingCharmMultiSeries(c, s.State, "multi-series")
-	app := state.AddTestingApplicationForSeries(c, s.State, "precise", "application", ch)
+	app := state.AddTestingApplicationForBase(c, s.State, state.UbuntuBase("12.04"), "application", ch)
 
 	chDifferentSeries := state.AddTestingCharmMultiSeries(c, s.State, "multi-series2")
 	cfg := state.SetCharmConfig{
-		Charm:       chDifferentSeries,
-		ForceSeries: true,
+		Charm:     chDifferentSeries,
+		ForceBase: true,
 	}
 	err := app.SetCharm(cfg)
 	c.Assert(err, jc.ErrorIsNil)
@@ -672,32 +683,20 @@ func (s *ApplicationSuite) TestClientApplicationSetCharmUnsupportedSeriesForce(c
 	c.Assert(err, jc.ErrorIsNil)
 	ch, _, err = app.Charm()
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ch.String(), gc.Equals, "cs:multi-series2-8")
+	c.Assert(ch.String(), gc.Equals, "ch:multi-series2-8")
 }
 
 func (s *ApplicationSuite) TestClientApplicationSetCharmWrongOS(c *gc.C) {
 	ch := state.AddTestingCharmMultiSeries(c, s.State, "multi-series")
-	app := state.AddTestingApplicationForSeries(c, s.State, "precise", "application", ch)
+	app := state.AddTestingApplicationForBase(c, s.State, state.UbuntuBase("12.04"), "application", ch)
 
 	chDifferentSeries := state.AddTestingCharmMultiSeries(c, s.State, "multi-series-centos")
 	cfg := state.SetCharmConfig{
-		Charm:       chDifferentSeries,
-		ForceSeries: true,
+		Charm:     chDifferentSeries,
+		ForceBase: true,
 	}
 	err := app.SetCharm(cfg)
-	c.Assert(err, gc.ErrorMatches, `cannot upgrade application "application" to charm "cs:multi-series-centos-1": OS "Ubuntu" not supported by charm`)
-}
-
-func (s *ApplicationSuite) TestSetCharmChangeSeriesWhenMovingFromCharmstoreToCharmhub(c *gc.C) {
-	// Moving from a cs to a ch charm should not prevent us from changing the series.
-	chCharm := state.AddTestingCharmhubCharmForSeries(c, s.State, "quantal", "multi-series")
-	cfg := state.SetCharmConfig{
-		Charm:      chCharm,
-		ForceUnits: true,
-	}
-
-	err := s.mysql.SetCharm(cfg)
-	c.Assert(err, jc.ErrorIsNil, gc.Commentf("expected SetCharm to work with different series when switching from a charmstore to a charmhub charm"))
+	c.Assert(err, gc.ErrorMatches, `cannot upgrade application "application" to charm "ch:multi-series-centos-1": OS "Ubuntu" not supported by charm`)
 }
 
 func (s *ApplicationSuite) TestSetCharmPreconditions(c *gc.C) {
@@ -722,6 +721,10 @@ func (s *ApplicationSuite) TestSetCharmUpdatesBindings(c *gc.C) {
 	application, err := s.State.AddApplication(state.AddApplicationArgs{
 		Name:  "yoursql",
 		Charm: oldCharm,
+		CharmOrigin: &state.CharmOrigin{Platform: &state.Platform{
+			OS:      "ubuntu",
+			Channel: "12.10/stable",
+		}},
 		EndpointBindings: map[string]string{
 			"":       dbSpace.Id(),
 			"server": dbSpace.Id(),
@@ -1715,16 +1718,17 @@ func (s *ApplicationSuite) TestUpdateCharmConfig(c *gc.C) {
 	}
 }
 
-func (s *ApplicationSuite) setupCharmForTestUpdateApplicationSeries(c *gc.C, name string) *state.Application {
+func (s *ApplicationSuite) setupCharmForTestUpdateApplicationBase(c *gc.C, name string) *state.Application {
 	ch := state.AddTestingCharmMultiSeries(c, s.State, name)
-	app := state.AddTestingApplicationForSeries(c, s.State, "focal", name, ch)
+	app := state.AddTestingApplicationForBase(c, s.State, state.UbuntuBase("20.04"), name, ch)
 
 	rev := ch.Revision()
 	origin := &state.CharmOrigin{
-		Source:   "charm-store",
+		Source:   "charm-hub",
 		Revision: &rev,
 		Platform: &state.Platform{
-			Series: "focal",
+			OS:      "ubuntu",
+			Channel: "20.04/stable",
 		},
 	}
 	cfg := state.SetCharmConfig{
@@ -1738,22 +1742,22 @@ func (s *ApplicationSuite) setupCharmForTestUpdateApplicationSeries(c *gc.C, nam
 	return app
 }
 
-func (s *ApplicationSuite) TestUpdateApplicationSeries(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
-	err := app.UpdateApplicationSeries("jammy", false)
+func (s *ApplicationSuite) TestUpdateApplicationBase(c *gc.C) {
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
+	err := app.UpdateApplicationBase(state.UbuntuBase("22.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "jammy")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("22.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesSamesSeriesToStart(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
-	err := app.UpdateApplicationSeries("focal", false)
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
+	err := app.UpdateApplicationBase(state.UbuntuBase("20.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "focal")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("20.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesSamesSeriesAfterStart(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 
 	defer state.SetTestHooks(c, s.State,
 		jujutxn.TestHook{
@@ -1766,24 +1770,24 @@ func (s *ApplicationSuite) TestUpdateApplicationSeriesSamesSeriesAfterStart(c *g
 				ops := []txn.Op{{
 					C:  state.ApplicationsC,
 					Id: state.DocID(s.State, "multi-series"),
-					Update: bson.D{{"$set", bson.D{{"series", "jammy"},
-						{"charm-origin.platform.series", "jammy"}}}},
+					Update: bson.D{{"$set", bson.D{{
+						"charm-origin.platform.channel", "22.04/stable"}}}},
 				}}
 				state.RunTransaction(c, s.State, ops)
 			},
 			After: func() {
-				assertApplicationSeriesUpdate(c, app, "jammy")
+				assertApplicationBaseUpdate(c, app, state.UbuntuBase("22.04"))
 			},
 		},
 	).Check()
 
-	err := app.UpdateApplicationSeries("jammy", false)
+	err := app.UpdateApplicationBase(state.UbuntuBase("22.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "jammy")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("22.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesCharmURLChangedSeriesFail(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 
 	defer state.SetTestHooks(c, s.State,
 		jujutxn.TestHook{
@@ -1797,14 +1801,14 @@ func (s *ApplicationSuite) TestUpdateApplicationSeriesCharmURLChangedSeriesFail(
 	).Check()
 
 	// Trusty is listed in only version 1 of the charm.
-	err := app.UpdateApplicationSeries("jammy", false)
+	err := app.UpdateApplicationBase(state.UbuntuBase("22.04"), false)
 	c.Assert(err, gc.ErrorMatches,
-		"updating application series: series \"jammy\" not supported by charm \"cs:multi-series-2\", "+
+		"updating application series: series \"jammy\" not supported by charm \"ch:multi-series-2\", "+
 			"supported series are: focal, bionic")
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesCharmURLChangedSeriesPass(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 
 	defer state.SetTestHooks(c, s.State,
 		jujutxn.TestHook{
@@ -1818,9 +1822,9 @@ func (s *ApplicationSuite) TestUpdateApplicationSeriesCharmURLChangedSeriesPass(
 	).Check()
 
 	// bionic is listed in both revisions of the charm.
-	err := app.UpdateApplicationSeries("bionic", false)
+	err := app.UpdateApplicationBase(state.UbuntuBase("18.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "bionic")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("18.04"))
 }
 
 func (s *ApplicationSuite) setupMultiSeriesUnitSubordinate(c *gc.C, app *state.Application, name string) *state.Application {
@@ -1832,7 +1836,7 @@ func (s *ApplicationSuite) setupMultiSeriesUnitSubordinate(c *gc.C, app *state.A
 }
 
 func (s *ApplicationSuite) setupMultiSeriesUnitSubordinateGivenUnit(c *gc.C, app *state.Application, unit *state.Unit, name string) *state.Application {
-	subApp := s.setupCharmForTestUpdateApplicationSeries(c, name)
+	subApp := s.setupCharmForTestUpdateApplicationBase(c, name)
 
 	eps, err := s.State.InferEndpoints(app.Name(), name)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1854,42 +1858,43 @@ func (s *ApplicationSuite) setupMultiSeriesUnitSubordinateGivenUnit(c *gc.C, app
 	return subApp
 }
 
-func assertApplicationSeriesUpdate(c *gc.C, a *state.Application, series string) {
+func assertApplicationBaseUpdate(c *gc.C, a *state.Application, base state.Base) {
 	err := a.Refresh()
 	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(a.Series(), gc.Equals, series)
-	c.Assert(a.CharmOrigin().Platform.Series, gc.Equals, series)
+	stBase, err := series.ParseBase(base.OS, base.Channel)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(a.Base().String(), gc.Equals, stBase.String())
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesWithSubordinate(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 	subApp := s.setupMultiSeriesUnitSubordinate(c, app, "multi-series-subordinate")
-	err := app.UpdateApplicationSeries("jammy", false)
+	err := app.UpdateApplicationBase(state.UbuntuBase("22.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "jammy")
-	assertApplicationSeriesUpdate(c, subApp, "jammy")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("22.04"))
+	assertApplicationBaseUpdate(c, subApp, state.UbuntuBase("22.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesWithSubordinateFail(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 	subApp := s.setupMultiSeriesUnitSubordinate(c, app, "multi-series-subordinate")
-	err := app.UpdateApplicationSeries("xenial", false)
+	err := app.UpdateApplicationBase(state.UbuntuBase("16.04"), false)
 	c.Assert(errors.Is(err, stateerrors.IncompatibleSeriesError), jc.IsTrue)
-	assertApplicationSeriesUpdate(c, app, "focal")
-	assertApplicationSeriesUpdate(c, subApp, "focal")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("20.04"))
+	assertApplicationBaseUpdate(c, subApp, state.UbuntuBase("20.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesWithSubordinateForce(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 	subApp := s.setupMultiSeriesUnitSubordinate(c, app, "multi-series-subordinate")
-	err := app.UpdateApplicationSeries("xenial", true)
+	err := app.UpdateApplicationBase(state.UbuntuBase("16.04"), true)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "xenial")
-	assertApplicationSeriesUpdate(c, subApp, "xenial")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("16.04"))
+	assertApplicationBaseUpdate(c, subApp, state.UbuntuBase("16.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesUnitCountChange(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 	units, err := app.AllUnits()
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(len(units), gc.Equals, 0)
@@ -1903,20 +1908,20 @@ func (s *ApplicationSuite) TestUpdateApplicationSeriesUnitCountChange(c *gc.C) {
 		},
 	).Check()
 
-	err = app.UpdateApplicationSeries("jammy", false)
+	err = app.UpdateApplicationBase(state.UbuntuBase("22.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "jammy")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("22.04"))
 
 	units, err = app.AllUnits()
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(len(units), gc.Equals, 1)
 	subApp, err := s.State.Application("multi-series-subordinate")
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, subApp, "jammy")
+	assertApplicationBaseUpdate(c, subApp, state.UbuntuBase("22.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesSecondSubordinate(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 	subApp := s.setupMultiSeriesUnitSubordinate(c, app, "multi-series-subordinate")
 	unit, err := s.State.Unit("multi-series/0")
 	c.Assert(err, jc.ErrorIsNil)
@@ -1931,18 +1936,18 @@ func (s *ApplicationSuite) TestUpdateApplicationSeriesSecondSubordinate(c *gc.C)
 		},
 	).Check()
 
-	err = app.UpdateApplicationSeries("jammy", false)
+	err = app.UpdateApplicationBase(state.UbuntuBase("22.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, app, "jammy")
-	assertApplicationSeriesUpdate(c, subApp, "jammy")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("22.04"))
+	assertApplicationBaseUpdate(c, subApp, state.UbuntuBase("22.04"))
 
 	subApp2, err := s.State.Application("multi-series-subordinate2")
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, subApp2, "jammy")
+	assertApplicationBaseUpdate(c, subApp2, state.UbuntuBase("22.04"))
 }
 
 func (s *ApplicationSuite) TestUpdateApplicationSeriesSecondSubordinateIncompatible(c *gc.C) {
-	app := s.setupCharmForTestUpdateApplicationSeries(c, "multi-series")
+	app := s.setupCharmForTestUpdateApplicationBase(c, "multi-series")
 	subApp := s.setupMultiSeriesUnitSubordinate(c, app, "multi-series-subordinate")
 	unit, err := s.State.Unit("multi-series/0")
 	c.Assert(err, jc.ErrorIsNil)
@@ -1957,14 +1962,14 @@ func (s *ApplicationSuite) TestUpdateApplicationSeriesSecondSubordinateIncompati
 		},
 	).Check()
 
-	err = app.UpdateApplicationSeries("bionic", false)
+	err = app.UpdateApplicationBase(state.UbuntuBase("18.04"), false)
 	c.Assert(errors.Is(err, stateerrors.IncompatibleSeriesError), jc.IsTrue)
-	assertApplicationSeriesUpdate(c, app, "focal")
-	assertApplicationSeriesUpdate(c, subApp, "focal")
+	assertApplicationBaseUpdate(c, app, state.UbuntuBase("20.04"))
+	assertApplicationBaseUpdate(c, subApp, state.UbuntuBase("20.04"))
 
 	subApp2, err := s.State.Application("multi-series-subordinate2")
 	c.Assert(err, jc.ErrorIsNil)
-	assertApplicationSeriesUpdate(c, subApp2, "focal")
+	assertApplicationBaseUpdate(c, subApp2, state.UbuntuBase("20.04"))
 }
 
 func assertNoSettingsRef(c *gc.C, st *state.State, appName string, sch *state.Charm) {
@@ -2774,7 +2779,7 @@ func (s *ApplicationSuite) TestAddUnit(c *gc.C) {
 	c.Assert(unitOne.SubordinateNames(), gc.HasLen, 0)
 
 	// Assign the principal unit to a machine.
-	m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	err = unitZero.AssignToMachine(m)
 	c.Assert(err, jc.ErrorIsNil)
@@ -2886,7 +2891,7 @@ func (s *ApplicationSuite) TestAgentTools(c *gc.C) {
 	agentTools := version.Binary{
 		Number:  jujuversion.Current,
 		Arch:    arch.HostArch(),
-		Release: coreseries.DefaultOSTypeNameFromSeries(app.Series()),
+		Release: "ubuntu",
 	}
 
 	tools, err := app.AgentTools()
@@ -3089,6 +3094,165 @@ func (s *ApplicationSuite) TestDestroyWithRemovableRelation(c *gc.C) {
 	c.Assert(err, jc.Satisfies, errors.IsNotFound)
 }
 
+func (s *ApplicationSuite) TestDestroyWithRemovableApplicationOpenedPortRanges(c *gc.C) {
+	st, app := s.addCAASSidecarApplication(c)
+	defer st.Close()
+
+	appPortRanges, err := app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 0)
+
+	unit0, err := app.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	portRangesUnit0, err := unit0.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	portRangesUnit0.Open(allEndpoints, network.MustParsePortRange("3000/tcp"))
+	portRangesUnit0.Open(allEndpoints, network.MustParsePortRange("3001/tcp"))
+	c.Assert(st.ApplyOperation(portRangesUnit0.Changes()), jc.ErrorIsNil)
+
+	portRangesUnit0, err = unit0.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(portRangesUnit0.UniquePortRanges(), gc.HasLen, 2)
+
+	unit1, err := app.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	portRangesUnit1, err := unit1.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	portRangesUnit1.Open(allEndpoints, network.MustParsePortRange("3001/tcp"))
+	portRangesUnit1.Open(allEndpoints, network.MustParsePortRange("3002/tcp"))
+	c.Assert(st.ApplyOperation(portRangesUnit1.Changes()), jc.ErrorIsNil)
+
+	portRangesUnit1, err = unit1.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(portRangesUnit1.UniquePortRanges(), gc.HasLen, 2)
+
+	appPortRanges, err = app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 3)
+
+	portRangesUnit1.Close(allEndpoints, network.MustParsePortRange("3002/tcp"))
+	c.Assert(st.ApplyOperation(portRangesUnit1.Changes()), jc.ErrorIsNil)
+
+	portRangesUnit1, err = unit1.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(portRangesUnit1.UniquePortRanges(), gc.HasLen, 1)
+
+	appPortRanges, err = app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 2)
+
+	portRangesUnit1.Open(allEndpoints, network.MustParsePortRange("3003/tcp"))
+	c.Assert(st.ApplyOperation(portRangesUnit1.Changes()), jc.ErrorIsNil)
+
+	appPortRanges, err = app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 3)
+
+	err = unit1.EnsureDead()
+	c.Assert(err, jc.ErrorIsNil)
+	err = unit1.Remove()
+	c.Assert(err, jc.ErrorIsNil)
+
+	appPortRanges, err = app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 2)
+
+	// Remove all units, all opened ports should be removed.
+	err = unit0.EnsureDead()
+	c.Assert(err, jc.ErrorIsNil)
+	err = unit0.Remove()
+	c.Assert(err, jc.ErrorIsNil)
+	err = unit1.EnsureDead()
+	c.Assert(err, jc.ErrorIsNil)
+	err = unit1.Remove()
+	c.Assert(err, jc.ErrorIsNil)
+
+	appPortRanges, err = app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 0)
+
+	err = app.Destroy()
+	c.Assert(err, jc.ErrorIsNil)
+}
+
+func (s *ApplicationSuite) TestOpenedPortRanges(c *gc.C) {
+	st, app := s.addCAASSidecarApplication(c)
+	defer st.Close()
+	unit, err := app.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	portRanges, err := unit.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+
+	flush := func(expectedErr string) {
+		if len(expectedErr) == 0 {
+			c.Assert(st.ApplyOperation(portRanges.Changes()), jc.ErrorIsNil)
+		} else {
+			c.Assert(st.ApplyOperation(portRanges.Changes()), gc.ErrorMatches, expectedErr)
+		}
+		portRanges, err = unit.OpenedPortRanges()
+		c.Assert(err, jc.ErrorIsNil)
+	}
+
+	c.Assert(portRanges.UniquePortRanges(), gc.HasLen, 0)
+	portRanges.Open(allEndpoints, network.MustParsePortRange("3000/tcp"))
+	portRanges.Open("data-port", network.MustParsePortRange("2000/udp"))
+	// All good.
+	flush(``)
+	c.Assert(portRanges.UnitName(), jc.DeepEquals, `cockroachdb/0`)
+	c.Assert(portRanges.UniquePortRanges(), jc.DeepEquals, []network.PortRange{
+		network.MustParsePortRange("3000/tcp"),
+		network.MustParsePortRange("2000/udp"),
+	})
+	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
+		allEndpoints: []network.PortRange{network.MustParsePortRange("3000/tcp")},
+		"data-port":  []network.PortRange{network.MustParsePortRange("2000/udp")},
+	})
+
+	// Errors for unknown endpoint.
+	portRanges.Open("bad-endpoint", network.MustParsePortRange("2000/udp"))
+	flush(`cannot open/close ports: open port range: endpoint "bad-endpoint" for application "cockroachdb" not found`)
+	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
+		allEndpoints: []network.PortRange{network.MustParsePortRange("3000/tcp")},
+		"data-port":  []network.PortRange{network.MustParsePortRange("2000/udp")},
+	})
+
+	// No ops for duplicated Open.
+	portRanges.Open("data-port", network.MustParsePortRange("2000/udp"))
+	flush(``)
+	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
+		allEndpoints: []network.PortRange{network.MustParsePortRange("3000/tcp")},
+		"data-port":  []network.PortRange{network.MustParsePortRange("2000/udp")},
+	})
+
+	// Close one port.
+	portRanges.Close("data-port", network.MustParsePortRange("2000/udp"))
+	flush(``)
+	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
+		allEndpoints: []network.PortRange{network.MustParsePortRange("3000/tcp")},
+	})
+
+	// No ops for Close non existing port.
+	portRanges.Close("data-port", network.MustParsePortRange("2000/udp"))
+	flush(``)
+	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
+		allEndpoints: []network.PortRange{network.MustParsePortRange("3000/tcp")},
+	})
+
+	// Destroy the application; check application and
+	// openedApplicationportRanges removed.
+	err = unit.EnsureDead()
+	c.Assert(err, jc.ErrorIsNil)
+	err = unit.Remove()
+	c.Assert(err, jc.ErrorIsNil)
+
+	appPortRanges, err := app.OpenedPortRanges()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 0)
+
+	err = app.Destroy()
+	c.Assert(err, jc.ErrorIsNil)
+}
+
 func (s *ApplicationSuite) TestDestroyWithReferencedRelation(c *gc.C) {
 	s.assertDestroyWithReferencedRelation(c, true)
 }
@@ -3191,7 +3355,7 @@ func (s *ApplicationSuite) TestDestroyQueuesUnitCleanup(c *gc.C) {
 func (s *ApplicationSuite) TestRemoveApplicationMachine(c *gc.C) {
 	unit, err := s.mysql.AddUnit(state.AddUnitParams{})
 	c.Assert(err, jc.ErrorIsNil)
-	machine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(unit.AssignToMachine(machine), gc.IsNil)
 
@@ -3203,6 +3367,77 @@ func (s *ApplicationSuite) TestRemoveApplicationMachine(c *gc.C) {
 
 	c.Assert(unit.Refresh(), jc.Satisfies, errors.IsNotFound)
 	assertLife(c, machine, state.Dying)
+}
+
+func (s *ApplicationSuite) TestDestroyAlsoDeletesSecretPermissions(c *gc.C) {
+	store := state.NewSecrets(s.State)
+	uri := secrets.NewURI()
+	cp := state.CreateSecretParams{
+		Version: 1,
+		Owner:   s.mysql.Tag(),
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &fakeToken{},
+			Data:        map[string]string{"foo": "bar"},
+		},
+	}
+	_, err := store.CreateSecret(uri, cp)
+	c.Assert(err, jc.ErrorIsNil)
+
+	// Make a relation for the access scope.
+	endpoint1, err := s.mysql.Endpoint("juju-info")
+	c.Assert(err, jc.ErrorIsNil)
+	application2 := s.Factory.MakeApplication(c, &factory.ApplicationParams{
+		Charm: s.Factory.MakeCharm(c, &factory.CharmParams{
+			Name: "logging",
+		}),
+	})
+	endpoint2, err := application2.Endpoint("info")
+	c.Assert(err, jc.ErrorIsNil)
+	rel := s.Factory.MakeRelation(c, &factory.RelationParams{
+		Endpoints: []state.Endpoint{endpoint1, endpoint2},
+	})
+
+	err = s.State.GrantSecretAccess(uri, state.SecretAccessParams{
+		LeaderToken: &fakeToken{},
+		Scope:       rel.Tag(),
+		Subject:     s.mysql.Tag(),
+		Role:        secrets.RoleView,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	access, err := s.State.SecretAccess(uri, s.mysql.Tag())
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleView)
+
+	err = s.mysql.Destroy()
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.State.SecretAccess(uri, s.mysql.Tag())
+	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+}
+
+func (s *ApplicationSuite) TestDestroyAlsoDeletesOwnedSecrets(c *gc.C) {
+	store := state.NewSecrets(s.State)
+	uri := secrets.NewURI()
+	cp := state.CreateSecretParams{
+		Version: 1,
+		Owner:   s.mysql.Tag(),
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &fakeToken{},
+			Label:       ptr("label"),
+			Data:        map[string]string{"foo": "bar"},
+		},
+	}
+	_, err := store.CreateSecret(uri, cp)
+	c.Assert(err, jc.ErrorIsNil)
+
+	err = s.mysql.Destroy()
+	c.Assert(err, jc.ErrorIsNil)
+	_, err = store.GetSecret(uri)
+	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+
+	// Create again, no label clash.
+	s.AddTestingApplication(c, "mysql", s.charm)
+	_, err = store.CreateSecret(uri, cp)
+	c.Assert(err, jc.ErrorIsNil)
 }
 
 func (s *ApplicationSuite) TestApplicationCleanupRemovesStorageConstraints(c *gc.C) {
@@ -3519,7 +3754,7 @@ func (s *ApplicationSuite) TestWatchUnitsBulkEvents(c *gc.C) {
 	// All except gone unit are reported in initial event.
 	w := s.mysql.WatchUnits()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
+	wc := testing.NewStringsWatcherC(c, w)
 	wc.AssertChange(alive.Name(), dying.Name(), dead.Name())
 	wc.AssertNoChange()
 
@@ -3540,7 +3775,7 @@ func (s *ApplicationSuite) TestWatchUnitsLifecycle(c *gc.C) {
 	// Empty initial event when no units.
 	w := s.mysql.WatchUnits()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
+	wc := testing.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -3588,7 +3823,7 @@ func (s *ApplicationSuite) TestWatchRelations(c *gc.C) {
 	// TODO(fwereade) split this test up a bit.
 	w := s.mysql.WatchRelations()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
+	wc := testing.NewStringsWatcherC(c, w)
 	wc.AssertChange()
 	wc.AssertNoChange()
 
@@ -3630,7 +3865,7 @@ func (s *ApplicationSuite) TestWatchRelations(c *gc.C) {
 	rel2 := addRelation()
 	w = s.mysql.WatchRelations()
 	defer testing.AssertStop(c, w)
-	wc = testing.NewStringsWatcherC(c, s.State, w)
+	wc = testing.NewStringsWatcherC(c, w)
 	wc.AssertChange(rel1.String(), rel2.String())
 	wc.AssertNoChange()
 
@@ -3664,7 +3899,7 @@ func (s *ApplicationSuite) TestWatchRelations(c *gc.C) {
 	wpx := s.AddTestingApplication(c, "wpx", wpch)
 	wpxWatcher := wpx.WatchRelations()
 	defer testing.AssertStop(c, wpxWatcher)
-	wpxWatcherC := testing.NewStringsWatcherC(c, s.State, wpxWatcher)
+	wpxWatcherC := testing.NewStringsWatcherC(c, wpxWatcher)
 	wpxWatcherC.AssertChange()
 	wpxWatcherC.AssertNoChange()
 
@@ -3697,7 +3932,7 @@ func (s *ApplicationSuite) TestWatchApplication(c *gc.C) {
 	defer testing.AssertStop(c, w)
 
 	// Initial event.
-	wc := testing.NewNotifyWatcherC(c, s.State, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	// Make one change (to a separate instance), check one event.
@@ -3710,6 +3945,8 @@ func (s *ApplicationSuite) TestWatchApplication(c *gc.C) {
 	// Make two changes, check one event.
 	err = application.ClearExposed()
 	c.Assert(err, jc.ErrorIsNil)
+	// TODO(quiescence): these two changes should be one event.
+	wc.AssertOneChange()
 
 	cfg := state.SetCharmConfig{
 		Charm:      s.charm,
@@ -3732,7 +3969,7 @@ func (s *ApplicationSuite) TestWatchApplication(c *gc.C) {
 	s.WaitForModelWatchersIdle(c, s.Model.UUID())
 	w = s.mysql.Watch()
 	defer testing.AssertStop(c, w)
-	testing.NewNotifyWatcherC(c, s.State, w).AssertOneChange()
+	testing.NewNotifyWatcherC(c, w).AssertOneChange()
 }
 
 func (s *ApplicationSuite) TestMetricCredentials(c *gc.C) {
@@ -4237,12 +4474,14 @@ func (s *ApplicationSuite) TestWatchCharmConfig(c *gc.C) {
 	defer testing.AssertStop(c, w)
 
 	// Initial event.
-	wc := testing.NewNotifyWatcherC(c, s.State, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	// Update config a couple of times, check a single event.
 	err = app.UpdateCharmConfig(model.GenerationMaster, charm.Settings{"blog-title": "superhero paparazzi"})
 	c.Assert(err, jc.ErrorIsNil)
+	// TODO(quiescence): these two changes should be one event.
+	wc.AssertOneChange()
 	err = app.UpdateCharmConfig(model.GenerationMaster, charm.Settings{"blog-title": "sauceror central"})
 	c.Assert(err, jc.ErrorIsNil)
 	wc.AssertOneChange()
@@ -4806,7 +5045,7 @@ func (s *CAASApplicationSuite) TestWatchScale(c *gc.C) {
 	// Empty initial event.
 	w := s.app.WatchScale()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewNotifyWatcherC(c, s.State, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	err := s.app.SetScale(5, 0, true)
@@ -4843,7 +5082,7 @@ func (s *CAASApplicationSuite) TestWatchCloudService(c *gc.C) {
 	defer testing.AssertStop(c, w)
 
 	// Initial event.
-	wc := testing.NewNotifyWatcherC(c, s.State, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	_, err = s.State.SaveCloudService(state.SaveCloudServiceArgs{
@@ -4863,7 +5102,7 @@ func (s *CAASApplicationSuite) TestWatchCloudService(c *gc.C) {
 	s.WaitForModelWatchersIdle(c, s.Model.UUID())
 	w = cloudSvc.Watch()
 	defer testing.AssertStop(c, w)
-	testing.NewNotifyWatcherC(c, s.State, w).AssertOneChange()
+	testing.NewNotifyWatcherC(c, w).AssertOneChange()
 }
 
 func (s *CAASApplicationSuite) TestRewriteStatusHistory(c *gc.C) {
@@ -4883,9 +5122,6 @@ func (s *CAASApplicationSuite) TestRewriteStatusHistory(c *gc.C) {
 	c.Assert(history[0].Message, gc.Equals, "")
 
 	// Must overwrite the history
-	// Updating status may cause the history entries to be written with
-	// the same timestamp due to the precision used by the db.
-	s.Clock.Advance(1 * time.Millisecond)
 	err = app.SetOperatorStatus(status.StatusInfo{
 		Status:  status.Allocating,
 		Message: "operator message",
@@ -4899,9 +5135,6 @@ func (s *CAASApplicationSuite) TestRewriteStatusHistory(c *gc.C) {
 	c.Assert(history[1].Status, gc.Equals, status.Unset)
 	c.Assert(history[1].Message, gc.Equals, "")
 
-	// Updating status may cause the history entries to be written with
-	// the same timestamp due to the precision used by the db.
-	s.Clock.Advance(1 * time.Millisecond)
 	err = app.SetOperatorStatus(status.StatusInfo{
 		Status:  status.Running,
 		Message: "operator running",
@@ -5037,7 +5270,7 @@ func (s *CAASApplicationSuite) TestDestroyStaleZeroUnitCount(c *gc.C) {
 
 func (s *CAASApplicationSuite) TestDestroyWithRemovableRelation(c *gc.C) {
 	ch := state.AddTestingCharmForSeries(c, s.caasSt, "kubernetes", "mysql")
-	mysql := state.AddTestingApplication(c, s.caasSt, "mysql", ch)
+	mysql := state.AddTestingApplicationForBase(c, s.caasSt, state.UbuntuBase("20.04"), "mysql", ch)
 	eps, err := s.caasSt.InferEndpoints("gitlab", "mysql")
 	c.Assert(err, jc.ErrorIsNil)
 	rel, err := s.caasSt.AddRelation(eps...)
@@ -5066,14 +5299,14 @@ func (s *CAASApplicationSuite) TestDestroyWithReferencedRelationStaleCount(c *gc
 
 func (s *CAASApplicationSuite) assertDestroyWithReferencedRelation(c *gc.C, refresh bool) {
 	ch := state.AddTestingCharmForSeries(c, s.caasSt, "kubernetes", "mysql")
-	mysql := state.AddTestingApplication(c, s.caasSt, "mysql", ch)
+	mysql := state.AddTestingApplicationForBase(c, s.caasSt, state.UbuntuBase("20.04"), "mysql", ch)
 	eps, err := s.caasSt.InferEndpoints("gitlab", "mysql")
 	c.Assert(err, jc.ErrorIsNil)
 	rel0, err := s.caasSt.AddRelation(eps...)
 	c.Assert(err, jc.ErrorIsNil)
 
 	ch = state.AddTestingCharmForSeries(c, s.caasSt, "kubernetes", "proxy")
-	state.AddTestingApplication(c, s.caasSt, "proxy", ch)
+	state.AddTestingApplicationForBase(c, s.caasSt, state.UbuntuBase("20.04"), "proxy", ch)
 	eps, err = s.caasSt.InferEndpoints("proxy", "gitlab")
 	c.Assert(err, jc.ErrorIsNil)
 	rel1, err := s.caasSt.AddRelation(eps...)
@@ -5187,9 +5420,9 @@ func (s *ApplicationSuite) TestSetOperatorStatus(c *gc.C) {
 func (s *ApplicationSuite) TestCharmLegacyOnlySupportsOneSeries(c *gc.C) {
 	ch := state.AddTestingCharmForSeries(c, s.State, "precise", "mysql")
 	app := s.AddTestingApplication(c, "legacy-charm", ch)
-	err := app.VerifySupportedSeries("precise", false)
+	err := app.VerifySupportedBase(state.UbuntuBase("12.04"), false)
 	c.Assert(err, jc.ErrorIsNil)
-	err = app.VerifySupportedSeries("xenial", false)
+	err = app.VerifySupportedBase(state.UbuntuBase("16.04"), false)
 	c.Assert(err, gc.ErrorMatches, "series \"xenial\" not supported by charm \"local:precise/precise-mysql-1\", supported series are: precise")
 }
 
@@ -5222,11 +5455,20 @@ func (s *ApplicationSuite) TestDeployedMachinesNotAssignedUnit(c *gc.C) {
 }
 
 func (s *ApplicationSuite) TestCAASSidecarCharm(c *gc.C) {
+	st, app := s.addCAASSidecarApplication(c)
+	defer st.Close()
+	unit, err := app.AddUnit(state.AddUnitParams{})
+	c.Assert(err, jc.ErrorIsNil)
+	sidecar, err := unit.IsSidecar()
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(sidecar, jc.IsTrue)
+}
+
+func (s *ApplicationSuite) addCAASSidecarApplication(c *gc.C) (*state.State, *state.Application) {
 	st := s.Factory.MakeModel(c, &factory.ModelParams{
 		Name: "caas-model",
 		Type: state.ModelTypeCAAS,
 	})
-	defer st.Close()
 	f := factory.NewFactory(st, s.StatePool)
 
 	charmDef := `
@@ -5240,15 +5482,13 @@ resources:
   redis-container-resource:
     name: redis-container
     type: oci-image
+provides:
+  data-port:
+    interface: data
+    scope: container
 `
 	ch := state.AddCustomCharmWithManifest(c, st, "cockroach", "metadata.yaml", charmDef, "focal", 1)
-	app := f.MakeApplication(c, &factory.ApplicationParams{Name: "cockroachdb", Charm: ch})
-
-	unit, err := app.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	sidecar, err := unit.IsSidecar()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(sidecar, jc.IsTrue)
+	return st, f.MakeApplication(c, &factory.ApplicationParams{Name: "cockroachdb", Charm: ch})
 }
 
 func (s *ApplicationSuite) TestCAASNonSidecarCharm(c *gc.C) {
@@ -5279,30 +5519,15 @@ deployment:
 }
 
 func (s *ApplicationSuite) TestWatchApplicationsWithPendingCharms(c *gc.C) {
-	s.State.StartSync()
 	w := s.State.WatchApplicationsWithPendingCharms()
 	defer func() { _ = w.Stop() }()
 
-	wc := statetesting.NewStringsWatcherC(c, s.State, w)
+	wc := statetesting.NewStringsWatcherC(c, w)
 	wc.AssertChange() // consume initial change set.
-
-	// Add a pending charm without an origin and associate it with the
-	// application. As it is lacking an origin, it should not trigger a
-	// change.
-	dummy1 := s.dummyCharm(c, "ch:dummy-1")
-	dummy1.SHA256 = ""      // indicates that we don't have the data in the blobstore yet.
-	dummy1.StoragePath = "" // indicates that we don't have the data in the blobstore yet.
-	ch1, err := s.State.AddCharmMetadata(dummy1)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.mysql.SetCharm(state.SetCharmConfig{
-		Charm: ch1,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
 
 	// Add a pending charm with an origin and associate it with the
 	// application. This should trigger a change.
-	dummy2 := s.dummyCharm(c, "ch:dummy-2")
+	dummy2 := s.dummyCharm(c, "ch:dummy-1")
 	dummy2.SHA256 = ""      // indicates that we don't have the data in the blobstore yet.
 	dummy2.StoragePath = "" // indicates that we don't have the data in the blobstore yet.
 	ch2, err := s.State.AddCharmMetadata(dummy2)
@@ -5317,13 +5542,39 @@ func (s *ApplicationSuite) TestWatchApplicationsWithPendingCharms(c *gc.C) {
 	wc.AssertChange(s.mysql.Name())
 
 	// "Upload" a charm and check that we don't get a notification for it.
-	dummy3 := s.dummyCharm(c, "ch:dummy-3")
+	dummy3 := s.dummyCharm(c, "ch:dummy-2")
 	ch3, err := s.State.AddCharm(dummy3)
 	c.Assert(err, jc.ErrorIsNil)
 	err = s.mysql.SetCharm(state.SetCharmConfig{
 		Charm: ch3,
 		CharmOrigin: &state.CharmOrigin{
 			Source: "charm-hub",
+			ID:     "charm-hub-id",
+		},
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	wc.AssertNoChange()
+
+	// Simulate a bundle deploying multiple applications from a single
+	// charm. The watcher needs to notify on the secondary applications.
+	appSameCharm, err := s.State.AddApplication(state.AddApplicationArgs{
+		Name:  "mysql-testing",
+		Charm: ch3,
+		CharmOrigin: &state.CharmOrigin{
+			Source: "charm-hub",
+			Platform: &state.Platform{
+				OS:      "ubuntu",
+				Channel: "22.04/stable",
+			},
+		},
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	wc.AssertChange(appSameCharm.Name())
+	_ = appSameCharm.SetCharm(state.SetCharmConfig{
+		Charm: ch3,
+		CharmOrigin: &state.CharmOrigin{
+			Source: "charm-hub",
+			ID:     "charm-hub-id",
 		},
 	})
 	c.Assert(err, jc.ErrorIsNil)
@@ -5352,7 +5603,7 @@ func (s *ApplicationSuite) TestWatch(c *gc.C) {
 	w := s.mysql.WatchConfigSettingsHash()
 	defer testing.AssertStop(c, w)
 
-	wc := testing.NewStringsWatcherC(c, s.State, w)
+	wc := testing.NewStringsWatcherC(c, w)
 	wc.AssertChange("1e11259677ef769e0ec4076b873c76dcc3a54be7bc651b081d0f0e2b87077717")
 
 	schema := environschema.Fields{

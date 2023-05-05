@@ -6,20 +6,17 @@ package charms
 import (
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	commoncharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
-	"github.com/juju/os/v2/series"
-	"gopkg.in/macaroon.v2"
 
 	apiresources "github.com/juju/juju/api/client/resources"
+	commoncharm "github.com/juju/juju/api/common/charm"
 	charmscommon "github.com/juju/juju/apiserver/common/charms"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -28,12 +25,23 @@ import (
 	"github.com/juju/juju/core/arch"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/permission"
-
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/state"
 )
 
 var logger = loggo.GetLogger("juju.apiserver.charms")
+
+// APIv6 provides the Charms API facade for version 6.
+// It removes the AddCharmWithAuthorization function, as
+// we no longer support macaroons.
+type APIv6 struct {
+	*API
+}
+
+// APIv5 provides the Charms API facade for version 5.
+type APIv5 struct {
+	*APIv6
+}
 
 // API implements the charms interface and is the concrete
 // implementation of the API end point.
@@ -140,7 +148,7 @@ func (a *API) List(args params.CharmsList) (params.CharmsListResult, error) {
 }
 
 // GetDownloadInfos attempts to get the bundle corresponding to the charm url
-//and origin.
+// and origin.
 func (a *API) GetDownloadInfos(args params.CharmURLAndOrigins) (params.DownloadInfoResults, error) {
 	logger.Tracef("GetDownloadInfos %+v", args)
 
@@ -182,19 +190,22 @@ func (a *API) getDownloadInfo(arg params.CharmURLAndOrigin) (params.DownloadInfo
 		return params.DownloadInfoResult{}, apiservererrors.ServerError(err)
 	}
 
-	var macaroons macaroon.Slice
-	if arg.Macaroon != nil {
-		macaroons = append(macaroons, arg.Macaroon)
+	requestedOrigin, err := ConvertParamsOrigin(charmOrigin)
+	if err != nil {
+		return params.DownloadInfoResult{}, apiservererrors.ServerError(err)
 	}
-
-	url, origin, err := repo.GetDownloadURL(curl, convertParamsOrigin(charmOrigin), macaroons)
+	url, origin, err := repo.GetDownloadURL(curl, requestedOrigin)
 	if err != nil {
 		return params.DownloadInfoResult{}, apiservererrors.ServerError(err)
 	}
 
+	dlorigin, err := convertOrigin(origin)
+	if err != nil {
+		return params.DownloadInfoResult{}, errors.Trace(err)
+	}
 	return params.DownloadInfoResult{
 		URL:    url.String(),
-		Origin: convertOrigin(origin),
+		Origin: dlorigin,
 	}, nil
 }
 
@@ -209,37 +220,19 @@ func (a *API) getDefaultArch() (string, error) {
 func normalizeCharmOrigin(origin params.CharmOrigin, fallbackArch string) (params.CharmOrigin, error) {
 	// If the series is set to all, we need to ensure that we remove that, so
 	// that we can attempt to derive it at a later stage. Juju itself doesn't
-	// know nor understands what all means, so we need to ensure it doesn't leak
+	// know nor understand what "all" means, so we need to ensure it doesn't leak
 	// out.
-	var os string
-	var oSeries string
-	if origin.Series == "all" {
-		logger.Warningf("Release all detected, removing all from the origin. %s", origin.ID)
-	} else if origin.Series != "" {
-		// Always set the os from the series, so we know it's correctly
-		// normalized for the rest of Juju.
-		sys, err := series.GetOSFromSeries(origin.Series)
-		if err != nil {
-			return params.CharmOrigin{}, errors.Trace(err)
-		}
-		// Values passed to the api are case sensitive: ubuntu succeeds and
-		// Ubuntu returns `"code": "revision-not-found"`
-		os = strings.ToLower(sys.String())
-
-		oSeries = origin.Series
-	}
-
-	arch := fallbackArch
-	if origin.Architecture != "all" && origin.Architecture != "" {
-		arch = origin.Architecture
-	} else {
-		logger.Warningf("Architecture not in expected state, found %q, using fallback architecture %q. %s", origin.Architecture, arch, origin.ID)
-	}
-
 	o := origin
-	o.OS = os
-	o.Series = oSeries
-	o.Architecture = arch
+	if origin.Base.Name == "all" || origin.Base.Channel == "all" {
+		logger.Warningf("Release all detected, removing all from the origin. %s", origin.ID)
+		o.Base = params.Base{}
+	}
+
+	if origin.Architecture == "all" || origin.Architecture == "" {
+		logger.Warningf("Architecture not in expected state, found %q, using fallback architecture %q. %s", origin.Architecture, fallbackArch, origin.ID)
+		o.Architecture = fallbackArch
+	}
+
 	return o, nil
 }
 
@@ -249,79 +242,47 @@ func normalizeCharmOrigin(origin params.CharmOrigin, fallbackArch string) (param
 func (a *API) AddCharm(args params.AddCharmWithOrigin) (params.CharmOriginResult, error) {
 	logger.Tracef("AddCharm %+v", args)
 	return a.addCharmWithAuthorization(params.AddCharmWithAuth{
-		URL:                args.URL,
-		Origin:             args.Origin,
-		CharmStoreMacaroon: nil,
-		Force:              args.Force,
-		Series:             args.Series,
+		URL:    args.URL,
+		Origin: args.Origin,
+		Force:  args.Force,
 	})
 }
 
 // AddCharmWithAuthorization adds the given charm URL (which must include
 // revision) to the environment, if it does not exist yet. Local charms are
-// not supported, only charm store and charm hub URLs. See also AddLocalCharm().
+// not supported, only charm hub URLs. See also AddLocalCharm().
 //
-// The authorization macaroon, args.CharmStoreMacaroon, may be
-// omitted, in which case this call is equivalent to AddCharm.
-func (a *API) AddCharmWithAuthorization(args params.AddCharmWithAuth) (params.CharmOriginResult, error) {
+// Since the charm macaroons are no longer supported, this is the same as
+// AddCharm. We keep it for backwards compatibility in APIv5.
+func (a *APIv5) AddCharmWithAuthorization(args params.AddCharmWithAuth) (params.CharmOriginResult, error) {
 	logger.Tracef("AddCharmWithAuthorization %+v", args)
 	return a.addCharmWithAuthorization(args)
 }
 
 func (a *API) addCharmWithAuthorization(args params.AddCharmWithAuth) (params.CharmOriginResult, error) {
-	if args.Origin.Source != "charm-hub" && args.Origin.Source != "charm-store" {
+	if commoncharm.OriginSource(args.Origin.Source) != commoncharm.OriginCharmHub {
 		return params.CharmOriginResult{}, errors.Errorf("unknown schema for charm URL %q", args.URL)
 	}
 
-	if args.Origin.Source == "charm-hub" && args.Origin.Series == "" {
-		return params.CharmOriginResult{}, errors.BadRequestf("series required for charm-hub charms")
+	if args.Origin.Base.Name == "" || args.Origin.Base.Channel == "" {
+		return params.CharmOriginResult{}, errors.BadRequestf("base required for Charmhub charms")
 	}
 
 	if err := a.checkCanWrite(); err != nil {
 		return params.CharmOriginResult{}, err
 	}
 
-	// Only the Charmhub API gives us the metadata we need to support async
-	// charm downloads, so don't do it for legacy Charmstore ones.
-	if commoncharm.OriginSource(args.Origin.Source) == commoncharm.OriginCharmHub {
-		actualOrigin, err := a.queueAsyncCharmDownload(args)
-		if err != nil {
-			return params.CharmOriginResult{}, errors.Trace(err)
-		}
-
-		return params.CharmOriginResult{
-			Origin: convertOrigin(actualOrigin),
-		}, nil
-	}
-
-	charmURL, err := charm.ParseURL(args.URL)
-	if err != nil {
-		return params.CharmOriginResult{}, err
-	}
-
-	downloader, err := a.newDownloader(services.CharmDownloaderConfig{
-		Logger:             logger,
-		CharmhubHTTPClient: a.charmhubHTTPClient,
-		StorageFactory:     a.newStorage,
-		StateBackend:       a.backendState,
-		ModelBackend:       a.backendModel,
-	})
+	actualOrigin, err := a.queueAsyncCharmDownload(args)
 	if err != nil {
 		return params.CharmOriginResult{}, errors.Trace(err)
 	}
 
-	var macaroons macaroon.Slice
-	if args.CharmStoreMacaroon != nil {
-		macaroons = append(macaroons, args.CharmStoreMacaroon)
-	}
-
-	actualOrigin, err := downloader.DownloadAndStore(charmURL, convertParamsOrigin(args.Origin), macaroons, args.Force)
+	origin, err := convertOrigin(actualOrigin)
 	if err != nil {
 		return params.CharmOriginResult{}, errors.Trace(err)
 	}
-
 	return params.CharmOriginResult{
-		Origin: convertOrigin(actualOrigin),
+		Origin: origin,
 	}, nil
 }
 
@@ -331,15 +292,13 @@ func (a *API) queueAsyncCharmDownload(args params.AddCharmWithAuth) (corecharm.O
 		return corecharm.Origin{}, err
 	}
 
-	requestedOrigin := convertParamsOrigin(args.Origin)
-	repo, err := a.getCharmRepository(requestedOrigin.Source)
+	requestedOrigin, err := ConvertParamsOrigin(args.Origin)
 	if err != nil {
 		return corecharm.Origin{}, errors.Trace(err)
 	}
-
-	var macaroons macaroon.Slice
-	if args.CharmStoreMacaroon != nil {
-		macaroons = append(macaroons, args.CharmStoreMacaroon)
+	repo, err := a.getCharmRepository(requestedOrigin.Source)
+	if err != nil {
+		return corecharm.Origin{}, errors.Trace(err)
 	}
 
 	// Check if a charm doc already exists for this charm URL. If so, the
@@ -352,7 +311,7 @@ func (a *API) queueAsyncCharmDownload(args params.AddCharmWithAuth) (corecharm.O
 	// to ensure that the resolved origin has the ID/Hash fields correctly
 	// populated.
 	if _, err := a.backendState.Charm(charmURL); err == nil {
-		_, resolvedOrigin, err := repo.GetDownloadURL(charmURL, requestedOrigin, macaroons)
+		_, resolvedOrigin, err := repo.GetDownloadURL(charmURL, requestedOrigin)
 		return resolvedOrigin, errors.Trace(err)
 	}
 
@@ -360,9 +319,8 @@ func (a *API) queueAsyncCharmDownload(args params.AddCharmWithAuth) (corecharm.O
 	// without downloading the full archive. The remaining metadata will
 	// be populated once the charm gets downloaded.
 	essentialMeta, err := repo.GetEssentialMetadata(corecharm.MetadataRequest{
-		CharmURL:  charmURL,
-		Origin:    requestedOrigin,
-		Macaroons: macaroons,
+		CharmURL: charmURL,
+		Origin:   requestedOrigin,
 	})
 	if err != nil {
 		return corecharm.Origin{}, errors.Annotatef(err, "retrieving essential metadata for charm %q", charmURL)
@@ -370,49 +328,14 @@ func (a *API) queueAsyncCharmDownload(args params.AddCharmWithAuth) (corecharm.O
 	metaRes := essentialMeta[0]
 
 	_, err = a.backendState.AddCharmMetadata(state.CharmInfo{
-		Charm:    charmInfoAdapter{metaRes},
-		ID:       charmURL,
-		Macaroon: macaroons,
+		Charm: corecharm.NewCharmInfoAdapter(metaRes),
+		ID:    charmURL,
 	})
 	if err != nil {
 		return corecharm.Origin{}, errors.Trace(err)
 	}
 
 	return metaRes.ResolvedOrigin, nil
-}
-
-// charmInfoAdapter wraps an EssentialMetadata object and implements the
-// charm.Charm interface so it can be passed to state.AddCharm.
-type charmInfoAdapter struct {
-	meta corecharm.EssentialMetadata
-}
-
-func (adapter charmInfoAdapter) Meta() *charm.Meta {
-	return adapter.meta.Meta
-}
-
-func (adapter charmInfoAdapter) Manifest() *charm.Manifest {
-	return adapter.meta.Manifest
-}
-
-func (adapter charmInfoAdapter) Config() *charm.Config {
-	return adapter.meta.Config
-}
-
-func (adapter charmInfoAdapter) LXDProfile() *charm.LXDProfile {
-	return nil // not part of the essential metadata
-}
-
-func (adapter charmInfoAdapter) Metrics() *charm.Metrics {
-	return nil // not part of the essential metadata
-}
-
-func (adapter charmInfoAdapter) Actions() *charm.Actions {
-	return nil // not part of the essential metadata
-}
-
-func (adapter charmInfoAdapter) Revision() int {
-	return 0 // not part of the essential metadata
 }
 
 // ResolveCharms resolves the given charm URLs with an optionally specified
@@ -426,26 +349,32 @@ func (a *API) ResolveCharms(args params.ResolveCharmsWithChannel) (params.Resolv
 		Results: make([]params.ResolveCharmWithChannelResult, len(args.Resolve)),
 	}
 	for i, arg := range args.Resolve {
-		result.Results[i] = a.resolveOneCharm(arg, args.Macaroon)
+		result.Results[i] = a.resolveOneCharm(arg)
 	}
 
 	return result, nil
 }
 
-func (a *API) resolveOneCharm(arg params.ResolveCharmWithChannel, mac *macaroon.Macaroon) params.ResolveCharmWithChannelResult {
+func (a *API) resolveOneCharm(arg params.ResolveCharmWithChannel) params.ResolveCharmWithChannelResult {
 	result := params.ResolveCharmWithChannelResult{}
 	curl, err := charm.ParseURL(arg.Reference)
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result
 	}
-	if !charm.CharmHub.Matches(curl.Schema) && !charm.CharmStore.Matches(curl.Schema) {
+	if !charm.CharmHub.Matches(curl.Schema) {
 		result.Error = apiservererrors.ServerError(errors.Errorf("unknown schema for charm URL %q", curl.String()))
 		return result
 	}
 
+	requestedOrigin, err := ConvertParamsOrigin(arg.Origin)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
+	}
+
 	// Validate the origin passed in.
-	if err := validateOrigin(arg.Origin, curl.Schema, arg.SwitchCharm); err != nil {
+	if err := validateOrigin(requestedOrigin, curl, arg.SwitchCharm); err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result
 	}
@@ -456,19 +385,18 @@ func (a *API) resolveOneCharm(arg params.ResolveCharmWithChannel, mac *macaroon.
 		return result
 	}
 
-	var macaroons macaroon.Slice
-	if mac != nil {
-		macaroons = append(macaroons, mac)
-	}
-
-	resultURL, origin, supportedSeries, err := repo.ResolveWithPreferredChannel(curl, convertParamsOrigin(arg.Origin), macaroons)
+	resultURL, origin, supportedSeries, err := repo.ResolveWithPreferredChannel(curl, requestedOrigin)
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result
 	}
 	result.URL = resultURL.String()
 
-	apiOrigin := convertOrigin(origin)
+	apiOrigin, err := convertOrigin(origin)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
+	}
 
 	// The charmhub API can return "all" for architecture as it's not a real
 	// arch we don't know how to correctly model it. "all " doesn't mean use the
@@ -496,19 +424,22 @@ func (a *API) resolveOneCharm(arg params.ResolveCharmWithChannel, mac *macaroon.
 	return result
 }
 
-func validateOrigin(origin params.CharmOrigin, schema string, switchCharm bool) error {
+func validateOrigin(origin corecharm.Origin, curl *charm.URL, switchCharm bool) error {
+	if !charm.CharmHub.Matches(curl.Schema) {
+		return errors.Errorf("unknown schema for charm URL %q", curl.String())
+	}
 	// If we are switching to a different charm we can skip the following
 	// origin check; doing so allows us to switch from a charmstore charm
 	// to the equivalent charmhub charm.
 	if !switchCharm {
-		if (corecharm.Local.Matches(origin.Source) && !charm.Local.Matches(schema)) ||
-			(corecharm.CharmStore.Matches(origin.Source) && !charm.CharmStore.Matches(schema)) ||
-			(corecharm.CharmHub.Matches(origin.Source) && !charm.CharmHub.Matches(schema)) {
+		schema := curl.Schema
+		if (corecharm.Local.Matches(origin.Source.String()) && !charm.Local.Matches(schema)) ||
+			(corecharm.CharmHub.Matches(origin.Source.String()) && !charm.CharmHub.Matches(schema)) {
 			return errors.NotValidf("origin source %q with schema", origin.Source)
 		}
 	}
 
-	if corecharm.CharmHub.Matches(origin.Source) && origin.Architecture == "" {
+	if corecharm.CharmHub.Matches(origin.Source.String()) && origin.Platform.Architecture == "" {
 		return errors.NotValidf("empty architecture")
 	}
 	return nil
@@ -737,12 +668,11 @@ func (a *API) listOneCharmResources(arg params.CharmURLAndOrigin) ([]params.Char
 		return nil, apiservererrors.ServerError(err)
 	}
 
-	var macaroons macaroon.Slice
-	if arg.Macaroon != nil {
-		macaroons = append(macaroons, arg.Macaroon)
+	requestedOrigin, err := ConvertParamsOrigin(charmOrigin)
+	if err != nil {
+		return nil, apiservererrors.ServerError(err)
 	}
-
-	resources, err := repo.ListResources(curl, convertParamsOrigin(charmOrigin), macaroons)
+	resources, err := repo.ListResources(curl, requestedOrigin)
 	if err != nil {
 		return nil, apiservererrors.ServerError(err)
 	}

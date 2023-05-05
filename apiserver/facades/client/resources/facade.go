@@ -4,8 +4,8 @@
 package resources
 
 import (
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
@@ -13,13 +13,13 @@ import (
 	apiresources "github.com/juju/juju/api/client/resources"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/apiserver/facades/client/charms"
 	"github.com/juju/juju/charmhub"
-	"github.com/juju/juju/charmstore"
 	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/core/charm/repository"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/resources"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 var logger = loggo.GetLogger("juju.apiserver.resources")
@@ -44,7 +44,7 @@ type API struct {
 	factory func(*charm.URL) (NewCharmRepository, error)
 }
 
-// NewFacadeV2 creates a public API facade for resources. It is
+// NewFacade creates a public API facade for resources. It is
 // used for API registration.
 func NewFacade(ctx facade.Context) (*API, error) {
 	authorizer := ctx.Auth()
@@ -54,11 +54,6 @@ func NewFacade(ctx facade.Context) (*API, error) {
 
 	st := ctx.State()
 	rst := st.Resources()
-
-	controllerCfg, err := st.ControllerConfig()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 
 	m, err := st.Model()
 	if err != nil {
@@ -82,16 +77,7 @@ func NewFacade(ctx facade.Context) (*API, error) {
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			return newCharmHubClient(chClient, logger.ChildWithLabels("charmhub", corelogger.CHARMHUB)), nil
-
-		case charm.CharmStore.Matches(schema):
-			cl, err := charmstore.NewCachingClient(state.MacaroonCache{
-				MacaroonCacheState: st,
-			}, controllerCfg.CharmStoreURL())
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			return newCharmStoreClient(cl), nil
+			return repository.NewCharmHubRepository(logger.ChildWithLabels("charmhub", corelogger.CHARMHUB), chClient), nil
 
 		case charm.Local.Matches(schema):
 			return &localClient{}, nil
@@ -158,7 +144,7 @@ func (a *API) ListResources(args params.ListResourcesArgs) (params.ResourcesResu
 
 // AddPendingResources adds the provided resources (info) to the Juju
 // model in a pending state, meaning they are not available until
-// resolved. Handles CharmHub, CharmStore and Local charms.
+// resolved. Handles CharmHub and Local charms.
 func (a *API) AddPendingResources(args params.AddPendingResourcesArgsV2) (params.AddPendingResourcesResult, error) {
 	var result params.AddPendingResourcesResult
 
@@ -169,7 +155,12 @@ func (a *API) AddPendingResources(args params.AddPendingResourcesArgsV2) (params
 	}
 	applicationID := tag.Id()
 
-	ids, err := a.addPendingResources(applicationID, args.URL, convertParamsOrigin(args.CharmOrigin), args.Resources)
+	requestedOrigin, err := charms.ConvertParamsOrigin(args.CharmOrigin)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result, nil
+	}
+	ids, err := a.addPendingResources(applicationID, args.URL, requestedOrigin, args.Resources)
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result, nil
@@ -193,7 +184,7 @@ func (a *API) addPendingResources(appName, chRef string, origin corecharm.Origin
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		id := CharmID{
+		id := corecharm.CharmID{
 			URL:    cURL,
 			Origin: origin,
 		}
@@ -246,29 +237,5 @@ func errorResult(err error) params.ResourcesResult {
 		ErrorResult: params.ErrorResult{
 			Error: apiservererrors.ServerError(err),
 		},
-	}
-}
-
-func convertParamsOrigin(origin params.CharmOrigin) corecharm.Origin {
-	var track string
-	if origin.Track != nil {
-		track = *origin.Track
-	}
-	return corecharm.Origin{
-		Source:   corecharm.Source(origin.Source),
-		Type:     origin.Type,
-		ID:       origin.ID,
-		Hash:     origin.Hash,
-		Revision: origin.Revision,
-		Channel: &charm.Channel{
-			Track: track,
-			Risk:  charm.Risk(origin.Risk),
-		},
-		Platform: corecharm.Platform{
-			Architecture: origin.Architecture,
-			OS:           origin.OS,
-			Series:       origin.Series,
-		},
-		InstanceKey: origin.InstanceKey,
 	}
 }

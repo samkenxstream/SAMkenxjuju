@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/juju/charm/v9"
-	charmresource "github.com/juju/charm/v9/resource"
+	"github.com/juju/charm/v10"
+	charmresource "github.com/juju/charm/v10/resource"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
@@ -86,7 +86,7 @@ type CharmParams struct {
 
 // Params for creating a machine.
 type MachineParams struct {
-	Series          string
+	Base            state.Base
 	Jobs            []state.MachineJob
 	Password        string
 	Nonce           string
@@ -268,8 +268,8 @@ func (factory *Factory) paramsFillDefaults(c *gc.C, params *MachineParams) *Mach
 	if params == nil {
 		params = &MachineParams{}
 	}
-	if params.Series == "" {
-		params.Series = "quantal"
+	if params.Base.String() == "" {
+		params.Base = state.UbuntuBase("12.10")
 	}
 	if params.Nonce == "" {
 		params.Nonce = "nonce"
@@ -302,7 +302,7 @@ func (factory *Factory) paramsFillDefaults(c *gc.C, params *MachineParams) *Mach
 func (factory *Factory) MakeMachineNested(c *gc.C, parentId string, params *MachineParams) *state.Machine {
 	params = factory.paramsFillDefaults(c, params)
 	machineTemplate := state.MachineTemplate{
-		Series:      params.Series,
+		Base:        params.Base,
 		Jobs:        params.Jobs,
 		Volumes:     params.Volumes,
 		Filesystems: params.Filesystems,
@@ -317,7 +317,7 @@ func (factory *Factory) MakeMachineNested(c *gc.C, parentId string, params *Mach
 	c.Assert(err, jc.ErrorIsNil)
 	err = m.SetProvisioned(params.InstanceId, params.DisplayName, params.Nonce, params.Characteristics)
 	c.Assert(err, jc.ErrorIsNil)
-	current := testing.CurrentVersion(c)
+	current := testing.CurrentVersion()
 	err = m.SetAgentVersion(current)
 	c.Assert(err, jc.ErrorIsNil)
 	return m
@@ -361,7 +361,7 @@ func (factory *Factory) MakeUnprovisionedMachineReturningPassword(c *gc.C, param
 
 func (factory *Factory) makeMachineReturningPassword(c *gc.C, params *MachineParams, setProvisioned bool) (*state.Machine, string) {
 	machineTemplate := state.MachineTemplate{
-		Series:      params.Series,
+		Base:        params.Base,
 		Jobs:        params.Jobs,
 		Volumes:     params.Volumes,
 		Filesystems: params.Filesystems,
@@ -383,7 +383,7 @@ func (factory *Factory) makeMachineReturningPassword(c *gc.C, params *MachinePar
 		err := machine.SetProviderAddresses(params.Addresses...)
 		c.Assert(err, jc.ErrorIsNil)
 	}
-	current := testing.CurrentVersion(c)
+	current := testing.CurrentVersion()
 	err = machine.SetAgentVersion(current)
 	c.Assert(err, jc.ErrorIsNil)
 	return machine, params.Password
@@ -393,9 +393,11 @@ func (factory *Factory) makeMachineReturningPassword(c *gc.C, params *MachinePar
 // Sensible default values are substituted for missing ones.
 // Supported charms depend on the charm/testing package.
 // Currently supported charms:
-//   all-hooks, category, dummy, logging, monitoring, mysql,
-//   mysql-alternative, riak, terracotta, upgrade1, upgrade2, varnish,
-//   varnish-alternative, wordpress.
+//
+//	all-hooks, category, dummy, logging, monitoring, mysql,
+//	mysql-alternative, riak, terracotta, upgrade1, upgrade2, varnish,
+//	varnish-alternative, wordpress.
+//
 // If params is not specified, defaults are used.
 func (factory *Factory) MakeCharm(c *gc.C, params *CharmParams) *state.Charm {
 	if params == nil {
@@ -411,7 +413,7 @@ func (factory *Factory) MakeCharm(c *gc.C, params *CharmParams) *state.Charm {
 		params.Revision = fmt.Sprintf("%d", uniqueInteger())
 	}
 	if params.URL == "" {
-		params.URL = fmt.Sprintf("cs:%s/%s-%s", params.Series, params.Name, params.Revision)
+		params.URL = fmt.Sprintf("ch:amd64/%s/%s-%s", params.Series, params.Name, params.Revision)
 	}
 
 	ch := testcharms.RepoForSeries(params.Series).CharmDir(params.Name)
@@ -491,6 +493,33 @@ func (factory *Factory) MakeApplicationReturningPassword(c *gc.C, params *Applic
 		params.Password, err = utils.RandomPassword()
 		c.Assert(err, jc.ErrorIsNil)
 	}
+	if params.CharmOrigin == nil {
+		curl := params.Charm.URL()
+		chSeries := curl.Series
+		// Legacy k8s charms - assume ubuntu focal.
+		if chSeries == "kubernetes" {
+			chSeries = coreseries.LegacyKubernetesSeries()
+		}
+		base, err := coreseries.GetBaseFromSeries(chSeries)
+		c.Assert(err, jc.ErrorIsNil)
+		var channel *state.Channel
+		var source string
+		// local charms cannot have a channel
+		if charm.CharmHub.Matches(curl.Schema) {
+			channel = &state.Channel{Risk: "stable"}
+			source = "charm-hub"
+		} else if charm.Local.Matches(curl.Schema) {
+			source = "local"
+		}
+		params.CharmOrigin = &state.CharmOrigin{
+			Channel: channel,
+			Source:  source,
+			Platform: &state.Platform{
+				Architecture: params.Charm.URL().Architecture,
+				OS:           base.OS,
+				Channel:      base.Channel.String(),
+			}}
+	}
 
 	rSt := factory.st.Resources()
 
@@ -510,8 +539,7 @@ func (factory *Factory) MakeApplicationReturningPassword(c *gc.C, params *Applic
 		Name:              params.Name,
 		Charm:             params.Charm,
 		CharmOrigin:       params.CharmOrigin,
-		Series:            params.Charm.URL().Series,
-		CharmConfig:       charm.Settings(params.CharmConfig),
+		CharmConfig:       params.CharmConfig,
 		ApplicationConfig: appConfig,
 		Storage:           params.Storage,
 		Constraints:       params.Constraints,
@@ -547,7 +575,7 @@ func (factory *Factory) MakeApplicationReturningPassword(c *gc.C, params *Applic
 		agentTools := version.Binary{
 			Number:  jujuversion.Current,
 			Arch:    arch.HostArch(),
-			Release: coreseries.DefaultOSTypeNameFromSeries(application.Series()),
+			Release: application.CharmOrigin().Platform.OS,
 		}
 		err = application.SetAgentVersion(agentTools)
 		c.Assert(err, jc.ErrorIsNil)
@@ -584,8 +612,9 @@ func (factory *Factory) MakeUnitReturningPassword(c *gc.C, params *UnitParams) (
 		if params.Machine == nil {
 			var mParams *MachineParams
 			if params.Application != nil {
+				platform := params.Application.CharmOrigin().Platform
 				mParams = &MachineParams{
-					Series: params.Application.Series(),
+					Base: state.Base{OS: platform.OS, Channel: platform.Channel},
 				}
 			}
 			params.Machine = factory.MakeMachine(c, mParams)
@@ -604,7 +633,6 @@ func (factory *Factory) MakeUnitReturningPassword(c *gc.C, params *UnitParams) (
 		params.Application = factory.MakeApplication(c, &ApplicationParams{
 			Constraints: params.Constraints,
 			Charm:       ch,
-			CharmOrigin: &state.CharmOrigin{},
 		})
 	}
 	if params.Password == "" {
@@ -624,7 +652,7 @@ func (factory *Factory) MakeUnitReturningPassword(c *gc.C, params *UnitParams) (
 		agentTools := version.Binary{
 			Number:  jujuversion.Current,
 			Arch:    arch.HostArch(),
-			Release: coreseries.DefaultOSTypeNameFromSeries(params.Application.Series()),
+			Release: params.Application.CharmOrigin().Platform.OS,
 		}
 		err = unit.SetAgentVersion(agentTools)
 		c.Assert(err, jc.ErrorIsNil)
@@ -663,7 +691,7 @@ func (factory *Factory) MakeMetric(c *gc.C, params *MetricParams) *state.MetricB
 		params = &MetricParams{}
 	}
 	if params.Unit == nil {
-		meteredCharm := factory.MakeCharm(c, &CharmParams{Name: "metered", URL: "cs:quantal/metered"})
+		meteredCharm := factory.MakeCharm(c, &CharmParams{Name: "metered", URL: "ch:quantal/metered"})
 		meteredApplication := factory.MakeApplication(c, &ApplicationParams{Charm: meteredCharm})
 		params.Unit = factory.MakeUnit(c, &UnitParams{Application: meteredApplication, SetCharmURL: true})
 	}

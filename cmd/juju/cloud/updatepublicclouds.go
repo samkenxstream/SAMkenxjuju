@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"sort"
 	"strings"
@@ -48,15 +47,12 @@ Use --controller option to update public cloud(s) on a controller. The command
 will only update the clouds that a controller knows about. 
 
 Use --client to update a definition of public cloud(s) on this client.
+`
 
-Examples:
-
+const updatePublicCloudsExamples = `
     juju update-public-clouds
     juju update-public-clouds --client
     juju update-public-clouds --controller mycontroller
-
-See also:
-    clouds
 `
 
 // NewUpdatePublicCloudsCommand returns a command to update cloud information.
@@ -80,9 +76,13 @@ func newUpdatePublicCloudsCommand() cmd.Command {
 
 func (c *updatePublicCloudsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "update-public-clouds",
-		Purpose: "Updates public cloud information available to Juju.",
-		Doc:     updatePublicCloudsDoc,
+		Name:     "update-public-clouds",
+		Purpose:  "Updates public cloud information available to Juju.",
+		Doc:      updatePublicCloudsDoc,
+		Examples: updatePublicCloudsExamples,
+		SeeAlso: []string{
+			"clouds",
+		},
 	})
 }
 
@@ -269,7 +269,7 @@ func (c *updatePublicCloudsCommand) cloudAPI() (updatePublicCloudAPI, error) {
 }
 
 func decodeCheckSignature(r io.Reader, publicKey string) ([]byte, error) {
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}

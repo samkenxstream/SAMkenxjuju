@@ -5,11 +5,12 @@ package modelupgrader
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v3"
 	"github.com/juju/names/v4"
-	"github.com/juju/replicaset/v2"
+	"github.com/juju/replicaset/v3"
 	"github.com/juju/version/v2"
 
+	"github.com/juju/juju/controller"
 	"github.com/juju/juju/state"
 )
 
@@ -17,6 +18,7 @@ import (
 // pool.
 type StatePool interface {
 	Get(string) (State, error)
+	ControllerModel() (Model, error)
 	MongoVersion() (string, error)
 }
 
@@ -26,10 +28,16 @@ type State interface {
 	HasUpgradeSeriesLocks() (bool, error)
 	Release() bool
 	AllModelUUIDs() ([]string, error)
-	MachineCountForSeries(series ...string) (map[string]int, error)
+	MachineCountForBase(base ...state.Base) (map[string]int, error)
 	MongoCurrentStatus() (*replicaset.Status, error)
 	SetModelAgentVersion(newVersion version.Number, stream *string, ignoreAgentVersions bool) error
 	AbortCurrentUpgrade() error
+	ControllerConfig() (controller.Config, error)
+	AllCharmURLs() ([]*string, error)
+}
+
+type SystemState interface {
+	ControllerModel() (Model, error)
 }
 
 // Model defines a point of use interface for the model from state.
@@ -39,10 +47,25 @@ type Model interface {
 	Owner() names.UserTag
 	Name() string
 	MigrationMode() state.MigrationMode
+	Type() state.ModelType
 }
 
 type statePoolShim struct {
 	*state.StatePool
+}
+
+func (s statePoolShim) ControllerModel() (Model, error) {
+	st, err := s.StatePool.SystemState()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	model, err := st.Model()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return modelShim{
+		Model: model,
+	}, nil
 }
 
 func (s statePoolShim) Get(uuid string) (State, error) {
@@ -78,8 +101,8 @@ func (s stateShim) Model() (Model, error) {
 	}, nil
 }
 
-func (s stateShim) MachineCountForSeries(series ...string) (map[string]int, error) {
-	count, err := s.PooledState.MachineCountForSeries(series...)
+func (s stateShim) MachineCountForBase(base ...state.Base) (map[string]int, error) {
+	count, err := s.PooledState.MachineCountForBase(base...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -107,6 +130,10 @@ func (s stateShim) MongoCurrentStatus() (*replicaset.Status, error) {
 		s.mgosession = s.PooledState.MongoSession()
 	}
 	return replicaset.CurrentStatus(s.mgosession)
+}
+
+func (s stateShim) AllCharmURLs() ([]*string, error) {
+	return s.PooledState.AllCharmURLs()
 }
 
 type modelShim struct {

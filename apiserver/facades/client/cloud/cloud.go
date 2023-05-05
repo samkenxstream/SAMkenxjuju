@@ -1,8 +1,6 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package cloud defines an API end point for functions dealing with
-// the controller's cloud definition, and cloud credentials.
 package cloud
 
 import (
@@ -13,7 +11,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/names/v4"
-	"github.com/juju/txn/v2"
+	jujutxn "github.com/juju/txn/v3"
 
 	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/common/credentialcommon"
@@ -53,6 +51,7 @@ type CloudAPI struct {
 	ctlrBackend            Backend
 	authorizer             facade.Authorizer
 	apiUser                names.UserTag
+	isAdmin                bool
 	getCredentialsAuthFunc common.GetAuthFunc
 	pool                   ModelPoolBackend
 }
@@ -68,12 +67,12 @@ func NewCloudAPI(backend, ctlrBackend Backend, pool ModelPoolBackend, authorizer
 		return nil, apiservererrors.ErrPerm
 	}
 
+	isAdmin, err := authorizer.HasPermission(permission.SuperuserAccess, backend.ControllerTag())
+	if err != nil && !errors.IsNotFound(err) {
+		return nil, err
+	}
 	authUser, _ := authorizer.GetAuthTag().(names.UserTag)
 	getUserAuthFunc := func() (common.AuthFunc, error) {
-		isAdmin, err := authorizer.HasPermission(permission.SuperuserAccess, backend.ControllerTag())
-		if err != nil && !errors.IsNotFound(err) {
-			return nil, err
-		}
 		return func(tag names.Tag) bool {
 			userTag, ok := tag.(names.UserTag)
 			if !ok {
@@ -88,6 +87,7 @@ func NewCloudAPI(backend, ctlrBackend Backend, pool ModelPoolBackend, authorizer
 		authorizer:             authorizer,
 		getCredentialsAuthFunc: getUserAuthFunc,
 		apiUser:                authUser,
+		isAdmin:                isAdmin,
 		pool:                   pool,
 	}, nil
 }
@@ -299,7 +299,7 @@ func (api *CloudAPI) ListCloudInfo(req params.ListCloudsRequest) (params.ListClo
 		return result, errors.Trace(err)
 	}
 
-	cloudInfos, err := api.ctlrBackend.CloudsForUser(userTag, req.All)
+	cloudInfos, err := api.ctlrBackend.CloudsForUser(userTag, req.All && api.isAdmin)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
@@ -1006,7 +1006,7 @@ func grantCloudAccess(backend Backend, cloud string, targetUserTag names.UserTag
 		cloudAccess, err := backend.GetCloudAccess(cloud, targetUserTag)
 		if errors.IsNotFound(err) {
 			// Conflicts with prior check, must be inconsistent state.
-			err = txn.ErrExcessiveContention
+			err = jujutxn.ErrExcessiveContention
 		}
 		if err != nil {
 			return errors.Annotate(err, "could not look up cloud access for user")

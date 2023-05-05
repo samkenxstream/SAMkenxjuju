@@ -25,7 +25,6 @@ import (
 
 type workerSuite struct {
 	jujutesting.JujuConnSuite
-	stateMachine  *state.Machine
 	machine       *state.Machine
 	keyupdaterAPI *keyupdater.State
 
@@ -82,7 +81,6 @@ func (s *workerSuite) setAuthorisedKeys(c *gc.C, keys ...string) {
 	keyStr := strings.Join(keys, "\n")
 	err := s.Model.UpdateModelConfig(map[string]interface{}{"authorized-keys": keyStr}, nil)
 	c.Assert(err, jc.ErrorIsNil)
-	s.BackingState.StartSync()
 }
 
 func (s *workerSuite) waitSSHKeys(c *gc.C, expected []string) {

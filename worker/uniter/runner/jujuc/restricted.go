@@ -6,7 +6,7 @@ package jujuc
 import (
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 
@@ -38,7 +38,7 @@ func (*RestrictedContext) GetCharmState() (map[string]string, error) {
 	return nil, ErrRestrictedContext
 }
 
-// GetSingleCharmStateValue implements jujuc.unitCharmStateContext.
+// GetCharmStateValue implements jujuc.unitCharmStateContext.
 func (*RestrictedContext) GetCharmStateValue(string) (string, error) {
 	return "", ErrRestrictedContext
 }
@@ -254,26 +254,34 @@ func (*RestrictedContext) WorkloadName() (string, error) {
 }
 
 // GetSecret implements runner.Context.
-func (ctx *RestrictedContext) GetSecret(ID string) (secrets.SecretValue, error) {
+func (ctx *RestrictedContext) GetSecret(*secrets.URI, string, bool, bool) (secrets.SecretValue, error) {
 	return nil, ErrRestrictedContext
 }
 
 // CreateSecret implements runner.Context.
-func (ctx *RestrictedContext) CreateSecret(name string, args *SecretUpsertArgs) (string, error) {
-	return "", ErrRestrictedContext
+func (ctx *RestrictedContext) CreateSecret(args *SecretCreateArgs) (*secrets.URI, error) {
+	return nil, ErrRestrictedContext
 }
 
 // UpdateSecret implements runner.Context.
-func (ctx *RestrictedContext) UpdateSecret(name string, args *SecretUpsertArgs) (string, error) {
-	return "", ErrRestrictedContext
+func (ctx *RestrictedContext) UpdateSecret(*secrets.URI, *SecretUpdateArgs) error {
+	return ErrRestrictedContext
+}
+
+func (ctx *RestrictedContext) RemoveSecret(*secrets.URI, *int) error {
+	return ErrRestrictedContext
+}
+
+func (ctx *RestrictedContext) SecretMetadata() (map[string]SecretMetadata, error) {
+	return nil, ErrRestrictedContext
 }
 
 // GrantSecret implements runner.Context.
-func (c *RestrictedContext) GrantSecret(name string, args *SecretGrantRevokeArgs) error {
-	return nil
+func (c *RestrictedContext) GrantSecret(*secrets.URI, *SecretGrantRevokeArgs) error {
+	return ErrRestrictedContext
 }
 
 // RevokeSecret implements runner.Context.
-func (c *RestrictedContext) RevokeSecret(name string, args *SecretGrantRevokeArgs) error {
-	return nil
+func (c *RestrictedContext) RevokeSecret(*secrets.URI, *SecretGrantRevokeArgs) error {
+	return ErrRestrictedContext
 }

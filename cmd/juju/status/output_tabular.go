@@ -13,8 +13,8 @@ import (
 
 	"github.com/docker/distribution/reference"
 	"github.com/juju/ansiterm"
-	"github.com/juju/charm/v9"
-	"github.com/juju/charm/v9/hooks"
+	"github.com/juju/charm/v10"
+	"github.com/juju/charm/v10/hooks"
 	"github.com/juju/errors"
 	"github.com/juju/naturalsort"
 	"github.com/juju/version/v2"
@@ -25,6 +25,7 @@ import (
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/series"
 	"github.com/juju/juju/core/status"
 	jujuversion "github.com/juju/juju/version"
 )
@@ -34,6 +35,7 @@ const (
 	ellipsis            = "..."
 	iaasMaxVersionWidth = 15
 	caasMaxVersionWidth = 30
+	maxMessageLength    = 120
 )
 
 // FormatTabular writes a tabular summary of machines, applications, and
@@ -72,7 +74,7 @@ func FormatTabular(writer io.Writer, forceColor bool, value interface{}) error {
 	}
 	if message != "" {
 		header = append(header, "Notes")
-		values = append(values, message)
+		values = append(values, truncateMessage(message))
 	}
 	// The first set of headers don't use outputHeaders because it adds the blank line.
 	w := startSection(tw, true, header...)
@@ -230,7 +232,7 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 			w.Print("no")
 		}
 
-		w.PrintColorNoTab(output.EmphasisHighlight.Gray, app.StatusInfo.Message)
+		w.PrintColorNoTab(output.EmphasisHighlight.Gray, truncateMessage(app.StatusInfo.Message))
 		w.Println()
 		for un, u := range app.Units {
 			units[un] = u
@@ -264,14 +266,14 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 		if fs.Model.Type == caasModelType {
 			w.PrintColor(output.InfoHighlight, u.Address)
 			printPorts(w, u.OpenedPorts)
-			w.PrintColorNoTab(output.EmphasisHighlight.Gray, message)
+			w.PrintColorNoTab(output.EmphasisHighlight.Gray, truncateMessage(message))
 			w.Println()
 			return
 		}
 		w.Print(u.Machine)
 		w.PrintColor(output.InfoHighlight, u.PublicAddress)
 		printPorts(w, u.OpenedPorts)
-		w.PrintColorNoTab(output.EmphasisHighlight.Gray, message)
+		w.PrintColorNoTab(output.EmphasisHighlight.Gray, truncateMessage(message))
 		w.Println()
 	}
 
@@ -299,7 +301,7 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 		w.Print("model")
 		outputColor := fromMeterStatusColor(fs.Model.MeterStatus.Color)
 		w.PrintColor(outputColor, fs.Model.MeterStatus.Color)
-		w.PrintColor(outputColor, fs.Model.MeterStatus.Message)
+		w.PrintColor(outputColor, truncateMessage(fs.Model.MeterStatus.Message))
 		w.Println()
 	}
 	for _, name := range naturalsort.Sort(stringKeysFromMap(units)) {
@@ -308,7 +310,7 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 			w.Print(name)
 			outputColor := fromMeterStatusColor(u.MeterStatus.Color)
 			w.PrintColor(outputColor, u.MeterStatus.Color)
-			w.PrintColor(outputColor, u.MeterStatus.Message)
+			w.PrintColor(outputColor, truncateMessage(u.MeterStatus.Message))
 			w.Println()
 		}
 	}
@@ -509,15 +511,19 @@ func printRelations(tw *ansiterm.TabWriter, relations []relationStatus) {
 
 	for _, r := range relations {
 		provider := strings.Split(r.Provider, ":")
-		w.PrintNoTab(provider[0])                                                       //the service name (mysql)
-		w.PrintColor(output.EmphasisHighlight.Magenta, fmt.Sprintf(":%s", provider[1])) //the resource type (:cluster)
+		w.PrintNoTab(provider[0]) //the service name (mysql)
+		if len(provider) > 1 {
+			w.PrintColor(output.EmphasisHighlight.Magenta, fmt.Sprintf(":%s", provider[1])) //the resource type (:cluster)
+		}
 		requirer := strings.Split(r.Requirer, ":")
-		w.PrintNoTab(requirer[0])                                                       //the service name (mysql)
-		w.PrintColor(output.EmphasisHighlight.Magenta, fmt.Sprintf(":%s", requirer[1])) //the resource type (:cluster)
+		w.PrintNoTab(requirer[0]) //the service name (mysql)
+		if len(requirer) > 1 {
+			w.PrintColor(output.EmphasisHighlight.Magenta, fmt.Sprintf(":%s", requirer[1])) //the resource type (:cluster)
+		}
 		w.Print(r.Interface, r.Type)
 		if r.Status != string(relation.Joined) {
 			w.PrintColor(cmdcrossmodel.RelationStatusColor(relation.Status(r.Status)), r.Status)
-			w.PrintColorNoTab(output.EmphasisHighlight.Gray, r.Message)
+			w.PrintColorNoTab(output.EmphasisHighlight.Gray, truncateMessage(r.Message))
 		}
 		w.Println()
 	}
@@ -588,7 +594,7 @@ func getModelMessage(model modelStatus) string {
 }
 
 func printMachines(tw *ansiterm.TabWriter, standAlone bool, machines map[string]machineStatus) {
-	w := startSection(tw, standAlone, "Machine", "State", "Address", "Inst id", "Series", "AZ", "Message")
+	w := startSection(tw, standAlone, "Machine", "State", "Address", "Inst id", "Base", "AZ", "Message")
 	for _, name := range naturalsort.Sort(stringKeysFromMap(machines)) {
 		printMachine(w, machines[name])
 	}
@@ -611,9 +617,16 @@ func printMachine(w *output.Wrapper, m machineStatus) {
 	w.Print(m.Id)
 	w.PrintStatus(status)
 	w.PrintColor(output.InfoHighlight, m.DNSName)
-	w.Print(m.machineName(), m.Series, az)
+	baseStr := ""
+	if m.Base != nil {
+		base, err := series.ParseBase(m.Base.Name, m.Base.Channel)
+		if err == nil {
+			baseStr = base.DisplayString()
+		}
+	}
+	w.Print(m.machineName(), baseStr, az)
 	if message != "" { //some unit tests were failing because of the printed empty string .
-		w.PrintColorNoTab(output.EmphasisHighlight.Gray, message)
+		w.PrintColorNoTab(output.EmphasisHighlight.Gray, truncateMessage(message))
 	}
 	w.Println()
 
@@ -624,8 +637,8 @@ func printMachine(w *output.Wrapper, m machineStatus) {
 
 // Apply some rules around what we show in the tabular format
 // Rules:
-//  - if the modification-status is in error mode, then show that over the
-//    juju status and machine status message
+//   - if the modification-status is in error mode, then show that over the
+//     juju status and machine status message
 func getStatusAndMessageFromMachineStatus(m machineStatus) (status.Status, string) {
 	currentStatus := m.JujuStatus.Current
 	currentMessage := m.MachineStatus.Message
@@ -678,4 +691,12 @@ func agentDoing(agentStatus statusInfoContents) string {
 		return match[1]
 	}
 	return ""
+}
+
+// truncateMessage truncates the given message if it is too long.
+func truncateMessage(msg string) string {
+	if len(msg) > maxMessageLength {
+		return msg[:maxMessageLength-len(ellipsis)] + ellipsis
+	}
+	return msg
 }

@@ -148,35 +148,30 @@ Further reading:
 
     https://juju.is/docs/relations
     https://juju.is/docs/cross-model-relations
+`
 
+const integrateExamples = `
+Integrate wordpress and percona-cluster, asking Juju to resolve
+ the endpoint names. Expands to "wordpress:db" (with the requires role) and
+ "percona-cluster:server" (with the provides role).
 
-Examples:
-   
-    # Integrate wordpress and percona-cluster, asking Juju to resolve
-    # the endpoint names. Expands to "wordpress:db" (with the requires role) and
-    # "percona-cluster:server" (with the provides role).
     juju integrate wordpress percona-cluster
 
-    # Integrate wordpress and postgresql, using an explicit
-    # endpoint name.
+Integrate wordpress and postgresql, using an explicit
+endpoint name.
+
     juju integrate wordpress postgresql:db
 
-    # Integrate an etcd instance within the current model to centrally managed
-    # EasyRSA Certificate Authority hosted in the "secrets" model
+Integrate an etcd instance within the current model to centrally managed
+EasyRSA Certificate Authority hosted in the "secrets" model.
+
     juju integrate etcd secrets.easyrsa
 
-    # Integrate a wordpress application with a mysql application hosted within the
-    # "prod" model, using the "automation" user. Facilitate firewall management
-    # by specifying the routes used for integration data.
+Integrate a wordpress application with a mysql application hosted within the
+"prod" model, using the "automation" user. Facilitate firewall management
+by specifying the routes used for integration data.
+
     juju integrate wordpress automation/prod.mysql --via 192.168.0.0/16,10.0.0.0/8
-
-
-See also:
-
-    consume
-    find-offers
-    set-firewall-rule
-    suspend-integration
 `
 
 var localEndpointRegEx = regexp.MustCompile("^" + names.RelationSnippet + "$")
@@ -199,11 +194,17 @@ type addRelationCommand struct {
 
 func (c *addRelationCommand) Info() *cmd.Info {
 	addCmd := &cmd.Info{
-		Name:    "integrate",
-		Aliases: []string{"relate", "add-relation"},
-		Args:    "<application>[:<relation>] <application>[:<relation>]",
-		Purpose: "Integrate two applications.",
-		Doc:     integrateDoc,
+		Name:     "integrate",
+		Aliases:  []string{"relate"},
+		Args:     "<application>[:<relation>] <application>[:<relation>]",
+		Purpose:  "Integrate two applications.",
+		Doc:      integrateDoc,
+		Examples: integrateExamples,
+		SeeAlso: []string{
+			"consume",
+			"find-offers",
+			"set-firewall-rule",
+		},
 	}
 	return jujucmd.Info(addCmd)
 }
@@ -293,7 +294,7 @@ func (c *addRelationCommand) Run(ctx *cmd.Context) error {
 		splitError := strings.Join(strings.Split(err.Error(), ": "), "\n")
 		infoErr := errors.Errorf(`
 
-Use 'juju status --integrations' to view the current integrations.`)
+Use 'juju status --relations' to view the current relations.`)
 		return errors.Annotatef(infoErr, splitError)
 	}
 	if err != nil {
@@ -343,6 +344,7 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 		Offer:            *consumeDetails.Offer,
 		ApplicationAlias: c.remoteEndpoint.ApplicationName,
 		Macaroon:         consumeDetails.Macaroon,
+		AuthToken:        consumeDetails.AuthToken,
 	}
 	if consumeDetails.ControllerInfo != nil {
 		controllerTag, err := names.ParseControllerTag(consumeDetails.ControllerInfo.ControllerTag)

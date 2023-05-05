@@ -41,16 +41,6 @@ func (s *machineSuite) TearDownTest(c *gc.C) {
 	s.firewallerSuite.TearDownTest(c)
 }
 
-func (s *machineSuite) assertRemoveMachinePortsDoc(c *gc.C, p state.MachinePortRanges) {
-	type remover interface {
-		Remove() error
-	}
-
-	portRemover, supports := p.(remover)
-	c.Assert(supports, jc.IsTrue, gc.Commentf("machine ports interface does not implement Remove()"))
-	c.Assert(portRemover.Remove(), jc.ErrorIsNil)
-}
-
 func (s *machineSuite) TestMachine(c *gc.C) {
 	apiMachine42, err := s.firewaller.Machine(names.NewMachineTag("42"))
 	c.Assert(err, gc.ErrorMatches, "machine 42 not found")
@@ -69,7 +59,7 @@ func (s *machineSuite) TestTag(c *gc.C) {
 func (s *machineSuite) TestInstanceId(c *gc.C) {
 	// Add another, not provisioned machine to test
 	// CodeNotProvisioned.
-	newMachine, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	newMachine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	apiNewMachine, err := s.firewaller.Machine(newMachine.Tag().(names.MachineTag))
 	c.Assert(err, jc.ErrorIsNil)
@@ -85,7 +75,7 @@ func (s *machineSuite) TestInstanceId(c *gc.C) {
 func (s *machineSuite) TestWatchUnits(c *gc.C) {
 	w, err := s.apiMachine.WatchUnits()
 	c.Assert(err, jc.ErrorIsNil)
-	wc := watchertest.NewStringsWatcherC(c, w, s.BackingState.StartSync)
+	wc := watchertest.NewStringsWatcherC(c, w)
 	defer wc.AssertStops()
 
 	// Initial event.
@@ -115,7 +105,7 @@ func (s *machineSuite) TestIsManual(c *gc.C) {
 	c.Assert(answer, jc.IsFalse)
 
 	m, err := s.State.AddOneMachine(state.MachineTemplate{
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		Jobs:       []state.MachineJob{state.JobHostUnits},
 		InstanceId: "2",
 		Nonce:      "manual:",

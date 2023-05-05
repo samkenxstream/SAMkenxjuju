@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/errors"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/state"
 	"github.com/juju/juju/state/testing"
@@ -105,7 +106,7 @@ func (s *StateSuite) TestAddRelationWithMaxLimit(c *gc.C) {
 	eps, err = s.State.InferEndpoints("wordpress", "mariadb")
 	c.Assert(err, jc.ErrorIsNil)
 	_, err = s.State.AddRelation(eps...)
-	c.Assert(err, jc.Satisfies, errors.IsQuotaLimitExceeded, gc.Commentf("expected second add-relation attempt to fail due to the limit:1 entry in the wordpress charm's metadata.yaml"))
+	c.Assert(err, jc.Satisfies, errors.IsQuotaLimitExceeded, gc.Commentf("expected second AddRelation attempt to fail due to the limit:1 entry in the wordpress charm's metadata.yaml"))
 }
 
 func (s *RelationSuite) TestRetrieveSuccess(c *gc.C) {
@@ -707,6 +708,41 @@ func (s *RelationSuite) TestRemoveAlsoDeletesRemoteOfferConnections(c *gc.C) {
 	c.Assert(rc.TotalConnectionCount(), gc.Equals, 0)
 }
 
+func (s *RelationSuite) TestRemoveAlsoDeletesSecretPermissions(c *gc.C) {
+	relation := s.Factory.MakeRelation(c, nil)
+	app, err := s.State.Application(relation.Endpoints()[0].ApplicationName)
+	c.Assert(err, jc.ErrorIsNil)
+	store := state.NewSecrets(s.State)
+	uri := secrets.NewURI()
+	cp := state.CreateSecretParams{
+		Version: 1,
+		Owner:   app.Tag(),
+		UpdateSecretParams: state.UpdateSecretParams{
+			LeaderToken: &fakeToken{},
+			Data:        map[string]string{"foo": "bar"},
+		},
+	}
+	_, err = store.CreateSecret(uri, cp)
+	c.Assert(err, jc.ErrorIsNil)
+
+	subject := names.NewApplicationTag("wordpress")
+	err = s.State.GrantSecretAccess(uri, state.SecretAccessParams{
+		LeaderToken: &fakeToken{},
+		Scope:       relation.Tag(),
+		Subject:     subject,
+		Role:        secrets.RoleView,
+	})
+	c.Assert(err, jc.ErrorIsNil)
+	access, err := s.State.SecretAccess(uri, subject)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleView)
+
+	state.RemoveRelation(c, relation, false)
+	access, err = s.State.SecretAccess(uri, subject)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(access, gc.Equals, secrets.RoleNone)
+}
+
 func (s *RelationSuite) TestRemoveNoFeatureFlag(c *gc.C) {
 	s.SetFeatureFlags( /*none*/ )
 	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
@@ -739,7 +775,7 @@ func (s *RelationSuite) TestWatchLifeSuspendedStatus(c *gc.C) {
 
 	w := rel.WatchLifeSuspendedStatus()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
+	wc := testing.NewStringsWatcherC(c, w)
 	// Initial event.
 	wc.AssertChange(rel.Tag().Id())
 	wc.AssertNoChange()
@@ -768,7 +804,7 @@ func (s *RelationSuite) TestWatchLifeSuspendedStatusDead(c *gc.C) {
 
 	w := rel.WatchLifeSuspendedStatus()
 	defer testing.AssertStop(c, w)
-	wc := testing.NewStringsWatcherC(c, s.State, w)
+	wc := testing.NewStringsWatcherC(c, w)
 	wc.AssertChange(rel.Tag().Id())
 
 	err = rel.Destroy()
@@ -797,9 +833,6 @@ func (s *RelationSuite) setupRelationStatus(c *gc.C) *state.Relation {
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	user := s.Factory.MakeUser(c, &factory.UserParams{Name: "fred", Access: permission.WriteAccess})
-	err = s.State.CreateOfferAccess(
-		names.NewApplicationOfferTag("hosted-mysql"), user.UserTag(), permission.ConsumeAccess)
-	c.Assert(err, jc.ErrorIsNil)
 	_, err = s.State.AddOfferConnection(state.AddOfferConnectionParams{
 		SourceModelUUID: utils.MustNewUUID().String(),
 		OfferUUID:       offer.OfferUUID,
@@ -865,34 +898,6 @@ func (s *RelationSuite) TestSetSuspendFalse(c *gc.C) {
 	rel, err = s.State.Relation(rel.Id())
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(rel.Suspended(), jc.IsFalse)
-}
-
-func (s *RelationSuite) TestResumeRelationNoConsumeAccess(c *gc.C) {
-	rel := s.setupRelationStatus(c)
-	err := rel.SetSuspended(true, "reason")
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.State.UpdateOfferAccess(
-		names.NewApplicationOfferTag("hosted-mysql"), names.NewUserTag("fred"), permission.ReadAccess)
-	c.Assert(err, jc.ErrorIsNil)
-	err = rel.SetSuspended(false, "")
-	c.Assert(err, gc.ErrorMatches,
-		`cannot resume relation "wordpress:db mysql:server" where user "fred" does not have consume permission`)
-}
-
-func (s *RelationSuite) TestResumeRelationNoConsumeAccessRace(c *gc.C) {
-	rel := s.setupRelationStatus(c)
-	err := rel.SetSuspended(true, "reason")
-	c.Assert(err, jc.ErrorIsNil)
-
-	defer state.SetBeforeHooks(c, s.State, func() {
-		err := s.State.UpdateOfferAccess(
-			names.NewApplicationOfferTag("hosted-mysql"), names.NewUserTag("fred"), permission.ReadAccess)
-		c.Assert(err, jc.ErrorIsNil)
-	}).Check()
-
-	err = rel.SetSuspended(false, "")
-	c.Assert(err, gc.ErrorMatches,
-		`cannot resume relation "wordpress:db mysql:server" where user "fred" does not have consume permission`)
 }
 
 func (s *RelationSuite) TestApplicationSettings(c *gc.C) {
@@ -1010,35 +1015,9 @@ func (s *RelationSuite) TestUpdateApplicationSettingsNotLeader(c *gc.C) {
 			"rendezvouse": "rendezvous",
 		},
 	)
-	c.Assert(err, gc.ErrorMatches, `relation "wordpress:db mysql:server" application "mysql": prerequisites failed: not the leader`)
+	c.Assert(err, gc.ErrorMatches,
+		`relation "wordpress:db mysql:server" application "mysql": checking leadership continuity: not the leader`)
 
-	settingsMap, err := relation.ApplicationSettings("mysql")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(settingsMap, gc.HasLen, 0)
-}
-
-func (s *RelationSuite) TestUpdateApplicationSettingsRace(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	s.AddTestingApplication(c, "mysql", s.AddTestingCharm(c, "mysql"))
-	eps, err := s.State.InferEndpoints("mysql", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	relation, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// raceToken indicates it holds leadership but yields txn.Ops that
-	// fail assertion to simulate a race in the DB, then fails on the
-	// second attempt indicating that leadership was lost.
-	var token raceToken
-	err = relation.UpdateApplicationSettings(
-		"mysql",
-		&token,
-		map[string]interface{}{
-			"rendezvouse": "rendezvous",
-		},
-	)
-	c.Assert(err, gc.ErrorMatches, `relation "wordpress:db mysql:server" application "mysql": prerequisites failed: too late`)
-
-	c.Assert(token.checkedOnce, gc.Equals, true)
 	settingsMap, err := relation.ApplicationSettings("mysql")
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(settingsMap, gc.HasLen, 0)
@@ -1057,7 +1036,7 @@ func (s *RelationSuite) TestWatchApplicationSettings(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	defer testing.AssertStop(c, w)
 
-	wc := testing.NewNotifyWatcherC(c, s.State, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	err = relation.UpdateApplicationSettings(
@@ -1091,7 +1070,7 @@ func (s *RelationSuite) TestWatchApplicationSettingsOtherEnd(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	defer testing.AssertStop(c, w)
 
-	wc := testing.NewNotifyWatcherC(c, s.State, w)
+	wc := testing.NewNotifyWatcherC(c, w)
 	wc.AssertOneChange()
 
 	// No notify if the other application's settings are changed.

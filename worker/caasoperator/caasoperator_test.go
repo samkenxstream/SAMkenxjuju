@@ -4,7 +4,6 @@
 package caasoperator_test
 
 import (
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -150,7 +149,7 @@ func (s *WorkerSuite) SetUpTest(c *gc.C) {
 	agentBinaryDir := agenttools.ToolsDir(s.config.DataDir, "application-gitlab")
 	err = os.MkdirAll(agentBinaryDir, 0755)
 	c.Assert(err, jc.ErrorIsNil)
-	err = ioutil.WriteFile(filepath.Join(s.config.DataDir, "tools", "jujud"), []byte("jujud"), 0755)
+	err = os.WriteFile(filepath.Join(s.config.DataDir, "tools", "jujud"), []byte("jujud"), 0755)
 	c.Assert(err, jc.ErrorIsNil)
 }
 
@@ -291,7 +290,7 @@ func (s *WorkerSuite) TestWorkerDownloadsCharm(c *gc.C) {
 
 	s.client.CheckCallNames(c, "Charm", "SetStatus", "SetVersion", "WatchUnits", "WatchContainerStart", "SetStatus", "Watch", "Charm", "Life")
 	s.client.CheckCall(c, 0, "Charm", "gitlab")
-	s.client.CheckCall(c, 2, "SetVersion", "gitlab", coretesting.CurrentVersion(c))
+	s.client.CheckCall(c, 2, "SetVersion", "gitlab", coretesting.CurrentVersion())
 	s.client.CheckCall(c, 3, "WatchUnits", "gitlab")
 	s.client.CheckCall(c, 4, "WatchContainerStart", "gitlab", "(?:juju-pod-init|)")
 	s.client.CheckCall(c, 6, "Watch", "gitlab")
@@ -306,7 +305,7 @@ func (s *WorkerSuite) TestWorkerDownloadsCharm(c *gc.C) {
 
 	// fakeClient.Charm returns the SHA256 sum of fakeCharmContent.
 	fakeCharmPath := filepath.Join(c.MkDir(), "fake.charm")
-	err = ioutil.WriteFile(fakeCharmPath, fakeCharmContent, 0644)
+	err = os.WriteFile(fakeCharmPath, fakeCharmContent, 0644)
 	c.Assert(err, jc.ErrorIsNil)
 	f, err := os.Open(fakeCharmPath)
 	c.Assert(err, jc.ErrorIsNil)
@@ -317,10 +316,15 @@ func (s *WorkerSuite) TestWorkerDownloadsCharm(c *gc.C) {
 	downloadRequest.Abort = nil
 	downloadRequest.Verify = nil
 	agentDir := filepath.Join(s.config.DataDir, "agents", "application-gitlab")
-	c.Assert(downloadRequest, jc.DeepEquals, downloader.Request{
-		URL:       &url.URL{Scheme: "cs", Opaque: "gitlab-1"},
-		TargetDir: filepath.Join(agentDir, "state", "bundles", "downloads"),
-	})
+	c.Assert(
+		downloadRequest,
+		jc.DeepEquals,
+		downloader.Request{
+			ArchiveSha256: fakeCharmSHA256,
+			URL:           &url.URL{Scheme: "ch", Opaque: "gitlab-1"},
+			TargetDir:     filepath.Join(agentDir, "state", "bundles", "downloads"),
+		},
+	)
 
 	// The download directory should have been removed.
 	_, err = os.Stat(downloadRequest.TargetDir)
@@ -374,7 +378,7 @@ func (s *WorkerSuite) TestWorkerSetsStatus(c *gc.C) {
 		}
 	}
 	s.client.CheckCallNames(c, "Charm", "SetStatus", "SetVersion", "WatchUnits", "WatchContainerStart", "SetStatus", "Watch")
-	s.client.CheckCall(c, 1, "SetStatus", "gitlab", status.Maintenance, "downloading charm (cs:gitlab-1)", map[string]interface{}(nil))
+	s.client.CheckCall(c, 1, "SetStatus", "gitlab", status.Maintenance, "downloading charm (ch:gitlab-1)", map[string]interface{}(nil))
 }
 
 func (s *WorkerSuite) TestWatcherFailureStopsWorker(c *gc.C) {
@@ -521,7 +525,7 @@ func (s *WorkerSuite) TestContainerStart(c *gc.C) {
 
 	s.client.CheckCallNames(c, "Charm", "SetStatus", "SetVersion", "WatchUnits", "WatchContainerStart", "SetStatus", "Watch", "Charm", "Life")
 	s.client.CheckCall(c, 0, "Charm", "gitlab")
-	s.client.CheckCall(c, 2, "SetVersion", "gitlab", coretesting.CurrentVersion(c))
+	s.client.CheckCall(c, 2, "SetVersion", "gitlab", coretesting.CurrentVersion())
 	s.client.CheckCall(c, 3, "WatchUnits", "gitlab")
 	s.client.CheckCall(c, 4, "WatchContainerStart", "gitlab", "(?:juju-pod-init|)")
 	s.client.CheckCall(c, 6, "Watch", "gitlab")
@@ -566,7 +570,7 @@ func (s *WorkerSuite) TestOperatorNoWaitContainerStart(c *gc.C) {
 
 	s.client.CheckCallNames(c, "Charm", "SetStatus", "SetVersion", "WatchUnits", "SetStatus", "Watch", "Charm", "Life")
 	s.client.CheckCall(c, 0, "Charm", "gitlab")
-	s.client.CheckCall(c, 2, "SetVersion", "gitlab", coretesting.CurrentVersion(c))
+	s.client.CheckCall(c, 2, "SetVersion", "gitlab", coretesting.CurrentVersion())
 	s.client.CheckCall(c, 3, "WatchUnits", "gitlab")
 	s.client.CheckCall(c, 5, "Watch", "gitlab")
 }

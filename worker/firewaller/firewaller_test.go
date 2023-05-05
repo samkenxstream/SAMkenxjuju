@@ -5,17 +5,17 @@ package firewaller_test
 
 import (
 	"fmt"
-	"reflect"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/charm/v9"
+	"github.com/juju/charm/v10"
 	"github.com/juju/clock"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
-	"github.com/juju/mgo/v2/txn"
+	"github.com/juju/mgo/v3/txn"
 	"github.com/juju/names/v4"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils/v3"
@@ -37,6 +37,7 @@ import (
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
+	"github.com/juju/juju/environs/models"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/provider/dummy"
 	"github.com/juju/juju/rpc/params"
@@ -53,7 +54,6 @@ const allEndpoints = ""
 // into each of the other per-mode suites.
 type firewallerBaseSuite struct {
 	jujutesting.JujuConnSuite
-	op                 <-chan dummy.Operation
 	charm              *state.Charm
 	controllerMachine  *state.Machine
 	controllerPassword string
@@ -85,7 +85,7 @@ func (s *firewallerBaseSuite) setUpTest(c *gc.C, firewallMode string) {
 
 	// Create a manager machine and login to the API.
 	var err error
-	s.controllerMachine, err = s.State.AddMachine("quantal", state.JobManageModel)
+	s.controllerMachine, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
 	c.Assert(err, jc.ErrorIsNil)
 	s.controllerPassword, err = utils.RandomPassword()
 	c.Assert(err, jc.ErrorIsNil)
@@ -108,14 +108,13 @@ func (s *firewallerBaseSuite) setUpTest(c *gc.C, firewallMode string) {
 
 // assertIngressRules retrieves the ingress rules from the provided instance
 // and compares them to the expected value.
-func (s *firewallerBaseSuite) assertIngressRules(c *gc.C, inst instances.Instance, machineId string, expected firewall.IngressRules) {
+func (s *firewallerBaseSuite) assertIngressRules(c *gc.C, inst instances.Instance, machineId string,
+	expected firewall.IngressRules) {
 	fwInst, ok := inst.(instances.InstanceFirewaller)
 	c.Assert(ok, gc.Equals, true)
 
 	start := time.Now()
 	for {
-		s.BackingState.StartSync()
-
 		// Make it more likely for the dust to have settled (there still may
 		// be rare cases where a test passes when it shouldn't if expected
 		// is nil, which is the initial value).
@@ -125,9 +124,7 @@ func (s *firewallerBaseSuite) assertIngressRules(c *gc.C, inst instances.Instanc
 		if err != nil {
 			c.Fatal(err)
 		}
-		got.Sort()
-		expected.Sort()
-		if reflect.DeepEqual(got, expected) {
+		if got.EqualTo(expected) {
 			c.Succeed()
 			return
 		}
@@ -146,14 +143,34 @@ func (s *firewallerBaseSuite) assertEnvironPorts(c *gc.C, expected firewall.Ingr
 
 	start := time.Now()
 	for {
-		s.BackingState.StartSync()
 		got, err := fwEnv.IngressRules(s.callCtx)
 		if err != nil {
 			c.Fatal(err)
 		}
-		got.Sort()
-		expected.Sort()
-		if reflect.DeepEqual(got, expected) {
+		if got.EqualTo(expected) {
+			c.Succeed()
+			return
+		}
+		if time.Since(start) > coretesting.LongWait {
+			c.Fatalf("timed out: expected %q; got %q", expected, got)
+		}
+		time.Sleep(coretesting.ShortWait)
+	}
+}
+
+// assertModelIngressRules retrieves the ingress rules from the model firewall
+// and compares them to the expected value
+func (s *firewallerBaseSuite) assertModelIngressRules(c *gc.C, expected firewall.IngressRules) {
+	fwEnv, ok := s.Environ.(models.ModelFirewaller)
+	c.Assert(ok, gc.Equals, true)
+
+	start := time.Now()
+	for {
+		got, err := fwEnv.ModelIngressRules(s.callCtx)
+		if err != nil {
+			c.Fatal(err)
+		}
+		if got.EqualTo(expected) {
 			c.Succeed()
 			return
 		}
@@ -219,8 +236,39 @@ func (s *InstanceModeSuite) newFirewallerWithClock(c *gc.C, clock clock.Clock) w
 	return s.newFirewallerWithClockAndIPV6CIDRSupport(c, clock, true)
 }
 
-func (s *InstanceModeSuite) newFirewallerWithClockAndIPV6CIDRSupport(c *gc.C, clock clock.Clock, ipv6CIDRSupport bool) worker.Worker {
+func (s *InstanceModeSuite) newFirewallerWithClockAndIPV6CIDRSupport(c *gc.C, clock clock.Clock,
+	ipv6CIDRSupport bool) worker.Worker {
 	s.clock = clock
+	fwEnv, ok := s.Environ.(environs.Firewaller)
+	c.Assert(ok, gc.Equals, true)
+
+	modelFwEnv, ok := s.Environ.(models.ModelFirewaller)
+	c.Assert(ok, gc.Equals, true)
+
+	cfg := firewaller.Config{
+		ModelUUID:              s.State.ModelUUID(),
+		Mode:                   config.FwInstance,
+		EnvironFirewaller:      fwEnv,
+		EnvironModelFirewaller: modelFwEnv,
+		EnvironInstances:       s.Environ,
+		EnvironIPV6CIDRSupport: ipv6CIDRSupport,
+		FirewallerAPI:          s.firewaller,
+		RemoteRelationsApi:     s.remoteRelations,
+		NewCrossModelFacadeFunc: func(*api.Info) (firewaller.CrossModelFirewallerFacadeCloser, error) {
+			return s.crossmodelFirewaller, nil
+		},
+		Clock:              s.clock,
+		Logger:             loggo.GetLogger("test"),
+		CredentialAPI:      s.credentialsFacade,
+		WatchMachineNotify: s.watchMachineNotify,
+	}
+	fw, err := firewaller.NewFirewaller(cfg)
+	c.Assert(err, jc.ErrorIsNil)
+	return fw
+}
+
+func (s *InstanceModeSuite) newFirewallerWithoutModelFirewaller(c *gc.C) worker.Worker {
+	s.clock = &mockClock{c: c}
 	fwEnv, ok := s.Environ.(environs.Firewaller)
 	c.Assert(ok, gc.Equals, true)
 
@@ -229,7 +277,7 @@ func (s *InstanceModeSuite) newFirewallerWithClockAndIPV6CIDRSupport(c *gc.C, cl
 		Mode:                   config.FwInstance,
 		EnvironFirewaller:      fwEnv,
 		EnvironInstances:       s.Environ,
-		EnvironIPV6CIDRSupport: ipv6CIDRSupport,
+		EnvironIPV6CIDRSupport: true,
 		FirewallerAPI:          s.firewaller,
 		RemoteRelationsApi:     s.remoteRelations,
 		NewCrossModelFacadeFunc: func(*api.Info) (firewaller.CrossModelFirewallerFacadeCloser, error) {
@@ -250,10 +298,12 @@ func (s *InstanceModeSuite) TestStartStop(c *gc.C) {
 	statetesting.AssertKillAndWait(c, fw)
 }
 
-func (s *InstanceModeSuite) TestNotExposedApplication(c *gc.C) {
-	fw := s.newFirewaller(c)
-	defer statetesting.AssertKillAndWait(c, fw)
+func (s *InstanceModeSuite) TestStartStopWithoutModelFirewaller(c *gc.C) {
+	fw := s.newFirewallerWithoutModelFirewaller(c)
+	statetesting.AssertKillAndWait(c, fw)
+}
 
+func (s *InstanceModeSuite) testNotExposedApplication(c *gc.C, fw worker.Worker) {
 	app := s.AddTestingApplication(c, "wordpress", s.charm)
 	u, m := s.addUnit(c, app)
 	inst := s.startInstance(c, m)
@@ -270,6 +320,18 @@ func (s *InstanceModeSuite) TestNotExposedApplication(c *gc.C) {
 	})
 
 	s.assertIngressRules(c, inst, m.Id(), nil)
+}
+
+func (s *InstanceModeSuite) TestNotExposedApplication(c *gc.C) {
+	fw := s.newFirewaller(c)
+	defer statetesting.AssertKillAndWait(c, fw)
+	s.testNotExposedApplication(c, fw)
+}
+
+func (s *InstanceModeSuite) TestNotExposedApplicationWithoutModelFirewaller(c *gc.C) {
+	fw := s.newFirewallerWithoutModelFirewaller(c)
+	defer statetesting.AssertKillAndWait(c, fw)
+	s.testNotExposedApplication(c, fw)
 }
 
 func (s *InstanceModeSuite) TestExposedApplication(c *gc.C) {
@@ -458,7 +520,7 @@ func (s *InstanceModeSuite) TestStartWithState(c *gc.C) {
 }
 
 func (s *InstanceModeSuite) TestStartWithPartialState(c *gc.C) {
-	m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	inst := s.startInstance(c, m)
 
@@ -489,7 +551,7 @@ func (s *InstanceModeSuite) TestStartWithPartialState(c *gc.C) {
 }
 
 func (s *InstanceModeSuite) TestStartWithUnexposedApplication(c *gc.C) {
-	m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	inst := s.startInstance(c, m)
 
@@ -539,7 +601,7 @@ func (s *InstanceModeSuite) TestStartMachineWithManualMachine(c *gc.C) {
 	assertWatching(names.NewMachineTag("0"))
 
 	_, err := s.State.AddOneMachine(state.MachineTemplate{
-		Series:     "quantal",
+		Base:       state.UbuntuBase("12.10"),
 		Jobs:       []state.MachineJob{state.JobHostUnits},
 		InstanceId: "2",
 		Nonce:      "manual:",
@@ -552,8 +614,8 @@ func (s *InstanceModeSuite) TestStartMachineWithManualMachine(c *gc.C) {
 	}
 
 	m, err := s.State.AddOneMachine(state.MachineTemplate{
-		Series: "quantal",
-		Jobs:   []state.MachineJob{state.JobHostUnits},
+		Base: state.UbuntuBase("12.10"),
+		Jobs: []state.MachineJob{state.JobHostUnits},
 	})
 	c.Assert(err, jc.ErrorIsNil)
 	assertWatching(m.MachineTag())
@@ -823,16 +885,56 @@ func (s *InstanceModeSuite) TestStartWithStateOpenPortsBroken(c *gc.C) {
 
 	errc := make(chan error, 1)
 	go func() { errc <- fw.Wait() }()
-	s.BackingState.StartSync()
 	select {
 	case err := <-errc:
 		c.Assert(err, gc.ErrorMatches,
-			`cannot respond to units changes for "machine-1": dummyInstance.OpenPorts is broken`)
+			`cannot respond to units changes for "machine-1", \"deadbeef-0bad-400d-8000-4b1d0d06f00d\": dummyInstance.OpenPorts is broken`)
 	case <-time.After(coretesting.LongWait):
 		fw.Kill()
 		fw.Wait()
 		c.Fatal("timed out waiting for firewaller to stop")
 	}
+}
+
+func (s *InstanceModeSuite) TestDefaultModelFirewall(c *gc.C) {
+	fw := s.newFirewaller(c)
+	defer statetesting.AssertKillAndWait(c, fw)
+
+	ctrlCfg, err := s.State.ControllerConfig()
+	c.Assert(err, jc.ErrorIsNil)
+	apiPort := ctrlCfg.APIPort()
+
+	s.assertModelIngressRules(c, firewall.IngressRules{
+		firewall.NewIngressRule(network.MustParsePortRange("22"), "0.0.0.0/0", "::/0"),
+		firewall.NewIngressRule(network.MustParsePortRange(strconv.Itoa(apiPort)), "0.0.0.0/0"),
+	})
+}
+
+func (s *InstanceModeSuite) TestConfigureModelFirewall(c *gc.C) {
+	fw := s.newFirewaller(c)
+	defer statetesting.AssertKillAndWait(c, fw)
+
+	model, err := s.State.Model()
+	c.Assert(err, jc.ErrorIsNil)
+
+	ctrlCfg, err := s.State.ControllerConfig()
+	c.Assert(err, jc.ErrorIsNil)
+	apiPort := ctrlCfg.APIPort()
+
+	s.assertModelIngressRules(c, firewall.IngressRules{
+		firewall.NewIngressRule(network.MustParsePortRange("22"), "0.0.0.0/0", "::/0"),
+		firewall.NewIngressRule(network.MustParsePortRange(strconv.Itoa(apiPort)), "0.0.0.0/0"),
+	})
+
+	err = model.UpdateModelConfig(map[string]interface{}{
+		config.SSHAllowKey: "192.168.0.0/24",
+	}, nil)
+	c.Assert(err, jc.ErrorIsNil)
+
+	s.assertModelIngressRules(c, firewall.IngressRules{
+		firewall.NewIngressRule(network.MustParsePortRange("22"), "192.168.0.0/24"),
+		firewall.NewIngressRule(network.MustParsePortRange(strconv.Itoa(apiPort)), "0.0.0.0/0"),
+	})
 }
 
 func (s *InstanceModeSuite) setupRemoteRelationRequirerRoleConsumingSide(
@@ -859,7 +961,8 @@ func (s *InstanceModeSuite) setupRemoteRelationRequirerRoleConsumingSide(
 	mac, err := apitesting.NewMacaroon("apimac")
 	c.Assert(err, jc.ErrorIsNil)
 	var relToken string
-	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string,
+		arg, result interface{}) error {
 		c.Check(objType, gc.Equals, "CrossModelRelations")
 		c.Check(version, gc.Equals, 0)
 		c.Check(id, gc.Equals, "")
@@ -963,7 +1066,6 @@ func (s *InstanceModeSuite) TestRemoteRelationRequirerRoleConsumingSide(c *gc.C)
 	// This will trigger the firewaller to publish the changes.
 	err := ru.EnterScope(map[string]interface{}{})
 	c.Assert(err, jc.ErrorIsNil)
-	s.BackingState.StartSync()
 	select {
 	case <-time.After(coretesting.LongWait):
 		c.Fatal("time out waiting for ingress change to be published on enter scope")
@@ -977,7 +1079,6 @@ func (s *InstanceModeSuite) TestRemoteRelationRequirerRoleConsumingSide(c *gc.C)
 	ingressRequired = false
 	err = ru.LeaveScope()
 	c.Assert(err, jc.ErrorIsNil)
-	s.BackingState.StartSync()
 	select {
 	case <-time.After(coretesting.LongWait):
 		c.Fatal("time out waiting for ingress change to be published on leave scope")
@@ -989,15 +1090,14 @@ func (s *InstanceModeSuite) TestRemoteRelationWorkerError(c *gc.C) {
 	published := make(chan bool)
 	ingressRequired := true
 	apiErr := true
-	fw, ru := s.setupRemoteRelationRequirerRoleConsumingSide(c, published, &apiErr, &ingressRequired, testclock.NewClock(time.Time{}))
+	fw, ru := s.setupRemoteRelationRequirerRoleConsumingSide(c, published, &apiErr, &ingressRequired,
+		testclock.NewClock(time.Time{}))
 	defer statetesting.AssertKillAndWait(c, fw)
 
 	// Add a unit on the consuming app and have it enter the relation scope.
 	// This will trigger the firewaller to try and publish the changes.
 	err := ru.EnterScope(map[string]interface{}{})
 	c.Assert(err, jc.ErrorIsNil)
-	s.BackingState.StartSync()
-
 	// We should not have published any ingress events yet - no changed published.
 	select {
 	case <-time.After(coretesting.ShortWait):
@@ -1039,7 +1139,8 @@ func (s *InstanceModeSuite) TestRemoteRelationProviderRoleConsumingSide(c *gc.C)
 	watched := make(chan bool)
 	var relToken string
 	callCount := int32(0)
-	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string,
+		arg, result interface{}) error {
 		switch atomic.LoadInt32(&callCount) {
 		case 0:
 			c.Check(objType, gc.Equals, "CrossModelRelations")
@@ -1126,7 +1227,8 @@ func (s *InstanceModeSuite) TestRemoteRelationIngressRejected(c *gc.C) {
 
 	published := make(chan bool)
 	done := false
-	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string,
+		arg, result interface{}) error {
 		c.Assert(result, gc.FitsTypeOf, &params.ErrorResults{})
 		*(result.(*params.ErrorResults)) = params.ErrorResults{
 			Results: []params.ErrorResult{{Error: &params.Error{Code: params.CodeForbidden, Message: "error"}}},
@@ -1176,15 +1278,13 @@ func (s *InstanceModeSuite) TestRemoteRelationIngressRejected(c *gc.C) {
 	// This will trigger the firewaller to publish the changes.
 	err = ru.EnterScope(map[string]interface{}{})
 	c.Assert(err, jc.ErrorIsNil)
-	s.BackingState.StartSync()
 	select {
 	case <-time.After(coretesting.LongWait):
 		c.Fatal("time out waiting for ingress change to be published on enter scope")
 	case <-published:
 	}
 
-	// Check that the relation status is set to error.
-	s.BackingState.StartSync()
+	// Check that the relation status is set to error
 	for attempt := coretesting.LongAttempt.Start(); attempt.Next(); {
 		relStatus, err := rel.Status()
 		c.Check(err, jc.ErrorIsNil)
@@ -1283,18 +1383,12 @@ func (s *InstanceModeSuite) TestRemoteRelationProviderRoleOffering(c *gc.C) {
 	s.assertIngressCidrs(c, []string{"10.0.0.4/16"}, []string{"10.0.0.4/16"})
 }
 
-func (s *InstanceModeSuite) TestRemoteRelationIngressFallbackToPublic(c *gc.C) {
-	var ingress []string
-	for i := 1; i < 30; i++ {
-		ingress = append(ingress, fmt.Sprintf("10.%d.0.1/32", i))
-	}
-	s.assertIngressCidrs(c, ingress, []string{"0.0.0.0/0", "::/0"})
-}
-
 func (s *InstanceModeSuite) TestRemoteRelationIngressFallbackToWhitelist(c *gc.C) {
-	fwRules := state.NewFirewallRules(s.State)
-	err := fwRules.Save(state.NewFirewallRule(firewall.JujuApplicationOfferRule, []string{"192.168.1.0/16"}))
+	m, err := s.State.Model()
 	c.Assert(err, jc.ErrorIsNil)
+	m.UpdateModelConfig(map[string]interface{}{
+		config.SAASIngressAllowKey: "192.168.1.0/16",
+	}, nil)
 	var ingress []string
 	for i := 1; i < 30; i++ {
 		ingress = append(ingress, fmt.Sprintf("10.%d.0.1/32", i))
@@ -1384,7 +1478,8 @@ func (s *InstanceModeSuite) TestExposedApplicationWithExposedEndpoints(c *gc.C) 
 		// of space-1).
 		//
 		// We expect to see port 80 use all three CIDRs as valid input sources
-		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "10.0.0.0/24", "192.168.0.0/24", "192.168.1.0/24", "42.42.0.0/16"),
+		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "10.0.0.0/24", "192.168.0.0/24", "192.168.1.0/24",
+			"42.42.0.0/16"),
 		//
 		// The 1337/{tcp,udp} ports have only been opened for the "url"
 		// endpoint and the "url" endpoint has been exposed to 192.168.{0,1}.0/24
@@ -1394,8 +1489,10 @@ func (s *InstanceModeSuite) TestExposedApplicationWithExposedEndpoints(c *gc.C) 
 		// that the expose for the wildcard ("") endpoint is ignored
 		// here as the expose settings for the "url" endpoint must
 		// supersede it.
-		firewall.NewIngressRule(network.MustParsePortRange("1337/tcp"), "192.168.0.0/24", "192.168.1.0/24", "42.42.0.0/16"),
-		firewall.NewIngressRule(network.MustParsePortRange("1337/udp"), "192.168.0.0/24", "192.168.1.0/24", "42.42.0.0/16"),
+		firewall.NewIngressRule(network.MustParsePortRange("1337/tcp"), "192.168.0.0/24", "192.168.1.0/24",
+			"42.42.0.0/16"),
+		firewall.NewIngressRule(network.MustParsePortRange("1337/udp"), "192.168.0.0/24", "192.168.1.0/24",
+			"42.42.0.0/16"),
 	})
 
 	// Change the expose settings and remove the entry for the wildcard endpoint
@@ -1408,9 +1505,12 @@ func (s *InstanceModeSuite) TestExposedApplicationWithExposedEndpoints(c *gc.C) 
 		// explicitly open as well as port 80 which is opened for ALL
 		// endpoints. These three ports should be exposed to the
 		// CIDRs used when the "url" endpoint was exposed
-		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "192.168.0.0/24", "192.168.1.0/24", "42.42.0.0/16"),
-		firewall.NewIngressRule(network.MustParsePortRange("1337/tcp"), "192.168.0.0/24", "192.168.1.0/24", "42.42.0.0/16"),
-		firewall.NewIngressRule(network.MustParsePortRange("1337/udp"), "192.168.0.0/24", "192.168.1.0/24", "42.42.0.0/16"),
+		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "192.168.0.0/24", "192.168.1.0/24",
+			"42.42.0.0/16"),
+		firewall.NewIngressRule(network.MustParsePortRange("1337/tcp"), "192.168.0.0/24", "192.168.1.0/24",
+			"42.42.0.0/16"),
+		firewall.NewIngressRule(network.MustParsePortRange("1337/udp"), "192.168.0.0/24", "192.168.1.0/24",
+			"42.42.0.0/16"),
 	})
 }
 
@@ -1645,10 +1745,14 @@ func (s *GlobalModeSuite) newFirewallerWithIPV6CIDRSupport(c *gc.C, supportIPV6C
 	fwEnv, ok := s.Environ.(environs.Firewaller)
 	c.Assert(ok, gc.Equals, true)
 
+	modelFwEnv, ok := s.Environ.(models.ModelFirewaller)
+	c.Assert(ok, gc.Equals, true)
+
 	cfg := firewaller.Config{
 		ModelUUID:              s.State.ModelUUID(),
 		Mode:                   config.FwGlobal,
 		EnvironFirewaller:      fwEnv,
+		EnvironModelFirewaller: modelFwEnv,
 		EnvironInstances:       s.Environ,
 		EnvironIPV6CIDRSupport: supportIPV6CIDRs,
 		FirewallerAPI:          s.firewaller,
@@ -1730,7 +1834,7 @@ func (s *GlobalModeSuite) TestGlobalMode(c *gc.C) {
 }
 
 func (s *GlobalModeSuite) TestStartWithUnexposedApplication(c *gc.C) {
-	m, err := s.State.AddMachine("quantal", state.JobHostUnits)
+	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
 	c.Assert(err, jc.ErrorIsNil)
 	s.startInstance(c, m)
 

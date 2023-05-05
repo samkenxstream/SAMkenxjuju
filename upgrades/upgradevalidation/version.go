@@ -11,31 +11,36 @@ import (
 
 var logger = loggo.GetLogger("juju.upgrades.validations")
 
-// MinMajorMigrateVersion defines the minimum version the model
-// must be running before migrating to the target controller.
-var MinMajorMigrateVersion = map[int]version.Number{
-	3: version.MustParse("2.9.32"),
+// MinAgentVersions defines the minimum agent version
+// allowed to make a call to a controller with the major version.
+var MinAgentVersions = map[int]version.Number{
+	3: version.MustParse("2.9.36"),
 }
+
+// MinClientVersions defines the minimum user client version
+// allowed to make a call to a controller with the major version,
+// or the minimum controller version needed to accept a call from a
+// client with the major version.
+var MinClientVersions = map[int]version.Number{
+	3: version.MustParse("2.9.36"),
+}
+
+// MinMajorMigrateVersions defines the minimum version the model
+// must be running before migrating to the target controller.
+var MinMajorMigrateVersions = MinAgentVersions
 
 // MigrateToAllowed checks if the model can be migrated to the target controller.
 func MigrateToAllowed(modelVersion, targetControllerVersion version.Number) (bool, version.Number, error) {
 	return versionCheck(
-		modelVersion, targetControllerVersion, MinMajorMigrateVersion, "migrate",
+		modelVersion, targetControllerVersion, MinMajorMigrateVersions, "migrate",
 	)
 }
 
-// MinMajorUpgradeVersion defines the minimum version all models
-// must be running before a major version upgrade.
-var MinMajorUpgradeVersion = map[int]version.Number{
-	// TODO: enable here once we fix the capped txn collection issue in juju3.
-	// 3: version.MustParse("2.9.33"),
-}
-
-// UpgradeToAllowed returns true if a major version upgrade is allowed
-// for the specified from and to versions.
-func UpgradeToAllowed(from, to version.Number) (bool, version.Number, error) {
+// UpgradeControllerAllowed returns true if a controller upgrade is allowed
+// when it hosts a model with the specified version.
+func UpgradeControllerAllowed(modelVersion, targetControllerVersion version.Number) (bool, version.Number, error) {
 	return versionCheck(
-		from, to, MinMajorUpgradeVersion, "upgrade",
+		modelVersion, targetControllerVersion, MinAgentVersions, "upgrading controller",
 	)
 }
 
@@ -53,7 +58,7 @@ func versionCheck(
 	minVer, ok := versionMap[to.Major]
 	logger.Debugf("from %q, to %q, versionMap %#v", from, to, versionMap)
 	if !ok {
-		return false, version.Number{}, errors.Errorf("cannot %s, %q is not a supported version", operation, to)
+		return false, version.Number{}, errors.Errorf("%s to %q is not supported from %q", operation, to, from)
 	}
 	// Allow upgrades from rc etc.
 	from.Tag = ""

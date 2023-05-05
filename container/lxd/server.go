@@ -11,33 +11,12 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/utils/v3/arch"
 	lxd "github.com/lxc/lxd/client"
-	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
-
-	"github.com/juju/juju/core/os"
 )
-
-// osSupport is the list of operating system types for which Juju supports
-// communicating with LXD via a local socket, by default.
-var osSupport = []os.OSType{os.Ubuntu}
-
-// HasSupport returns true if the current OS supports LXD containers by
-// default
-func HasSupport() bool {
-	t := os.HostOS()
-	for _, v := range osSupport {
-		if v == t {
-			return true
-		}
-	}
-	return false
-}
-
-//go:generate go run github.com/golang/mock/mockgen -package mocks -destination mocks/clock_mock.go github.com/juju/clock Clock
 
 // Server extends the upstream LXD container server.
 type Server struct {
-	lxd.ContainerServer
+	lxd.InstanceServer
 
 	name              string
 	clustered         bool
@@ -53,17 +32,6 @@ type Server struct {
 	localBridgeName string
 
 	clock clock.Clock
-}
-
-// MaybeNewLocalServer returns a Server based on a local socket connection,
-// if running on an OS supporting LXD containers by default.
-// Otherwise a nil server is returned.
-func MaybeNewLocalServer() (*Server, error) {
-	if !HasSupport() {
-		return nil, nil
-	}
-	svr, err := NewLocalServer()
-	return svr, errors.Trace(err)
 }
 
 // NewLocalServer returns a Server based on a local socket connection.
@@ -95,7 +63,7 @@ func NewRemoteServer(spec ServerSpec) (*Server, error) {
 
 // NewServer builds and returns a Server for high-level interaction with the
 // input LXD container server.
-func NewServer(svr lxd.ContainerServer) (*Server, error) {
+func NewServer(svr lxd.InstanceServer) (*Server, error) {
 	info, _, err := svr.GetServer()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -124,15 +92,15 @@ func NewServer(svr lxd.ContainerServer) (*Server, error) {
 	}
 
 	return &Server{
-		ContainerServer:   svr,
+		InstanceServer:    svr,
 		name:              name,
 		clustered:         clustered,
 		serverCertificate: serverCertificate,
 		hostArch:          hostArch,
 		supportedArches:   supportedArches,
-		networkAPISupport: shared.StringInSlice("network", apiExt),
-		clusterAPISupport: shared.StringInSlice("clustering", apiExt),
-		storageAPISupport: shared.StringInSlice("storage", apiExt),
+		networkAPISupport: inSlice("network", apiExt),
+		clusterAPISupport: inSlice("clustering", apiExt),
+		storageAPISupport: inSlice("storage", apiExt),
 		serverVersion:     info.Environment.ServerVersion,
 		clock:             clock.WallClock,
 	}, nil
@@ -165,7 +133,7 @@ func (s *Server) UpdateServerConfig(cfg map[string]string) error {
 // UpdateContainerConfig updates the configuration for the container with the
 // input name, using the input values.
 func (s *Server) UpdateContainerConfig(name string, cfg map[string]string) error {
-	container, eTag, err := s.GetContainer(name)
+	container, eTag, err := s.GetInstance(name)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -176,7 +144,7 @@ func (s *Server) UpdateContainerConfig(name string, cfg map[string]string) error
 		container.Config[k] = v
 	}
 
-	resp, err := s.UpdateContainer(name, container.Writable(), eTag)
+	resp, err := s.UpdateInstance(name, container.Writable(), eTag)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -186,7 +154,7 @@ func (s *Server) UpdateContainerConfig(name string, cfg map[string]string) error
 // GetContainerProfiles returns the list of profiles that are associated with a
 // container.
 func (s *Server) GetContainerProfiles(name string) ([]string, error) {
-	container, _, err := s.GetContainer(name)
+	container, _, err := s.GetInstance(name)
 	if err != nil {
 		return []string{}, errors.Trace(err)
 	}
@@ -196,7 +164,7 @@ func (s *Server) GetContainerProfiles(name string) ([]string, error) {
 // UseProject ensures that this server will use the input project.
 // See: https://linuxcontainers.org/lxd/docs/master/projects.
 func (s *Server) UseProject(project string) {
-	s.ContainerServer = s.ContainerServer.UseProject(project)
+	s.InstanceServer = s.InstanceServer.UseProject(project)
 }
 
 // ReplaceOrAddContainerProfile updates the profiles for the container with the
@@ -205,14 +173,14 @@ func (s *Server) UseProject(project string) {
 // remove when provisioner_task processProfileChanges() is
 // removed.
 func (s *Server) ReplaceOrAddContainerProfile(name, oldProfile, newProfile string) error {
-	container, eTag, err := s.GetContainer(name)
+	container, eTag, err := s.GetInstance(name)
 	if err != nil {
 		return errors.Trace(errors.Annotatef(err, "failed to get container %q", name))
 	}
 	profiles := addRemoveReplaceProfileName(container.Profiles, oldProfile, newProfile)
 
 	container.Profiles = profiles
-	resp, err := s.UpdateContainer(name, container.Writable(), eTag)
+	resp, err := s.UpdateInstance(name, container.Writable(), eTag)
 	if err != nil {
 		return errors.Trace(errors.Annotatef(err, "failed to updated container %q", name))
 	}
@@ -251,13 +219,13 @@ func addRemoveReplaceProfileName(profiles []string, oldProfile, newProfile strin
 // named container.  It is assumed the profiles have all been added to
 // the server before hand.
 func (s *Server) UpdateContainerProfiles(name string, profiles []string) error {
-	container, eTag, err := s.GetContainer(name)
+	container, eTag, err := s.GetInstance(name)
 	if err != nil {
 		return errors.Trace(errors.Annotatef(err, "failed to get %q", name))
 	}
 
 	container.Profiles = profiles
-	resp, err := s.UpdateContainer(name, container.Writable(), eTag)
+	resp, err := s.UpdateInstance(name, container.Writable(), eTag)
 	if err != nil {
 		return errors.Trace(errors.Annotatef(err, "failed to update %q with profiles", name))
 	}
@@ -345,4 +313,13 @@ func IsLXDAlreadyExists(err error) bool {
 	}
 
 	return strings.Contains(strings.ToLower(err.Error()), "already exists")
+}
+
+func inSlice[T comparable](key T, list []T) bool {
+	for _, entry := range list {
+		if entry == key {
+			return true
+		}
+	}
+	return false
 }

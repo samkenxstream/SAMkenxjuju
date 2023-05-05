@@ -9,6 +9,7 @@ import (
 	stdtesting "testing"
 	"time"
 
+	"github.com/juju/collections/set"
 	"github.com/juju/loggo"
 	"github.com/juju/proxy"
 	"github.com/juju/schema"
@@ -16,10 +17,11 @@ import (
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/version/v2"
 	gc "gopkg.in/check.v1"
-	environschema "gopkg.in/juju/environschema.v1"
+	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/charmhub"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/feature"
 	"github.com/juju/juju/juju/osenv"
 	"github.com/juju/juju/testing"
 	jujuversion "github.com/juju/juju/version"
@@ -36,6 +38,7 @@ type ConfigSuite struct {
 var _ = gc.Suite(&ConfigSuite{})
 
 func (s *ConfigSuite) SetUpTest(c *gc.C) {
+	s.SetInitialFeatureFlags(feature.DeveloperMode)
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	// Make sure that the defaults are used, which
 	// is <root>=WARNING
@@ -53,12 +56,13 @@ var sampleConfig = testing.Attrs{
 	"unknown":                    "my-unknown",
 	"ssl-hostname-verification":  true,
 	"development":                false,
-	"default-series":             jujuversion.DefaultSupportedLTS(),
+	"default-base":               jujuversion.DefaultSupportedLTSBase().String(),
 	"disable-network-management": false,
 	"ignore-machine-addresses":   false,
 	"automatically-retry-hooks":  true,
 	"proxy-ssh":                  false,
 	"resource-tags":              []string{},
+	"secret-backend":             "auto",
 }
 
 type configTest struct {
@@ -103,11 +107,25 @@ var configTests = []configTest{
 			"container-image-metadata-url": "container-image-metadata-url-value",
 		}),
 	}, {
-		about:       "Explicit series",
+		about:       "Explicit base",
 		useDefaults: config.UseDefaults,
 		attrs: minimalConfigAttrs.Merge(testing.Attrs{
-			"default-series": "my-series",
+			"default-base": "ubuntu@20.04",
 		}),
+	}, {
+		about:       "old base",
+		useDefaults: config.UseDefaults,
+		attrs: minimalConfigAttrs.Merge(testing.Attrs{
+			"default-base": "ubuntu@18.04",
+		}),
+		err: `base "ubuntu@18.04" not supported`,
+	}, {
+		about:       "bad base",
+		useDefaults: config.UseDefaults,
+		attrs: minimalConfigAttrs.Merge(testing.Attrs{
+			"default-base": "my-series",
+		}),
+		err: `invalid default base "my-series": expected base string to contain os and channel separated by '@'`,
 	}, {
 		about:       "Explicit logging",
 		useDefaults: config.UseDefaults,
@@ -379,6 +397,18 @@ var configTests = []configTest{
 		}),
 		err: `unknown severity level "bar"`,
 	}, {
+		about:       "compatible with older empty, now mandatory",
+		useDefaults: config.NoDefaults,
+		attrs: sampleConfig.Merge(testing.Attrs{
+			"secret-backend": "",
+		}),
+	}, {
+		about:       "compatible with older missing, now mandatory",
+		useDefaults: config.NoDefaults,
+		attrs: minimalConfigAttrs.Merge(testing.Attrs{
+			"resource-tags": []string{},
+		}),
+	}, {
 		about:       "Sample configuration",
 		useDefaults: config.UseDefaults,
 		attrs:       sampleConfig,
@@ -395,7 +425,8 @@ var configTests = []configTest{
 			"ssl-hostname-verification":  true,
 			"authorized-keys":            "ssh-rsa mykeys rog@rog-x220\n",
 			"region":                     "us-east-1",
-			"default-series":             "precise",
+			"default-series":             "focal",
+			"default-base":               "ubuntu@20.04",
 			"secret-key":                 "a-secret-key",
 			"access-key":                 "an-access-key",
 			"agent-version":              "1.13.2",
@@ -407,6 +438,7 @@ var configTests = []configTest{
 			"resource-tags":              []string{},
 			"type":                       "ec2",
 			"uuid":                       testing.ModelTag.Id(),
+			"secret-backend":             "auto",
 		},
 	}, {
 		about:       "TestMode flag specified",
@@ -622,6 +654,20 @@ var configTests = []configTest{
 			"charmhub-url": "meshuggah",
 		}),
 		err: `charm-hub url "meshuggah" not valid`,
+	}, {
+		about:       "Invalid ssh-allow cidr",
+		useDefaults: config.UseDefaults,
+		attrs: minimalConfigAttrs.Merge(testing.Attrs{
+			"ssh-allow": "blah",
+		}),
+		err: `cidr "blah" not valid`,
+	}, {
+		about:       "Invalid saas-ingress-allow cidr",
+		useDefaults: config.UseDefaults,
+		attrs: minimalConfigAttrs.Merge(testing.Attrs{
+			"saas-ingress-allow": "blah",
+		}),
+		err: `cidr "blah" not valid`,
 	},
 }
 
@@ -636,11 +682,11 @@ func (s *ConfigSuite) TestConfig(c *gc.C) {
 	s.FakeHomeSuite.Home.AddFiles(c, files...)
 	for i, test := range configTests {
 		c.Logf("test %d. %s", i, test.about)
-		test.check(c, s.FakeHomeSuite.Home)
+		test.check(c)
 	}
 }
 
-func (test configTest) check(c *gc.C, home *jujutesting.FakeHome) {
+func (test configTest) check(c *gc.C) {
 	cfg, err := config.New(test.useDefaults, test.attrs)
 	if test.err != "" {
 		c.Check(cfg, gc.IsNil)
@@ -674,13 +720,14 @@ func (test configTest) check(c *gc.C, home *jujutesting.FakeHome) {
 	dev, _ := test.attrs["development"].(bool)
 	c.Assert(cfg.Development(), gc.Equals, dev)
 
-	seriesAttr, _ := test.attrs["default-series"].(string)
-	defaultSeries, ok := cfg.DefaultSeries()
-	c.Assert(ok, jc.IsTrue)
-	if seriesAttr != "" {
-		c.Assert(defaultSeries, gc.Equals, seriesAttr)
+	baseAttr, _ := test.attrs["default-base"].(string)
+	defaultBase, ok := cfg.DefaultBase()
+	if baseAttr != "" {
+		c.Assert(ok, jc.IsTrue)
+		c.Assert(defaultBase, gc.Equals, baseAttr)
 	} else {
-		c.Assert(defaultSeries, gc.Equals, jujuversion.DefaultSupportedLTS())
+		c.Assert(ok, jc.IsFalse)
+		c.Assert(defaultBase, gc.Equals, "")
 	}
 
 	if m, _ := test.attrs["firewall-mode"].(string); m != "" {
@@ -830,13 +877,14 @@ func (s *ConfigSuite) TestConfigAttrs(c *gc.C) {
 		"firewall-mode":              config.FwInstance,
 		"unknown":                    "my-unknown",
 		"ssl-hostname-verification":  true,
-		"default-series":             jujuversion.DefaultSupportedLTS(),
+		"default-base":               jujuversion.DefaultSupportedLTSBase().String(),
 		"disable-network-management": false,
 		"ignore-machine-addresses":   false,
 		"automatically-retry-hooks":  true,
 		"proxy-ssh":                  false,
 		"development":                false,
 		"test-mode":                  false,
+		"secret-backend":             "auto",
 	}
 	cfg, err := config.New(config.NoDefaults, attrs)
 	c.Assert(err, jc.ErrorIsNil)
@@ -1209,17 +1257,57 @@ func (s *ConfigSuite) TestCharmHubURL(c *gc.C) {
 }
 
 func (s *ConfigSuite) TestMode(c *gc.C) {
-	config := newTestConfig(c, testing.Attrs{})
-	mode, ok := config.Mode()
-	c.Assert(ok, jc.IsFalse)
-	c.Assert(mode, gc.DeepEquals, []string{})
-
-	config = newTestConfig(c, testing.Attrs{
-		"mode": "strict",
-	})
-	mode, ok = config.Mode()
+	cfg := newTestConfig(c, testing.Attrs{})
+	mode, ok := cfg.Mode()
 	c.Assert(ok, jc.IsTrue)
-	c.Assert(mode, gc.DeepEquals, []string{"strict"})
+	c.Assert(mode, gc.DeepEquals, set.NewStrings(config.RequiresPromptsMode))
+
+	cfg = newTestConfig(c, testing.Attrs{
+		config.ModeKey: "",
+	})
+	mode, ok = cfg.Mode()
+	c.Assert(ok, jc.IsFalse)
+	c.Assert(mode, gc.DeepEquals, set.NewStrings())
+}
+
+func (s *ConfigSuite) TestSSHAllow(c *gc.C) {
+	cfg := newTestConfig(c, testing.Attrs{})
+	allowlist := cfg.SSHAllow()
+	c.Assert(allowlist, gc.DeepEquals, []string{"0.0.0.0/0", "::/0"})
+
+	cfg = newTestConfig(c, testing.Attrs{
+		config.SSHAllowKey: "192.168.0.0/24,192.168.2.0/24",
+	})
+	allowlist = cfg.SSHAllow()
+	c.Assert(allowlist, gc.HasLen, 2)
+	c.Assert(allowlist[0], gc.Equals, "192.168.0.0/24")
+	c.Assert(allowlist[1], gc.Equals, "192.168.2.0/24")
+
+	cfg = newTestConfig(c, testing.Attrs{
+		config.SSHAllowKey: "",
+	})
+	allowlist = cfg.SSHAllow()
+	c.Assert(allowlist, gc.HasLen, 0)
+}
+
+func (s *ConfigSuite) TestApplicationOfferAllowList(c *gc.C) {
+	cfg := newTestConfig(c, testing.Attrs{})
+	allowlist := cfg.SAASIngressAllow()
+	c.Assert(allowlist, gc.DeepEquals, []string{"0.0.0.0/0", "::/0"})
+
+	cfg = newTestConfig(c, testing.Attrs{
+		config.SAASIngressAllowKey: "192.168.0.0/24,192.168.2.0/24",
+	})
+	allowlist = cfg.SAASIngressAllow()
+	c.Assert(allowlist, gc.HasLen, 2)
+	c.Assert(allowlist[0], gc.Equals, "192.168.0.0/24")
+	c.Assert(allowlist[1], gc.Equals, "192.168.2.0/24")
+
+	attrs := testing.FakeConfig().Merge(testing.Attrs{
+		config.SAASIngressAllowKey: "",
+	})
+	_, err := config.New(config.UseDefaults, attrs)
+	c.Assert(err, gc.ErrorMatches, "empty cidrs not valid")
 }
 
 func (s *ConfigSuite) TestLoggingOutput(c *gc.C) {
@@ -1583,7 +1671,7 @@ func (s *ConfigSuite) TestTelemetryConfigDoesNotExist(c *gc.C) {
 		"uuid": testing.ModelTag.Id(),
 	}
 
-	cfg, err := config.New(config.NoDefaults, final)
+	cfg, err := config.New(config.UseDefaults, final)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(cfg.Telemetry(), jc.IsTrue)
 }
